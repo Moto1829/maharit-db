@@ -59,3 +59,7 @@ path = "examples/io.rs"
 [[example]]
 name = "visualization"
 path = "examples/visualization.rs"
+
+[[example]]
+name = "algorithms"
+path = "examples/algorithms.rs"

@@ -1,8 +1,14 @@
+pub mod algorithms;
 mod graph;
 mod index;
 mod property;
 pub mod traversal;
 
+pub use algorithms::{
+    betweenness_centrality, closeness_centrality, connected_components, find_cycles, has_cycle,
+    pagerank, strongly_connected_components, topological_sort, DegreeCentrality, PageRankConfig,
+    PageRankResult,
+};
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;
 pub use property::PropertyValue;
