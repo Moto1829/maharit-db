@@ -26,7 +26,7 @@
 ### RETURN実行
 - [x] 変数の返却: `RETURN n`
 - [x] プロパティの返却: `RETURN n.name, n.age`
-- [ ] 集計関数: `COUNT()`, `SUM()`, `AVG()`
+- [x] 集計関数: `COUNT()`, `SUM()`, `AVG()`, `MIN()`, `MAX()`, `COLLECT()`
 
 ### DELETE実行
 - [x] ノード削除: `DELETE n`

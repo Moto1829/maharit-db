@@ -115,6 +115,25 @@ pub enum ReturnItem {
     Property(String, String),
     /// 全プロパティ: RETURN *
     All,
+    /// 集計関数: RETURN COUNT(n)
+    Aggregate(AggregateFunction),
+}
+
+/// 集計関数
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateFunction {
+    /// COUNT(expr) or COUNT(*)
+    Count(Option<Box<ReturnItem>>),
+    /// SUM(expr)
+    Sum(Box<ReturnItem>),
+    /// AVG(expr)
+    Avg(Box<ReturnItem>),
+    /// MIN(expr)
+    Min(Box<ReturnItem>),
+    /// MAX(expr)
+    Max(Box<ReturnItem>),
+    /// COLLECT(expr)
+    Collect(Box<ReturnItem>),
 }
 
 /// 式

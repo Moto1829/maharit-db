@@ -186,6 +186,11 @@ impl Parser {
 
         let var = self.expect_ident()?;
 
+        // Check if it's a function call (identifier followed by parenthesis)
+        if self.check(TokenKind::LParen) {
+            return self.parse_aggregate_function(&var);
+        }
+
         if self.check(TokenKind::Dot) {
             self.advance();
             let prop = self.expect_ident()?;
@@ -193,6 +198,81 @@ impl Parser {
         } else {
             Ok(ReturnItem::Variable(var))
         }
+    }
+
+    fn parse_aggregate_function(&mut self, func_name: &str) -> Result<ReturnItem, ParseError> {
+        self.expect(TokenKind::LParen)?;
+
+        let inner = if self.check(TokenKind::Star) {
+            self.advance();
+            None // COUNT(*)
+        } else if self.check(TokenKind::RParen) {
+            None // Empty, will error for non-count
+        } else {
+            Some(Box::new(self.parse_return_item()?))
+        };
+
+        self.expect(TokenKind::RParen)?;
+
+        let aggregate = match func_name.to_uppercase().as_str() {
+            "COUNT" => AggregateFunction::Count(inner),
+            "SUM" => {
+                let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "expression".to_string(),
+                    found: ")".to_string(),
+                    span: self.current_span(),
+                })?;
+                AggregateFunction::Sum(inner)
+            }
+            "AVG" => {
+                let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "expression".to_string(),
+                    found: ")".to_string(),
+                    span: self.current_span(),
+                })?;
+                AggregateFunction::Avg(inner)
+            }
+            "MIN" => {
+                let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "expression".to_string(),
+                    found: ")".to_string(),
+                    span: self.current_span(),
+                })?;
+                AggregateFunction::Min(inner)
+            }
+            "MAX" => {
+                let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "expression".to_string(),
+                    found: ")".to_string(),
+                    span: self.current_span(),
+                })?;
+                AggregateFunction::Max(inner)
+            }
+            "COLLECT" => {
+                let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "expression".to_string(),
+                    found: ")".to_string(),
+                    span: self.current_span(),
+                })?;
+                AggregateFunction::Collect(inner)
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "aggregate function (COUNT, SUM, AVG, MIN, MAX, COLLECT)".to_string(),
+                    found: func_name.to_string(),
+                    span: self.current_span(),
+                })
+            }
+        };
+
+        Ok(ReturnItem::Aggregate(aggregate))
+    }
+
+    fn current_span(&self) -> Span {
+        self.tokens
+            .get(self.pos)
+            .map(|t| t.span)
+            .unwrap_or_default()
     }
 
     // ========== Pattern ==========

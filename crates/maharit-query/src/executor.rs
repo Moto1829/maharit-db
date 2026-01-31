@@ -535,15 +535,20 @@ impl<'a> Executor<'a> {
         return_clause: &ReturnClause,
         bindings_list: &[Bindings],
     ) -> Result<ResultSet, ExecuteError> {
+        // Check if any aggregation is present
+        let has_aggregation = return_clause.items.iter().any(|item| {
+            matches!(item, ReturnItem::Aggregate(_))
+        });
+
+        if has_aggregation {
+            return self.build_aggregated_result_set(return_clause, bindings_list);
+        }
+
         // Build column names
         let columns: Vec<String> = return_clause
             .items
             .iter()
-            .map(|item| match item {
-                ReturnItem::Variable(v) => v.clone(),
-                ReturnItem::Property(v, p) => format!("{}.{}", v, p),
-                ReturnItem::All => "*".to_string(),
-            })
+            .map(|item| self.return_item_to_column_name(item))
             .collect();
 
         // Build rows
@@ -553,56 +558,233 @@ impl<'a> Executor<'a> {
             let mut row_values = Vec::new();
 
             for item in &return_clause.items {
-                match item {
-                    ReturnItem::Variable(var) => {
-                        if let Some(&node_id) = bindings.get(var) {
-                            if let Some(node) = self.graph.get_node(node_id) {
-                                row_values.push(Value::NodeData {
-                                    id: node_id,
-                                    label: node.label.clone(),
-                                    properties: node.properties.clone(),
-                                });
-                            } else {
-                                row_values.push(Value::Node(node_id));
-                            }
-                        } else {
-                            row_values.push(Value::Null);
-                        }
-                    }
-                    ReturnItem::Property(var, prop) => {
-                        if let Some(&node_id) = bindings.get(var) {
-                            if let Some(node) = self.graph.get_node(node_id) {
-                                if let Some(value) = node.get_property(prop) {
-                                    row_values.push(Value::from(value));
-                                } else {
-                                    row_values.push(Value::Null);
-                                }
-                            } else {
-                                row_values.push(Value::Null);
-                            }
-                        } else {
-                            row_values.push(Value::Null);
-                        }
-                    }
-                    ReturnItem::All => {
-                        // For *, we return all bound variables
-                        for (_var, &node_id) in bindings {
-                            if let Some(node) = self.graph.get_node(node_id) {
-                                row_values.push(Value::NodeData {
-                                    id: node_id,
-                                    label: node.label.clone(),
-                                    properties: node.properties.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
+                row_values.push(self.evaluate_return_item(item, bindings)?);
             }
 
             rows.push(Row { columns: row_values });
         }
 
         Ok(ResultSet::new(columns, rows))
+    }
+
+    fn return_item_to_column_name(&self, item: &ReturnItem) -> String {
+        match item {
+            ReturnItem::Variable(v) => v.clone(),
+            ReturnItem::Property(v, p) => format!("{}.{}", v, p),
+            ReturnItem::All => "*".to_string(),
+            ReturnItem::Aggregate(agg) => match agg {
+                AggregateFunction::Count(_) => "COUNT(*)".to_string(),
+                AggregateFunction::Sum(inner) => format!("SUM({})", self.return_item_to_column_name(inner)),
+                AggregateFunction::Avg(inner) => format!("AVG({})", self.return_item_to_column_name(inner)),
+                AggregateFunction::Min(inner) => format!("MIN({})", self.return_item_to_column_name(inner)),
+                AggregateFunction::Max(inner) => format!("MAX({})", self.return_item_to_column_name(inner)),
+                AggregateFunction::Collect(inner) => format!("COLLECT({})", self.return_item_to_column_name(inner)),
+            },
+        }
+    }
+
+    fn evaluate_return_item(&self, item: &ReturnItem, bindings: &Bindings) -> Result<Value, ExecuteError> {
+        match item {
+            ReturnItem::Variable(var) => {
+                if let Some(&node_id) = bindings.get(var) {
+                    if let Some(node) = self.graph.get_node(node_id) {
+                        Ok(Value::NodeData {
+                            id: node_id,
+                            label: node.label.clone(),
+                            properties: node.properties.clone(),
+                        })
+                    } else {
+                        Ok(Value::Node(node_id))
+                    }
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            ReturnItem::Property(var, prop) => {
+                if let Some(&node_id) = bindings.get(var) {
+                    if let Some(node) = self.graph.get_node(node_id) {
+                        if let Some(value) = node.get_property(prop) {
+                            Ok(Value::from(value))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    } else {
+                        Ok(Value::Null)
+                    }
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            ReturnItem::All => {
+                // For *, we return the first bound variable
+                for (_var, &node_id) in bindings {
+                    if let Some(node) = self.graph.get_node(node_id) {
+                        return Ok(Value::NodeData {
+                            id: node_id,
+                            label: node.label.clone(),
+                            properties: node.properties.clone(),
+                        });
+                    }
+                }
+                Ok(Value::Null)
+            }
+            ReturnItem::Aggregate(_) => {
+                // Aggregates are handled separately
+                Ok(Value::Null)
+            }
+        }
+    }
+
+    fn build_aggregated_result_set(
+        &self,
+        return_clause: &ReturnClause,
+        bindings_list: &[Bindings],
+    ) -> Result<ResultSet, ExecuteError> {
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(|item| self.return_item_to_column_name(item))
+            .collect();
+
+        let mut row_values = Vec::new();
+
+        for item in &return_clause.items {
+            let value = self.evaluate_aggregate(item, bindings_list)?;
+            row_values.push(value);
+        }
+
+        let rows = vec![Row { columns: row_values }];
+        Ok(ResultSet::new(columns, rows))
+    }
+
+    fn evaluate_aggregate(
+        &self,
+        item: &ReturnItem,
+        bindings_list: &[Bindings],
+    ) -> Result<Value, ExecuteError> {
+        match item {
+            ReturnItem::Aggregate(agg) => match agg {
+                AggregateFunction::Count(inner) => {
+                    if inner.is_none() {
+                        // COUNT(*)
+                        Ok(Value::Int(bindings_list.len() as i64))
+                    } else {
+                        // COUNT(expr) - count non-null values
+                        let inner = inner.as_ref().unwrap();
+                        let count = bindings_list
+                            .iter()
+                            .filter(|bindings| {
+                                self.evaluate_return_item(inner, bindings)
+                                    .map(|v| !matches!(v, Value::Null))
+                                    .unwrap_or(false)
+                            })
+                            .count();
+                        Ok(Value::Int(count as i64))
+                    }
+                }
+                AggregateFunction::Sum(inner) => {
+                    let mut sum = 0.0;
+                    let mut has_float = false;
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => sum += n as f64,
+                            Value::Float(n) => {
+                                sum += n;
+                                has_float = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if has_float {
+                        Ok(Value::Float(sum))
+                    } else {
+                        Ok(Value::Int(sum as i64))
+                    }
+                }
+                AggregateFunction::Avg(inner) => {
+                    let mut sum = 0.0;
+                    let mut count = 0;
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => {
+                                sum += n as f64;
+                                count += 1;
+                            }
+                            Value::Float(n) => {
+                                sum += n;
+                                count += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if count == 0 {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(Value::Float(sum / count as f64))
+                    }
+                }
+                AggregateFunction::Min(inner) => {
+                    let mut min: Option<Value> = None;
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        min = Some(match min {
+                            None => val,
+                            Some(current) => {
+                                if self.compare_values(&val, &current, |o| o.is_lt()).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false) {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(min.unwrap_or(Value::Null))
+                }
+                AggregateFunction::Max(inner) => {
+                    let mut max: Option<Value> = None;
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        max = Some(match max {
+                            None => val,
+                            Some(current) => {
+                                if self.compare_values(&val, &current, |o| o.is_gt()).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false) {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(max.unwrap_or(Value::Null))
+                }
+                AggregateFunction::Collect(inner) => {
+                    let collected: Vec<String> = bindings_list
+                        .iter()
+                        .filter_map(|bindings| {
+                            self.evaluate_return_item(inner, bindings)
+                                .ok()
+                                .filter(|v| !matches!(v, Value::Null))
+                                .map(|v| format!("{}", v))
+                        })
+                        .collect();
+                    Ok(Value::String(format!("[{}]", collected.join(", "))))
+                }
+            },
+            // Non-aggregate items in an aggregated query just use the first binding
+            _ => {
+                if let Some(bindings) = bindings_list.first() {
+                    self.evaluate_return_item(item, bindings)
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+        }
     }
 
     fn evaluate_expression(
@@ -829,5 +1011,70 @@ mod tests {
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
         assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_count_star() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie"})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN COUNT(*)").unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_count_variable() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN COUNT(n)").unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2));
+    }
+
+    #[test]
+    fn test_sum() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN SUM(n.age)").unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(90));
+    }
+
+    #[test]
+    fn test_avg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN AVG(n.age)").unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Float(30.0));
+    }
+
+    #[test]
+    fn test_min_max() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        let min_result = execute(&mut graph, "MATCH (n:Person) RETURN MIN(n.age)").unwrap();
+        let max_result = execute(&mut graph, "MATCH (n:Person) RETURN MAX(n.age)").unwrap();
+
+        assert_eq!(min_result.rows[0].columns[0], Value::Int(25));
+        assert_eq!(max_result.rows[0].columns[0], Value::Int(35));
     }
 }
