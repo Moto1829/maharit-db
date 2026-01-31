@@ -1,4 +1,5 @@
 services:
+  # REPL mode (interactive)
   maharit:
     build:
       context: .
@@ -11,15 +12,20 @@ services:
     # Interactive mode for REPL
     stdin_open: true
     tty: true
-    # Uncomment when TCP server is implemented
-    # ports:
-    #   - "7687:7687"
-    # healthcheck:
-    #   test: ["CMD", "/app/maharit", "--health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
+
+  # Server mode (TCP server)
+  maharit-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: maharit-db-server
+    command: ["server", "--host", "0.0.0.0", "--port", "7687"]
+    volumes:
+      - maharit-data:/data
+    environment:
+      - MAHARIT_DATA_DIR=/data
+    ports:
+      - "7687:7687"
 
 volumes:
   maharit-data:
