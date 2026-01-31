@@ -1,11 +1,41 @@
+use std::hash::{Hash, Hasher};
+
 /// プロパティの値を表す列挙型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum PropertyValue {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
     String(String),
+}
+
+impl PartialEq for PropertyValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyValue::Null, PropertyValue::Null) => true,
+            (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
+            (PropertyValue::Int(a), PropertyValue::Int(b)) => a == b,
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => a.to_bits() == b.to_bits(),
+            (PropertyValue::String(a), PropertyValue::String(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PropertyValue {}
+
+impl Hash for PropertyValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            PropertyValue::Null => {}
+            PropertyValue::Bool(v) => v.hash(state),
+            PropertyValue::Int(v) => v.hash(state),
+            PropertyValue::Float(v) => v.to_bits().hash(state),
+            PropertyValue::String(v) => v.hash(state),
+        }
+    }
 }
 
 impl From<bool> for PropertyValue {
