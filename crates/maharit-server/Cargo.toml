@@ -14,3 +14,4 @@ maharit-core.workspace = true
 maharit-storage.workspace = true
 maharit-query.workspace = true
 rustyline.workspace = true
+colored.workspace = true

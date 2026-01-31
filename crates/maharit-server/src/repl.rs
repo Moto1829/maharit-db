@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use colored::Colorize;
 use maharit_core::Graph;
 use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
@@ -104,7 +105,7 @@ impl Repl {
                     break;
                 }
                 Err(err) => {
-                    eprintln!("Error: {:?}", err);
+                    eprintln!("{}: {:?}", "Error".red().bold(), err);
                     break;
                 }
             }
@@ -117,8 +118,12 @@ impl Repl {
     }
 
     fn print_welcome(&self) {
-        println!("MaharitDB - Graph Database v{}", env!("CARGO_PKG_VERSION"));
-        println!("Type :help for available commands");
+        println!(
+            "{} - Graph Database v{}",
+            "MaharitDB".green().bold(),
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("Type {} for available commands", ":help".cyan());
         println!();
     }
 
@@ -164,8 +169,8 @@ impl Repl {
                 true
             }
             Some(cmd) => {
-                println!("Unknown command: {}", cmd);
-                println!("Type :help for available commands");
+                println!("{}: {}", "Unknown command".yellow(), cmd);
+                println!("Type {} for available commands", ":help".cyan());
                 true
             }
             None => true,
@@ -246,7 +251,7 @@ impl Repl {
                 }
             }
             Err(e) => {
-                println!("Lexer error: {}", e);
+                println!("{}: {}", "Lexer error".red().bold(), e);
             }
         }
     }
@@ -259,12 +264,12 @@ impl Repl {
             Ok(mut parser) => match parser.parse() {
                 Ok(stmt) => stmt,
                 Err(e) => {
-                    println!("Parse error: {}", e);
+                    println!("{}: {}", "Parse error".red().bold(), e);
                     return;
                 }
             },
             Err(e) => {
-                println!("Lexer error: {}", e);
+                println!("{}: {}", "Lexer error".red().bold(), e);
                 return;
             }
         };
@@ -276,7 +281,7 @@ impl Repl {
                 self.print_result(&result);
             }
             Err(e) => {
-                println!("Execution error: {}", e);
+                println!("{}: {}", "Execution error".red().bold(), e);
             }
         }
     }
