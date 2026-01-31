@@ -124,6 +124,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maharit-db"
+version = "0.1.0"
+dependencies = [
+ "maharit-core",
+ "maharit-io",
+ "maharit-query",
+ "maharit-storage",
+ "maharit-viz",
+]
+
+[[package]]
 name = "maharit-io"
 version = "0.1.0"
 dependencies = [
