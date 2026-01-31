@@ -1,0 +1,462 @@
+//! TCP server for network-based query execution
+//!
+//! Provides:
+//! - TCP connection handling with async I/O
+//! - Length-prefixed message framing
+//! - JSON request/response protocol
+//! - Connection pool management
+//! - Graceful shutdown
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::{Buf, BytesMut};
+use maharit_core::Graph;
+use maharit_query::{Executor, Parser};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, RwLock};
+use tokio::time::timeout;
+
+/// Server configuration
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Address to bind to
+    pub bind_address: String,
+    /// Maximum number of concurrent connections
+    pub max_connections: usize,
+    /// Read timeout for client connections
+    pub read_timeout: Duration,
+    /// Write timeout for client connections
+    pub write_timeout: Duration,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_address: "127.0.0.1:7687".to_string(),
+            max_connections: 100,
+            read_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Request message from client
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum Request {
+    /// Execute a query
+    #[serde(rename = "query")]
+    Query { query: String },
+
+    /// Ping to check server health
+    #[serde(rename = "ping")]
+    Ping,
+
+    /// Get server statistics
+    #[serde(rename = "stats")]
+    Stats,
+
+    /// Disconnect gracefully
+    #[serde(rename = "disconnect")]
+    Disconnect,
+}
+
+/// Response message to client
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum Response {
+    /// Query result
+    #[serde(rename = "result")]
+    Result { rows: Vec<HashMap<String, String>> },
+
+    /// Error response
+    #[serde(rename = "error")]
+    Error { message: String },
+
+    /// Pong response
+    #[serde(rename = "pong")]
+    Pong,
+
+    /// Statistics response
+    #[serde(rename = "stats")]
+    Stats {
+        connections: u64,
+        total_queries: u64,
+        nodes: usize,
+        edges: usize,
+    },
+
+    /// Goodbye response before disconnect
+    #[serde(rename = "goodbye")]
+    Goodbye,
+}
+
+/// Statistics for the server
+#[derive(Debug, Default)]
+pub struct ServerStats {
+    pub current_connections: AtomicU64,
+    pub total_connections: AtomicU64,
+    pub total_queries: AtomicU64,
+}
+
+/// TCP server for MaharitDB
+pub struct TcpServer {
+    config: ServerConfig,
+    graph: Arc<RwLock<Graph>>,
+    stats: Arc<ServerStats>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl TcpServer {
+    /// Create a new TCP server
+    pub fn new(config: ServerConfig) -> Self {
+        Self {
+            config,
+            graph: Arc::new(RwLock::new(Graph::new())),
+            stats: Arc::new(ServerStats::default()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Create a server with an existing graph
+    pub fn with_graph(config: ServerConfig, graph: Graph) -> Self {
+        Self {
+            config,
+            graph: Arc::new(RwLock::new(graph)),
+            stats: Arc::new(ServerStats::default()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Start the server
+    pub async fn start(&self) -> std::io::Result<()> {
+        let listener = TcpListener::bind(&self.config.bind_address).await?;
+        println!("Server listening on {}", self.config.bind_address);
+
+        // Create shutdown broadcast channel
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+        loop {
+            if self.shutdown.load(Ordering::SeqCst) {
+                println!("Server shutting down...");
+                break;
+            }
+
+            // Check connection limit
+            let current = self.stats.current_connections.load(Ordering::SeqCst);
+            if current >= self.config.max_connections as u64 {
+                // Wait a bit before accepting more connections
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // Accept with timeout to allow checking shutdown flag
+            let accept_result = timeout(Duration::from_secs(1), listener.accept()).await;
+
+            match accept_result {
+                Ok(Ok((socket, addr))) => {
+                    self.stats.total_connections.fetch_add(1, Ordering::SeqCst);
+                    self.stats.current_connections.fetch_add(1, Ordering::SeqCst);
+
+                    let graph = Arc::clone(&self.graph);
+                    let stats = Arc::clone(&self.stats);
+                    let shutdown = Arc::clone(&self.shutdown);
+                    let config = self.config.clone();
+                    let mut shutdown_rx = shutdown_tx.subscribe();
+
+                    tokio::spawn(async move {
+                        let result = handle_connection(
+                            socket,
+                            graph,
+                            stats.clone(),
+                            shutdown,
+                            config,
+                            &mut shutdown_rx,
+                        )
+                        .await;
+
+                        if let Err(e) = result {
+                            eprintln!("Connection error from {}: {}", addr, e);
+                        }
+
+                        stats.current_connections.fetch_sub(1, Ordering::SeqCst);
+                    });
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Accept error: {}", e);
+                }
+                Err(_) => {
+                    // Timeout, just continue to check shutdown flag
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Request graceful shutdown
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Get current statistics
+    pub fn stats(&self) -> &ServerStats {
+        &self.stats
+    }
+}
+
+/// Handle a single client connection
+async fn handle_connection(
+    mut socket: TcpStream,
+    graph: Arc<RwLock<Graph>>,
+    stats: Arc<ServerStats>,
+    shutdown: Arc<AtomicBool>,
+    config: ServerConfig,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+) -> std::io::Result<()> {
+    let mut buffer = BytesMut::with_capacity(4096);
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+            break;
+        }
+
+        // Read with timeout
+        let read_result = tokio::select! {
+            result = read_message(&mut socket, &mut buffer, config.read_timeout) => result,
+            _ = shutdown_rx.recv() => {
+                send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+                break;
+            }
+        };
+
+        let message = match read_result {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break, // Connection closed
+            Err(e) => {
+                let response = Response::Error {
+                    message: e.to_string(),
+                };
+                send_response(&mut socket, &response, config.write_timeout).await?;
+                continue;
+            }
+        };
+
+        // Parse request
+        let request: Request = match serde_json::from_slice(&message) {
+            Ok(req) => req,
+            Err(e) => {
+                let response = Response::Error {
+                    message: format!("Invalid request: {}", e),
+                };
+                send_response(&mut socket, &response, config.write_timeout).await?;
+                continue;
+            }
+        };
+
+        // Handle request
+        let response = match request {
+            Request::Query { query } => {
+                stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                execute_query(&graph, &query).await
+            }
+            Request::Ping => Response::Pong,
+            Request::Stats => {
+                let g = graph.read().await;
+                Response::Stats {
+                    connections: stats.current_connections.load(Ordering::SeqCst),
+                    total_queries: stats.total_queries.load(Ordering::SeqCst),
+                    nodes: g.node_count(),
+                    edges: g.edge_count(),
+                }
+            }
+            Request::Disconnect => {
+                send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+                break;
+            }
+        };
+
+        send_response(&mut socket, &response, config.write_timeout).await?;
+    }
+
+    Ok(())
+}
+
+/// Read a length-prefixed message from the socket
+async fn read_message(
+    socket: &mut TcpStream,
+    buffer: &mut BytesMut,
+    read_timeout: Duration,
+) -> std::io::Result<Option<Vec<u8>>> {
+    loop {
+        // Check if we have a complete message in the buffer
+        if buffer.len() >= 4 {
+            let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+            if buffer.len() >= 4 + len {
+                buffer.advance(4);
+                let message = buffer.split_to(len).to_vec();
+                return Ok(Some(message));
+            }
+        }
+
+        // Read more data
+        let n = match timeout(read_timeout, socket.read_buf(buffer)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Read timeout",
+                ))
+            }
+        };
+
+        if n == 0 {
+            return Ok(None); // Connection closed
+        }
+    }
+}
+
+/// Send a response with length prefix
+async fn send_response(
+    socket: &mut TcpStream,
+    response: &Response,
+    write_timeout: Duration,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec(response).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    })?;
+
+    let len = json.len() as u32;
+    let len_bytes = len.to_be_bytes();
+
+    let write_future = async {
+        socket.write_all(&len_bytes).await?;
+        socket.write_all(&json).await?;
+        socket.flush().await
+    };
+
+    match timeout(write_timeout, write_future).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Write timeout",
+        )),
+    }
+}
+
+/// Execute a query and return the response
+async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
+    // Parse the query
+    let stmt = match Parser::new(query) {
+        Ok(mut parser) => match parser.parse() {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Parse error: {}", e),
+                }
+            }
+        },
+        Err(e) => {
+            return Response::Error {
+                message: format!("Lexer error: {}", e),
+            }
+        }
+    };
+
+    // Execute the statement
+    let mut g = graph.write().await;
+    let mut executor = Executor::new(&mut g);
+
+    match executor.execute(stmt) {
+        Ok(result) => {
+            let rows: Vec<HashMap<String, String>> = result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    result
+                        .columns
+                        .iter()
+                        .zip(row.columns.iter())
+                        .map(|(col, val)| (col.clone(), val.to_string()))
+                        .collect()
+                })
+                .collect();
+
+            Response::Result { rows }
+        }
+        Err(e) => Response::Error {
+            message: format!("Execution error: {}", e),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_parsing() {
+        let json = r#"{"type": "query", "query": "MATCH (n) RETURN n"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Query { query } => assert_eq!(query, "MATCH (n) RETURN n"),
+            _ => panic!("Expected Query request"),
+        }
+    }
+
+    #[test]
+    fn test_ping_request() {
+        let json = r#"{"type": "ping"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        assert!(matches!(request, Request::Ping));
+    }
+
+    #[test]
+    fn test_response_serialization() {
+        let response = Response::Pong;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"pong\""));
+    }
+
+    #[test]
+    fn test_result_response() {
+        let mut row = HashMap::new();
+        row.insert("name".to_string(), "Alice".to_string());
+        let response = Response::Result { rows: vec![row] };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"result\""));
+        assert!(json.contains("Alice"));
+    }
+
+    #[test]
+    fn test_error_response() {
+        let response = Response::Error {
+            message: "Something went wrong".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"error\""));
+        assert!(json.contains("Something went wrong"));
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = ServerConfig::default();
+        assert_eq!(config.bind_address, "127.0.0.1:7687");
+        assert_eq!(config.max_connections, 100);
+    }
+
+    #[tokio::test]
+    async fn test_server_creation() {
+        let config = ServerConfig::default();
+        let server = TcpServer::new(config);
+        assert_eq!(server.stats.current_connections.load(Ordering::SeqCst), 0);
+    }
+}
