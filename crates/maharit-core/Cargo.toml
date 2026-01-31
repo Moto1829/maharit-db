@@ -1,0 +1,9 @@
+[package]
+name = "maharit-core"
+description = "Core graph data structures for MaharitDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

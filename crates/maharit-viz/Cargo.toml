@@ -1,0 +1,9 @@
+[package]
+name = "maharit-viz"
+description = "Visualization for MaharitDB graphs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+maharit-core.workspace = true

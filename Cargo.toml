@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/maharit-core",
+    "crates/maharit-storage",
+    "crates/maharit-query",
+    "crates/maharit-server",
+    "crates/maharit-io",
+    "crates/maharit-viz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/suzukishimei/maharit-db"
+
+[workspace.dependencies]
+maharit-core = { path = "crates/maharit-core" }
+maharit-storage = { path = "crates/maharit-storage" }
+maharit-query = { path = "crates/maharit-query" }
+maharit-io = { path = "crates/maharit-io" }
+maharit-viz = { path = "crates/maharit-viz" }
+thiserror = "2"
+rustyline = "15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"

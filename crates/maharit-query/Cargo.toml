@@ -1,0 +1,10 @@
+[package]
+name = "maharit-query"
+description = "Query parser and executor for MaharitDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+maharit-core.workspace = true
+thiserror.workspace = true

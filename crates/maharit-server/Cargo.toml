@@ -1,0 +1,16 @@
+[package]
+name = "maharit-server"
+description = "CLI and server for MaharitDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "maharit"
+path = "src/main.rs"
+
+[dependencies]
+maharit-core.workspace = true
+maharit-storage.workspace = true
+maharit-query.workspace = true
+rustyline.workspace = true
