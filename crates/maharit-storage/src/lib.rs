@@ -1,9 +1,13 @@
 mod persistence;
+mod transaction;
 mod wal;
 
 use maharit_core::Graph;
 
 pub use persistence::{PersistenceError, PersistentStorage};
+pub use transaction::{
+    LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,
+};
 pub use wal::{Lsn, LogRecord, RecordPayload, RecordType, Wal, WalError};
 
 /// インメモリストレージエンジン
