@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation and metadata
+*.md
+LICENSE
+todo/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Claude
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+*.test
+*.spec
+
+# Temporary files
+tmp/
+*.tmp
+*.log

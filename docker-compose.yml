@@ -1,0 +1,26 @@
+services:
+  maharit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: maharit-db
+    volumes:
+      - maharit-data:/data
+    environment:
+      - MAHARIT_DATA_DIR=/data
+    # Interactive mode for REPL
+    stdin_open: true
+    tty: true
+    # Uncomment when TCP server is implemented
+    # ports:
+    #   - "7687:7687"
+    # healthcheck:
+    #   test: ["CMD", "/app/maharit", "--health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+volumes:
+  maharit-data:
+    driver: local
