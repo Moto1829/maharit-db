@@ -67,6 +67,12 @@ pub struct ClientConfig {
     pub read_timeout: Duration,
     /// Write timeout
     pub write_timeout: Duration,
+    /// Enable auto-reconnect on connection loss
+    pub auto_reconnect: bool,
+    /// Maximum number of reconnection attempts
+    pub max_reconnect_attempts: u32,
+    /// Delay between reconnection attempts
+    pub reconnect_delay: Duration,
 }
 
 impl Default for ClientConfig {
@@ -75,6 +81,9 @@ impl Default for ClientConfig {
             connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
+            auto_reconnect: false,
+            max_reconnect_attempts: 3,
+            reconnect_delay: Duration::from_millis(500),
         }
     }
 }
@@ -328,6 +337,7 @@ pub struct Client {
     stream: TcpStream,
     config: ClientConfig,
     buffer: BytesMut,
+    addr: String,
 }
 
 impl Client {
@@ -347,7 +357,40 @@ impl Client {
             stream,
             config,
             buffer: BytesMut::with_capacity(4096),
+            addr: addr.to_string(),
         })
+    }
+
+    /// Attempt to reconnect to the server
+    pub async fn reconnect(&mut self) -> Result<()> {
+        let stream = timeout(self.config.connect_timeout, TcpStream::connect(&self.addr))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(ClientError::Connection)?;
+
+        self.stream = stream;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    /// Try to reconnect with retries
+    async fn try_reconnect(&mut self) -> bool {
+        for attempt in 0..self.config.max_reconnect_attempts {
+            if attempt > 0 {
+                // Exponential backoff
+                tokio::time::sleep(self.config.reconnect_delay * attempt).await;
+            }
+
+            if self.reconnect().await.is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if an error should trigger reconnection
+    fn should_reconnect(err: &ClientError) -> bool {
+        matches!(err, ClientError::ConnectionClosed | ClientError::Connection(_))
     }
 
     /// Execute a query and return the result
@@ -357,6 +400,21 @@ impl Client {
 
     /// Execute a query within a transaction
     pub async fn query_in_tx(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
+        let result = self.query_internal(query, tx_id).await;
+
+        // Only auto-reconnect if not in a transaction
+        if result.is_err() && self.config.auto_reconnect && tx_id.is_none() {
+            if Self::should_reconnect(result.as_ref().unwrap_err()) {
+                if self.try_reconnect().await {
+                    return self.query_internal(query, tx_id).await;
+                }
+            }
+        }
+
+        result
+    }
+
+    async fn query_internal(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
         let request = Request::Query {
             query: query.to_string(),
             tx_id,
@@ -491,6 +549,20 @@ impl Client {
 
     /// Ping the server to check connectivity
     pub async fn ping(&mut self) -> Result<()> {
+        let result = self.ping_internal().await;
+
+        if result.is_err() && self.config.auto_reconnect {
+            if Self::should_reconnect(result.as_ref().unwrap_err()) {
+                if self.try_reconnect().await {
+                    return self.ping_internal().await;
+                }
+            }
+        }
+
+        result
+    }
+
+    async fn ping_internal(&mut self) -> Result<()> {
         self.send_request(&Request::Ping).await?;
 
         match self.receive_response().await? {
@@ -534,6 +606,11 @@ impl Client {
     /// Check if the connection is alive
     pub async fn is_alive(&mut self) -> bool {
         self.ping().await.is_ok()
+    }
+
+    /// Get the server address
+    pub fn addr(&self) -> &str {
+        &self.addr
     }
 
     // Internal: send a request to the server
@@ -583,6 +660,177 @@ impl Client {
             if n == 0 {
                 return Err(ClientError::ConnectionClosed);
             }
+        }
+    }
+}
+
+/// Connection pool for managing multiple client connections
+pub mod pool {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Semaphore};
+
+    /// Connection pool configuration
+    #[derive(Debug, Clone)]
+    pub struct PoolConfig {
+        /// Minimum number of connections in the pool
+        pub min_connections: usize,
+        /// Maximum number of connections in the pool
+        pub max_connections: usize,
+        /// Client configuration for each connection
+        pub client_config: ClientConfig,
+        /// Connection idle timeout (connections idle longer will be closed)
+        pub idle_timeout: Duration,
+    }
+
+    impl Default for PoolConfig {
+        fn default() -> Self {
+            Self {
+                min_connections: 1,
+                max_connections: 10,
+                client_config: ClientConfig::default(),
+                idle_timeout: Duration::from_secs(300),
+            }
+        }
+    }
+
+    /// A pooled connection that returns to the pool when dropped
+    pub struct PooledConnection {
+        client: Option<Client>,
+        pool: Arc<ConnectionPoolInner>,
+    }
+
+    impl PooledConnection {
+        /// Execute a query and return the result
+        pub async fn query(&mut self, query: &str) -> Result<QueryResult> {
+            self.client.as_mut().unwrap().query(query).await
+        }
+
+        /// Execute a query without returning results
+        pub async fn execute(&mut self, query: &str) -> Result<()> {
+            self.client.as_mut().unwrap().execute(query).await
+        }
+
+        /// Ping the server
+        pub async fn ping(&mut self) -> Result<()> {
+            self.client.as_mut().unwrap().ping().await
+        }
+
+        /// Get server statistics
+        pub async fn stats(&mut self) -> Result<ServerStats> {
+            self.client.as_mut().unwrap().stats().await
+        }
+
+        /// Begin a new transaction
+        pub async fn begin(&mut self) -> Result<TxId> {
+            self.client.as_mut().unwrap().begin().await
+        }
+
+        /// Commit a transaction
+        pub async fn commit(&mut self, tx_id: TxId) -> Result<()> {
+            self.client.as_mut().unwrap().commit(tx_id).await
+        }
+
+        /// Rollback a transaction
+        pub async fn rollback(&mut self, tx_id: TxId) -> Result<()> {
+            self.client.as_mut().unwrap().rollback(tx_id).await
+        }
+    }
+
+    impl Drop for PooledConnection {
+        fn drop(&mut self) {
+            if let Some(client) = self.client.take() {
+                let pool = Arc::clone(&self.pool);
+                tokio::spawn(async move {
+                    pool.return_connection(client).await;
+                });
+            }
+        }
+    }
+
+    struct ConnectionPoolInner {
+        addr: String,
+        config: PoolConfig,
+        connections: Mutex<Vec<Client>>,
+        semaphore: Semaphore,
+    }
+
+    impl ConnectionPoolInner {
+        async fn return_connection(&self, client: Client) {
+            let mut connections = self.connections.lock().await;
+            if connections.len() < self.config.max_connections {
+                connections.push(client);
+            }
+            self.semaphore.add_permits(1);
+        }
+    }
+
+    /// Connection pool for MaharitDB
+    pub struct ConnectionPool {
+        inner: Arc<ConnectionPoolInner>,
+    }
+
+    impl ConnectionPool {
+        /// Create a new connection pool
+        pub async fn new(addr: &str, config: PoolConfig) -> Result<Self> {
+            let inner = Arc::new(ConnectionPoolInner {
+                addr: addr.to_string(),
+                config: config.clone(),
+                connections: Mutex::new(Vec::new()),
+                semaphore: Semaphore::new(config.max_connections),
+            });
+
+            // Pre-create minimum connections
+            let mut initial_connections = Vec::new();
+            for _ in 0..config.min_connections {
+                let client = Client::connect_with_config(addr, config.client_config.clone()).await?;
+                initial_connections.push(client);
+            }
+
+            {
+                let mut connections = inner.connections.lock().await;
+                *connections = initial_connections;
+            }
+
+            Ok(Self { inner })
+        }
+
+        /// Get a connection from the pool
+        pub async fn get(&self) -> Result<PooledConnection> {
+            // Wait for an available slot
+            let permit = self.inner.semaphore.acquire().await.map_err(|_| {
+                ClientError::Protocol("Pool closed".to_string())
+            })?;
+            permit.forget(); // We'll add it back when connection is returned
+
+            let mut connections = self.inner.connections.lock().await;
+
+            let client = if let Some(client) = connections.pop() {
+                client
+            } else {
+                // Create a new connection
+                drop(connections); // Release lock before connecting
+                Client::connect_with_config(
+                    &self.inner.addr,
+                    self.inner.config.client_config.clone(),
+                )
+                .await?
+            };
+
+            Ok(PooledConnection {
+                client: Some(client),
+                pool: Arc::clone(&self.inner),
+            })
+        }
+
+        /// Get the number of idle connections in the pool
+        pub async fn idle_count(&self) -> usize {
+            self.inner.connections.lock().await.len()
+        }
+
+        /// Get the maximum pool size
+        pub fn max_size(&self) -> usize {
+            self.inner.config.max_connections
         }
     }
 }
@@ -841,5 +1089,27 @@ mod tests {
             }
             _ => panic!("Expected Error response"),
         }
+    }
+
+    #[test]
+    fn test_config_with_auto_reconnect() {
+        let config = ClientConfig {
+            auto_reconnect: true,
+            max_reconnect_attempts: 5,
+            reconnect_delay: Duration::from_secs(1),
+            ..Default::default()
+        };
+
+        assert!(config.auto_reconnect);
+        assert_eq!(config.max_reconnect_attempts, 5);
+        assert_eq!(config.reconnect_delay, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_pool_config_default() {
+        let config = pool::PoolConfig::default();
+        assert_eq!(config.min_connections, 1);
+        assert_eq!(config.max_connections, 10);
+        assert_eq!(config.idle_timeout, Duration::from_secs(300));
     }
 }
