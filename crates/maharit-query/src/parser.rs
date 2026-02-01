@@ -261,7 +261,7 @@ impl Parser {
                     expected: "aggregate function (COUNT, SUM, AVG, MIN, MAX, COLLECT)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
-                })
+                });
             }
         };
 
@@ -795,7 +795,10 @@ mod tests {
             let where_clause = m.where_clause.unwrap();
             if let Expression::BinaryOp(left, op, right) = where_clause {
                 assert_eq!(op, BinaryOp::Gt);
-                assert_eq!(*left, Expression::Property("n".to_string(), "age".to_string()));
+                assert_eq!(
+                    *left,
+                    Expression::Property("n".to_string(), "age".to_string())
+                );
                 assert_eq!(*right, Expression::Literal(Literal::Int(18)));
             } else {
                 panic!("expected binary expression");
@@ -807,7 +810,8 @@ mod tests {
 
     #[test]
     fn test_match_where_and() {
-        let stmt = parse(r#"MATCH (n:Person) WHERE n.age > 18 AND n.name = "Alice" RETURN n"#).unwrap();
+        let stmt =
+            parse(r#"MATCH (n:Person) WHERE n.age > 18 AND n.name = "Alice" RETURN n"#).unwrap();
 
         if let Statement::Match(m) = stmt {
             let where_clause = m.where_clause.unwrap();
@@ -953,7 +957,11 @@ mod tests {
             if let Pattern::Path(path) = &m.patterns[0] {
                 let seg = &path.segments[0];
                 assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
-                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                let range = seg
+                    .edge
+                    .length_range
+                    .as_ref()
+                    .expect("should have length_range");
                 assert_eq!(range.min, 2);
                 assert_eq!(range.max, Some(2));
             } else {
@@ -971,7 +979,11 @@ mod tests {
         if let Statement::Match(m) = stmt {
             if let Pattern::Path(path) = &m.patterns[0] {
                 let seg = &path.segments[0];
-                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                let range = seg
+                    .edge
+                    .length_range
+                    .as_ref()
+                    .expect("should have length_range");
                 assert_eq!(range.min, 2);
                 assert_eq!(range.max, Some(5));
             } else {
@@ -989,7 +1001,11 @@ mod tests {
         if let Statement::Match(m) = stmt {
             if let Pattern::Path(path) = &m.patterns[0] {
                 let seg = &path.segments[0];
-                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                let range = seg
+                    .edge
+                    .length_range
+                    .as_ref()
+                    .expect("should have length_range");
                 assert_eq!(range.min, 2);
                 assert_eq!(range.max, None);
             } else {

@@ -7,9 +7,9 @@
 //! - Cycle detection and topological sort
 
 use maharit_core::{
-    betweenness_centrality, closeness_centrality, connected_components, find_cycles, has_cycle,
-    pagerank, strongly_connected_components, topological_sort, DegreeCentrality, Graph,
-    PageRankConfig,
+    DegreeCentrality, Graph, PageRankConfig, betweenness_centrality, closeness_centrality,
+    connected_components, find_cycles, has_cycle, pagerank, strongly_connected_components,
+    topological_sort,
 };
 
 fn main() {
@@ -61,7 +61,11 @@ fn main() {
     // Contact links to home
     graph.create_edge(contact, home, "LINKS_TO").unwrap();
 
-    println!("   Created {} nodes, {} edges", graph.node_count(), graph.edge_count());
+    println!(
+        "   Created {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
 
     // Helper to get node name
     let get_name = |id: u64| -> String {
@@ -122,7 +126,10 @@ fn main() {
         tolerance: 1e-6,
     };
     let pr_result = pagerank(&graph, &config);
-    println!("   Converged: {} (iterations: {})", pr_result.converged, pr_result.iterations);
+    println!(
+        "   Converged: {} (iterations: {})",
+        pr_result.converged, pr_result.iterations
+    );
     println!("\n   PageRank scores:");
     let mut sorted: Vec<_> = pr_result.scores.iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());

@@ -51,7 +51,11 @@ fn main() {
     graph.create_edge(alice, tech_corp, "WORKS_AT").unwrap();
     graph.create_edge(bob, tech_corp, "WORKS_AT").unwrap();
 
-    println!("   Created: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+    println!(
+        "   Created: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
 
     // 2. DOT format export (default style)
     println!("\n2. DOT format export (default style):");
@@ -63,11 +67,11 @@ fn main() {
     println!("3. DOT format export (custom style):");
     println!("   ----------------------------------------");
     let custom_style = DotStyle {
-        top_to_bottom: false,  // Left to right layout
+        top_to_bottom: false, // Left to right layout
         node_shape: "box".to_string(),
         node_color: "lightgreen".to_string(),
         edge_color: "blue".to_string(),
-        show_properties: false,  // Hide properties
+        show_properties: false, // Hide properties
         max_properties: 2,
     };
     let dot_custom = DotExporter::export_with_style(&graph, &custom_style);
@@ -124,7 +128,7 @@ fn main() {
 
     circular_graph.create_edge(n1, n2, "NEXT").unwrap();
     circular_graph.create_edge(n2, n3, "NEXT").unwrap();
-    circular_graph.create_edge(n3, n1, "NEXT").unwrap();  // Creates a cycle
+    circular_graph.create_edge(n3, n1, "NEXT").unwrap(); // Creates a cycle
 
     let circular_tree = AsciiRenderer::render_tree(&circular_graph, n1, 5);
     println!("{}", circular_tree);
@@ -153,22 +157,28 @@ fn main() {
 
     let styles = [
         ("Default", DotStyle::default()),
-        ("Minimal", DotStyle {
-            top_to_bottom: true,
-            node_shape: "circle".to_string(),
-            node_color: "white".to_string(),
-            edge_color: "black".to_string(),
-            show_properties: false,
-            max_properties: 0,
-        }),
-        ("Rich", DotStyle {
-            top_to_bottom: false,
-            node_shape: "record".to_string(),
-            node_color: "lightyellow".to_string(),
-            edge_color: "darkgray".to_string(),
-            show_properties: true,
-            max_properties: 5,
-        }),
+        (
+            "Minimal",
+            DotStyle {
+                top_to_bottom: true,
+                node_shape: "circle".to_string(),
+                node_color: "white".to_string(),
+                edge_color: "black".to_string(),
+                show_properties: false,
+                max_properties: 0,
+            },
+        ),
+        (
+            "Rich",
+            DotStyle {
+                top_to_bottom: false,
+                node_shape: "record".to_string(),
+                node_color: "lightyellow".to_string(),
+                edge_color: "darkgray".to_string(),
+                show_properties: true,
+                max_properties: 5,
+            },
+        ),
     ];
 
     for (name, style) in &styles {
@@ -177,7 +187,14 @@ fn main() {
         println!("      node_color: {}", style.node_color);
         println!("      edge_color: {}", style.edge_color);
         println!("      show_properties: {}", style.show_properties);
-        println!("      direction: {}", if style.top_to_bottom { "top-to-bottom" } else { "left-to-right" });
+        println!(
+            "      direction: {}",
+            if style.top_to_bottom {
+                "top-to-bottom"
+            } else {
+                "left-to-right"
+            }
+        );
     }
 
     println!("\n=== Example Complete ===");

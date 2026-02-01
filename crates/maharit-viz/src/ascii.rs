@@ -15,7 +15,13 @@ impl AsciiRenderer {
             return "(empty graph)".to_string();
         }
 
-        writeln!(output, "Graph: {} nodes, {} edges", graph.node_count(), graph.edge_count()).unwrap();
+        writeln!(
+            output,
+            "Graph: {} nodes, {} edges",
+            graph.node_count(),
+            graph.edge_count()
+        )
+        .unwrap();
         writeln!(output).unwrap();
 
         // 各ノードとその接続を表示
@@ -48,7 +54,16 @@ impl AsciiRenderer {
         let mut output = String::new();
         let mut visited = HashSet::new();
 
-        Self::render_node_tree(graph, root, 0, max_depth, "", true, &mut visited, &mut output);
+        Self::render_node_tree(
+            graph,
+            root,
+            0,
+            max_depth,
+            "",
+            true,
+            &mut visited,
+            &mut output,
+        );
 
         output
     }
@@ -108,10 +123,19 @@ impl AsciiRenderer {
 
             // エッジラベルを表示
             let edge_connector = if is_last_child { "└" } else { "├" };
-            writeln!(output, "{}{}─[:{}]─>", child_prefix, edge_connector, edge.label).unwrap();
+            writeln!(
+                output,
+                "{}{}─[:{}]─>",
+                child_prefix, edge_connector, edge.label
+            )
+            .unwrap();
 
             // 子ノードの新しいprefix
-            let next_prefix = format!("{}{}", child_prefix, if is_last_child { "    " } else { "│   " });
+            let next_prefix = format!(
+                "{}{}",
+                child_prefix,
+                if is_last_child { "    " } else { "│   " }
+            );
 
             Self::render_node_tree(
                 graph,
@@ -150,7 +174,9 @@ impl AsciiRenderer {
 
             if depth == 0 {
                 writeln!(output, "Layer 0 (root):").unwrap();
-            } else if depth > current_depth - 1 || (depth == current_depth && current_depth != depth) {
+            } else if depth > current_depth - 1
+                || (depth == current_depth && current_depth != depth)
+            {
                 writeln!(output, "Layer {}:", depth).unwrap();
             }
 

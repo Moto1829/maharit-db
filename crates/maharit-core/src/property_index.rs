@@ -93,7 +93,9 @@ impl PartialOrd for OrderedFloat {
 
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -364,7 +366,8 @@ mod tests {
         index.index_property(1, "name", &PropertyValue::String("Bob".to_string()));
         index.index_property(2, "name", &PropertyValue::String("Alice".to_string()));
 
-        let alice_nodes = index.find_by_property("name", &PropertyValue::String("Alice".to_string()));
+        let alice_nodes =
+            index.find_by_property("name", &PropertyValue::String("Alice".to_string()));
         assert_eq!(alice_nodes.len(), 2);
         assert!(alice_nodes.contains(&0));
         assert!(alice_nodes.contains(&2));
@@ -403,8 +406,16 @@ mod tests {
         index.remove_node(0);
 
         assert_eq!(index.indexed_node_count(), 0);
-        assert!(index.find_by_property("name", &PropertyValue::String("Alice".to_string())).is_empty());
-        assert!(index.find_by_property("age", &PropertyValue::Int(30)).is_empty());
+        assert!(
+            index
+                .find_by_property("name", &PropertyValue::String("Alice".to_string()))
+                .is_empty()
+        );
+        assert!(
+            index
+                .find_by_property("age", &PropertyValue::Int(30))
+                .is_empty()
+        );
     }
 
     #[test]

@@ -325,7 +325,11 @@ pub struct WeightedPath {
 
 impl WeightedPath {
     pub fn new(nodes: Vec<NodeId>, edges: Vec<EdgeId>, total_weight: f64) -> Self {
-        Self { nodes, edges, total_weight }
+        Self {
+            nodes,
+            edges,
+            total_weight,
+        }
     }
 }
 
@@ -347,7 +351,10 @@ impl Eq for DijkstraEntry {}
 impl Ord for DijkstraEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // 最小ヒープにするため逆順
-        other.distance.partial_cmp(&self.distance).unwrap_or(Ordering::Equal)
+        other
+            .distance
+            .partial_cmp(&self.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -413,7 +420,10 @@ impl<'a> Dijkstra<'a> {
         let mut heap = BinaryHeap::new();
 
         distances.insert(from, 0.0);
-        heap.push(DijkstraEntry { node: from, distance: 0.0 });
+        heap.push(DijkstraEntry {
+            node: from,
+            distance: 0.0,
+        });
 
         while let Some(DijkstraEntry { node, distance }) = heap.pop() {
             if node == to {
@@ -452,7 +462,10 @@ impl<'a> Dijkstra<'a> {
         let mut heap = BinaryHeap::new();
 
         distances.insert(from, 0.0);
-        heap.push(DijkstraEntry { node: from, distance: 0.0 });
+        heap.push(DijkstraEntry {
+            node: from,
+            distance: 0.0,
+        });
 
         while let Some(DijkstraEntry { node, distance }) = heap.pop() {
             if let Some(&d) = distances.get(&node) {
@@ -514,8 +527,8 @@ pub type HeuristicFn<'a> = Box<dyn Fn(NodeId, NodeId) -> f64 + 'a>;
 #[derive(Debug, Clone)]
 struct AStarEntry {
     node: NodeId,
-    g_score: f64,  // 実際のコスト
-    f_score: f64,  // g + h
+    g_score: f64, // 実際のコスト
+    f_score: f64, // g + h
 }
 
 impl PartialEq for AStarEntry {
@@ -528,7 +541,10 @@ impl Eq for AStarEntry {}
 
 impl Ord for AStarEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.f_score.partial_cmp(&self.f_score).unwrap_or(Ordering::Equal)
+        other
+            .f_score
+            .partial_cmp(&self.f_score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 

@@ -243,7 +243,10 @@ impl Graph {
 
     /// ラベル（タイプ）でエッジを検索
     pub fn find_edges_by_type(&self, edge_type: &str) -> Vec<&Edge> {
-        self.edges.values().filter(|e| e.label == edge_type).collect()
+        self.edges
+            .values()
+            .filter(|e| e.label == edge_type)
+            .collect()
     }
 }
 
@@ -289,7 +292,10 @@ mod tests {
         node.set_property("age", 30);
 
         let node = graph.get_node(id).unwrap();
-        assert_eq!(node.get_property("name"), Some(&PropertyValue::String("Alice".to_string())));
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
         assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(30)));
     }
 

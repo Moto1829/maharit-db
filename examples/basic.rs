@@ -123,14 +123,22 @@ fn main() {
     println!("\n7. DELETE operation...");
 
     // First, let's see current state
-    println!("   Before delete: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+    println!(
+        "   Before delete: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
 
     // Delete a specific node by matching
     let delete_query = r#"MATCH (n:Person {name: "Charlie"}) DETACH DELETE n"#;
     println!("   Query: {}", delete_query);
     let stmt = Parser::new(delete_query).unwrap().parse().unwrap();
     let _ = Executor::new(&mut graph).execute(stmt).unwrap();
-    println!("   After delete: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+    println!(
+        "   After delete: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
 
     // 8. Direct delete via API
     println!("\n8. Direct delete via API...");

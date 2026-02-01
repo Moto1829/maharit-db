@@ -102,7 +102,10 @@ impl LabelIndex {
 
     /// ラベルを持つエッジ数をカウント
     pub fn count_edges_by_type(&self, edge_type: &str) -> usize {
-        self.edge_labels.get(edge_type).map(|e| e.len()).unwrap_or(0)
+        self.edge_labels
+            .get(edge_type)
+            .map(|e| e.len())
+            .unwrap_or(0)
     }
 
     /// 全てのエッジラベルを取得

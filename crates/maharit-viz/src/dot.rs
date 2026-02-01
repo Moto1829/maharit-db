@@ -51,8 +51,12 @@ impl DotExporter {
         // グラフ属性
         let rankdir = if style.top_to_bottom { "TB" } else { "LR" };
         writeln!(dot, "    rankdir={};", rankdir).unwrap();
-        writeln!(dot, "    node [shape={}, style=filled, fillcolor={}];",
-            style.node_shape, style.node_color).unwrap();
+        writeln!(
+            dot,
+            "    node [shape={}, style=filled, fillcolor={}];",
+            style.node_shape, style.node_color
+        )
+        .unwrap();
         writeln!(dot, "    edge [color={}];", style.edge_color).unwrap();
         writeln!(dot).unwrap();
 
@@ -60,7 +64,13 @@ impl DotExporter {
         writeln!(dot, "    // Nodes").unwrap();
         for node in graph.nodes() {
             let label = Self::make_node_label(node, style);
-            writeln!(dot, "    n{} [label=\"{}\"];", node.id, Self::escape(&label)).unwrap();
+            writeln!(
+                dot,
+                "    n{} [label=\"{}\"];",
+                node.id,
+                Self::escape(&label)
+            )
+            .unwrap();
         }
         writeln!(dot).unwrap();
 
@@ -98,7 +108,10 @@ impl DotExporter {
             label.push_str(&props.join("\\n"));
 
             if node.properties.len() > style.max_properties {
-                label.push_str(&format!("\\n... +{} more", node.properties.len() - style.max_properties));
+                label.push_str(&format!(
+                    "\\n... +{} more",
+                    node.properties.len() - style.max_properties
+                ));
             }
         }
 

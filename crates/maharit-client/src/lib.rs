@@ -245,7 +245,9 @@ impl Client {
         match self.receive_response().await? {
             Response::Result { rows } => Ok(QueryResult { rows }),
             Response::Error { message } => Err(ClientError::Server(message)),
-            _ => Err(ClientError::Protocol("unexpected response type".to_string())),
+            _ => Err(ClientError::Protocol(
+                "unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -279,7 +281,9 @@ impl Client {
         match self.receive_response().await? {
             Response::TransactionBegun { tx_id } => Ok(tx_id),
             Response::Error { message } => Err(ClientError::Server(message)),
-            _ => Err(ClientError::Protocol("expected transaction begun response".to_string())),
+            _ => Err(ClientError::Protocol(
+                "expected transaction begun response".to_string(),
+            )),
         }
     }
 
@@ -291,7 +295,9 @@ impl Client {
         match self.receive_response().await? {
             Response::Committed { tx_id: _ } => Ok(()),
             Response::Error { message } => Err(ClientError::Server(message)),
-            _ => Err(ClientError::Protocol("expected committed response".to_string())),
+            _ => Err(ClientError::Protocol(
+                "expected committed response".to_string(),
+            )),
         }
     }
 
@@ -303,7 +309,9 @@ impl Client {
         match self.receive_response().await? {
             Response::RolledBack { tx_id: _ } => Ok(()),
             Response::Error { message } => Err(ClientError::Server(message)),
-            _ => Err(ClientError::Protocol("expected rolled back response".to_string())),
+            _ => Err(ClientError::Protocol(
+                "expected rolled back response".to_string(),
+            )),
         }
     }
 
@@ -376,9 +384,12 @@ impl Client {
         // Read message length
         loop {
             if self.buffer.len() >= 4 {
-                let len =
-                    u32::from_be_bytes([self.buffer[0], self.buffer[1], self.buffer[2], self.buffer[3]])
-                        as usize;
+                let len = u32::from_be_bytes([
+                    self.buffer[0],
+                    self.buffer[1],
+                    self.buffer[2],
+                    self.buffer[3],
+                ]) as usize;
 
                 if self.buffer.len() >= 4 + len {
                     self.buffer.advance(4);
@@ -420,8 +431,8 @@ pub mod sync {
 
         /// Connect to a MaharitDB server with custom configuration
         pub fn connect_with_config(addr: &str, config: ClientConfig) -> Result<Self> {
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|e| ClientError::Connection(e.into()))?;
+            let runtime =
+                tokio::runtime::Runtime::new().map_err(|e| ClientError::Connection(e.into()))?;
 
             let client = runtime.block_on(Client::connect_with_config(addr, config))?;
 
@@ -445,7 +456,8 @@ pub mod sync {
 
         /// Execute a query within a transaction without returning results
         pub fn execute_in_tx(&mut self, query: &str, tx_id: TxId) -> Result<()> {
-            self.runtime.block_on(self.client.execute_in_tx(query, tx_id))
+            self.runtime
+                .block_on(self.client.execute_in_tx(query, tx_id))
         }
 
         /// Begin a new transaction

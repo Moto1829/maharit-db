@@ -53,7 +53,10 @@ impl TryFrom<u8> for RecordType {
             5 => Ok(RecordType::SetNodeProperty),
             6 => Ok(RecordType::SetEdgeProperty),
             7 => Ok(RecordType::Checkpoint),
-            _ => Err(WalError::CorruptedLog(format!("unknown record type: {}", value))),
+            _ => Err(WalError::CorruptedLog(format!(
+                "unknown record type: {}",
+                value
+            ))),
         }
     }
 }
@@ -216,7 +219,10 @@ impl Wal {
         };
 
         // Count how many records to remove
-        let records_before = records.iter().take_while(|r| r.lsn <= checkpoint_lsn).count();
+        let records_before = records
+            .iter()
+            .take_while(|r| r.lsn <= checkpoint_lsn)
+            .count();
         if records_before == 0 {
             return Ok(0);
         }
@@ -322,7 +328,12 @@ impl Wal {
             RecordPayload::DeleteNode { node_id } => {
                 writer.write_all(&node_id.to_le_bytes())?;
             }
-            RecordPayload::CreateEdge { edge_id, from, to, label } => {
+            RecordPayload::CreateEdge {
+                edge_id,
+                from,
+                to,
+                label,
+            } => {
                 writer.write_all(&edge_id.to_le_bytes())?;
                 writer.write_all(&from.to_le_bytes())?;
                 writer.write_all(&to.to_le_bytes())?;
@@ -331,12 +342,20 @@ impl Wal {
             RecordPayload::DeleteEdge { edge_id } => {
                 writer.write_all(&edge_id.to_le_bytes())?;
             }
-            RecordPayload::SetNodeProperty { node_id, key, value } => {
+            RecordPayload::SetNodeProperty {
+                node_id,
+                key,
+                value,
+            } => {
                 writer.write_all(&node_id.to_le_bytes())?;
                 Self::write_string(writer, key)?;
                 Self::write_property(writer, value)?;
             }
-            RecordPayload::SetEdgeProperty { edge_id, key, value } => {
+            RecordPayload::SetEdgeProperty {
+                edge_id,
+                key,
+                value,
+            } => {
                 writer.write_all(&edge_id.to_le_bytes())?;
                 Self::write_string(writer, key)?;
                 Self::write_property(writer, value)?;
@@ -399,7 +418,12 @@ impl Wal {
             RecordPayload::DeleteNode { node_id } => {
                 self.writer.write_all(&node_id.to_le_bytes())?;
             }
-            RecordPayload::CreateEdge { edge_id, from, to, label } => {
+            RecordPayload::CreateEdge {
+                edge_id,
+                from,
+                to,
+                label,
+            } => {
                 self.writer.write_all(&edge_id.to_le_bytes())?;
                 self.writer.write_all(&from.to_le_bytes())?;
                 self.writer.write_all(&to.to_le_bytes())?;
@@ -408,12 +432,20 @@ impl Wal {
             RecordPayload::DeleteEdge { edge_id } => {
                 self.writer.write_all(&edge_id.to_le_bytes())?;
             }
-            RecordPayload::SetNodeProperty { node_id, key, value } => {
+            RecordPayload::SetNodeProperty {
+                node_id,
+                key,
+                value,
+            } => {
                 self.writer.write_all(&node_id.to_le_bytes())?;
                 Self::write_string(&mut self.writer, key)?;
                 Self::write_property(&mut self.writer, value)?;
             }
-            RecordPayload::SetEdgeProperty { edge_id, key, value } => {
+            RecordPayload::SetEdgeProperty {
+                edge_id,
+                key,
+                value,
+            } => {
                 self.writer.write_all(&edge_id.to_le_bytes())?;
                 Self::write_string(&mut self.writer, key)?;
                 Self::write_property(&mut self.writer, value)?;
@@ -470,7 +502,12 @@ impl Wal {
                 reader.read_exact(&mut buf)?;
                 let to = u64::from_le_bytes(buf);
                 let label = Self::read_string(reader)?;
-                RecordPayload::CreateEdge { edge_id, from, to, label }
+                RecordPayload::CreateEdge {
+                    edge_id,
+                    from,
+                    to,
+                    label,
+                }
             }
             RecordType::DeleteEdge => {
                 reader.read_exact(&mut buf)?;
@@ -482,14 +519,22 @@ impl Wal {
                 let node_id = u64::from_le_bytes(buf);
                 let key = Self::read_string(reader)?;
                 let value = Self::read_property(reader)?;
-                RecordPayload::SetNodeProperty { node_id, key, value }
+                RecordPayload::SetNodeProperty {
+                    node_id,
+                    key,
+                    value,
+                }
             }
             RecordType::SetEdgeProperty => {
                 reader.read_exact(&mut buf)?;
                 let edge_id = u64::from_le_bytes(buf);
                 let key = Self::read_string(reader)?;
                 let value = Self::read_property(reader)?;
-                RecordPayload::SetEdgeProperty { edge_id, key, value }
+                RecordPayload::SetEdgeProperty {
+                    edge_id,
+                    key,
+                    value,
+                }
             }
             RecordType::Checkpoint => {
                 reader.read_exact(&mut buf)?;
@@ -529,7 +574,12 @@ impl Wal {
                     graph.delete_node(actual_id);
                 }
             }
-            RecordPayload::CreateEdge { edge_id: _, from, to, label } => {
+            RecordPayload::CreateEdge {
+                edge_id: _,
+                from,
+                to,
+                label,
+            } => {
                 let actual_from = id_map.get(from).copied().unwrap_or(*from);
                 let actual_to = id_map.get(to).copied().unwrap_or(*to);
                 graph.create_edge(actual_from, actual_to, label)?;
@@ -537,13 +587,21 @@ impl Wal {
             RecordPayload::DeleteEdge { edge_id } => {
                 graph.delete_edge(*edge_id);
             }
-            RecordPayload::SetNodeProperty { node_id, key, value } => {
+            RecordPayload::SetNodeProperty {
+                node_id,
+                key,
+                value,
+            } => {
                 let actual_id = id_map.get(node_id).copied().unwrap_or(*node_id);
                 if let Some(node) = graph.get_node_mut(actual_id) {
                     node.set_property(key.clone(), value.clone());
                 }
             }
-            RecordPayload::SetEdgeProperty { edge_id, key, value } => {
+            RecordPayload::SetEdgeProperty {
+                edge_id,
+                key,
+                value,
+            } => {
                 if let Some(edge) = graph.get_edge_mut(*edge_id) {
                     edge.set_property(key.clone(), value.clone());
                 }
@@ -572,8 +630,7 @@ impl Wal {
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
 
-        String::from_utf8(buf)
-            .map_err(|_| WalError::CorruptedLog("invalid UTF-8".to_string()))
+        String::from_utf8(buf).map_err(|_| WalError::CorruptedLog("invalid UTF-8".to_string()))
     }
 
     fn write_property<W: Write>(writer: &mut W, value: &PropertyValue) -> Result<()> {
@@ -624,7 +681,10 @@ impl Wal {
                 let s = Self::read_string(reader)?;
                 Ok(PropertyValue::String(s))
             }
-            t => Err(WalError::CorruptedLog(format!("unknown property type: {}", t))),
+            t => Err(WalError::CorruptedLog(format!(
+                "unknown property type: {}",
+                t
+            ))),
         }
     }
 }
@@ -655,7 +715,8 @@ mod tests {
                     node_id: 0,
                     label: "Person".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             wal.append(
                 RecordType::CreateNode,
@@ -663,7 +724,8 @@ mod tests {
                     node_id: 1,
                     label: "Person".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             wal.append(
                 RecordType::CreateEdge,
@@ -673,7 +735,8 @@ mod tests {
                     to: 1,
                     label: "KNOWS".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             wal.sync().unwrap();
         }
@@ -706,7 +769,8 @@ mod tests {
                     node_id: 0,
                     label: "Person".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             wal.append(
                 RecordType::SetNodeProperty,
@@ -715,7 +779,8 @@ mod tests {
                     key: "name".to_string(),
                     value: PropertyValue::String("Alice".to_string()),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             wal.sync().unwrap();
         }
@@ -749,7 +814,8 @@ mod tests {
                     node_id: 0,
                     label: "Test".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
 
             let cp_lsn = wal.checkpoint().unwrap();
             assert_eq!(cp_lsn, 2);
@@ -773,7 +839,8 @@ mod tests {
                     node_id: 0,
                     label: "A".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
             wal.sync().unwrap();
             assert_eq!(wal.current_lsn(), 1);
         }
@@ -789,7 +856,8 @@ mod tests {
                     node_id: 1,
                     label: "B".to_string(),
                 },
-            ).unwrap();
+            )
+            .unwrap();
             wal.sync().unwrap();
             assert_eq!(wal.current_lsn(), 2);
         }
@@ -810,14 +878,16 @@ mod tests {
                 node_id: 0,
                 label: "A".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.append(
             RecordType::CreateNode,
             RecordPayload::CreateNode {
                 node_id: 1,
                 label: "B".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.sync().unwrap();
 
         // Cleanup should do nothing without checkpoint
@@ -841,14 +911,16 @@ mod tests {
                 node_id: 0,
                 label: "A".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.append(
             RecordType::CreateNode,
             RecordPayload::CreateNode {
                 node_id: 1,
                 label: "B".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create checkpoint
         wal.checkpoint().unwrap();
@@ -860,14 +932,16 @@ mod tests {
                 node_id: 2,
                 label: "C".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.append(
             RecordType::CreateNode,
             RecordPayload::CreateNode {
                 node_id: 3,
                 label: "D".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.sync().unwrap();
 
         assert_eq!(wal.record_count().unwrap(), 5); // 2 + checkpoint + 2
@@ -900,7 +974,8 @@ mod tests {
                 node_id: 0,
                 label: "Test".to_string(),
             },
-        ).unwrap();
+        )
+        .unwrap();
         wal.sync().unwrap();
 
         let size = wal.file_size().unwrap();

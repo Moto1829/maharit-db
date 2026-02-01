@@ -8,8 +8,8 @@
 //! - Graceful shutdown
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
@@ -19,7 +19,7 @@ use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
 
 /// Server configuration
@@ -213,7 +213,9 @@ impl TcpServer {
             match accept_result {
                 Ok(Ok((socket, addr))) => {
                     self.stats.total_connections.fetch_add(1, Ordering::SeqCst);
-                    self.stats.current_connections.fetch_add(1, Ordering::SeqCst);
+                    self.stats
+                        .current_connections
+                        .fetch_add(1, Ordering::SeqCst);
 
                     let graph = Arc::clone(&self.graph);
                     let stats = Arc::clone(&self.stats);
@@ -343,14 +345,12 @@ async fn handle_connection(
                 };
                 Response::TransactionBegun { tx_id }
             }
-            Request::Commit { tx_id } => {
-                match tx_manager.commit(tx_id) {
-                    Ok(()) => Response::Committed { tx_id },
-                    Err(e) => Response::Error {
-                        message: format!("Commit failed: {}", e),
-                    },
-                }
-            }
+            Request::Commit { tx_id } => match tx_manager.commit(tx_id) {
+                Ok(()) => Response::Committed { tx_id },
+                Err(e) => Response::Error {
+                    message: format!("Commit failed: {}", e),
+                },
+            },
             Request::Rollback { tx_id } => {
                 let mut g = graph.write().await;
                 match tx_manager.rollback(tx_id, &mut g) {
@@ -394,7 +394,7 @@ async fn read_message(
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "Read timeout",
-                ))
+                ));
             }
         };
 
@@ -410,9 +410,8 @@ async fn send_response(
     response: &Response,
     write_timeout: Duration,
 ) -> std::io::Result<()> {
-    let json = serde_json::to_vec(response).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let json = serde_json::to_vec(response)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     let len = json.len() as u32;
     let len_bytes = len.to_be_bytes();
@@ -441,13 +440,13 @@ async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
             Err(e) => {
                 return Response::Error {
                     message: format!("Parse error: {}", e),
-                }
+                };
             }
         },
         Err(e) => {
             return Response::Error {
                 message: format!("Lexer error: {}", e),
-            }
+            };
         }
     };
 

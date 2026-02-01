@@ -87,7 +87,11 @@ fn main() {
         edge.set_property("years", 2);
     }
 
-    println!("   Created: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+    println!(
+        "   Created: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
 
     // 2. Export to CSV
     println!("\n2. Exporting to CSV...");
@@ -176,7 +180,10 @@ fn main() {
         let json_file = fs::File::open(json_path).unwrap();
         let stats = JsonImporter::import(&mut imported_graph, json_file).unwrap();
 
-        println!("   Imported {} nodes, {} edges", stats.nodes_imported, stats.edges_imported);
+        println!(
+            "   Imported {} nodes, {} edges",
+            stats.nodes_imported, stats.edges_imported
+        );
         println!(
             "   Imported graph: {} nodes, {} edges",
             imported_graph.node_count(),
@@ -216,7 +223,10 @@ fn main() {
         let mut city_graph = Graph::new();
         let stats = JsonImporter::import(&mut city_graph, json_str.as_bytes()).unwrap();
 
-        println!("   Imported {} nodes, {} edges", stats.nodes_imported, stats.edges_imported);
+        println!(
+            "   Imported {} nodes, {} edges",
+            stats.nodes_imported, stats.edges_imported
+        );
 
         let cities = city_graph.find_nodes_by_label("City");
         println!("   Cities:");
@@ -242,8 +252,14 @@ fn main() {
         let original_edges = graph.edge_count();
         let roundtrip_edges = roundtrip_graph.edge_count();
 
-        println!("   Original:  {} nodes, {} edges", original_nodes, original_edges);
-        println!("   Roundtrip: {} nodes, {} edges", roundtrip_nodes, roundtrip_edges);
+        println!(
+            "   Original:  {} nodes, {} edges",
+            original_nodes, original_edges
+        );
+        println!(
+            "   Roundtrip: {} nodes, {} edges",
+            roundtrip_nodes, roundtrip_edges
+        );
         println!(
             "   Match: {}",
             original_nodes == roundtrip_nodes && original_edges == roundtrip_edges

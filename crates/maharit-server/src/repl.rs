@@ -7,7 +7,9 @@ use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::history::DefaultHistory;
-use rustyline::validate::{MatchingBracketValidator, ValidationContext, ValidationResult, Validator};
+use rustyline::validate::{
+    MatchingBracketValidator, ValidationContext, ValidationResult, Validator,
+};
 use rustyline::{Context, Editor, Helper};
 
 const HISTORY_FILE: &str = ".maharit_history";
@@ -294,7 +296,10 @@ impl Repl {
 
         // ヘッダー表示
         println!("{}", result.columns.join(" | "));
-        println!("{}", "-".repeat(result.columns.iter().map(|c| c.len() + 3).sum::<usize>()));
+        println!(
+            "{}",
+            "-".repeat(result.columns.iter().map(|c| c.len() + 3).sum::<usize>())
+        );
 
         // 行表示
         for row in &result.rows {

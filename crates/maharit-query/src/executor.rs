@@ -327,7 +327,9 @@ impl<'a> Executor<'a> {
             Value::Int(n) => Ok(PropertyValue::Int(*n)),
             Value::Float(n) => Ok(PropertyValue::Float(*n)),
             Value::String(s) => Ok(PropertyValue::String(s.clone())),
-            _ => Err(ExecuteError::TypeError("cannot convert to property value".to_string())),
+            _ => Err(ExecuteError::TypeError(
+                "cannot convert to property value".to_string(),
+            )),
         }
     }
 
@@ -363,12 +365,8 @@ impl<'a> Executor<'a> {
         current_bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
         match pattern {
-            Pattern::Node(node_pattern) => {
-                self.match_node_pattern(node_pattern, current_bindings)
-            }
-            Pattern::Path(path_pattern) => {
-                self.match_path_pattern(path_pattern, current_bindings)
-            }
+            Pattern::Node(node_pattern) => self.match_node_pattern(node_pattern, current_bindings),
+            Pattern::Path(path_pattern) => self.match_path_pattern(path_pattern, current_bindings),
         }
     }
 
@@ -430,7 +428,12 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<Bindings>, ExecuteError> {
         // Check if this is a variable-length path
         if let Some(ref range) = segment.edge.length_range {
-            return self.match_variable_length_segment(segment, prev_pattern, current_bindings, range);
+            return self.match_variable_length_segment(
+                segment,
+                prev_pattern,
+                current_bindings,
+                range,
+            );
         }
 
         // Single-hop matching
@@ -453,13 +456,14 @@ impl<'a> Executor<'a> {
         let mut result = Vec::new();
 
         // Get the previous node
-        let prev_var = prev_pattern.variable.as_ref().ok_or_else(|| {
-            ExecuteError::TypeError("path pattern requires variable".to_string())
-        })?;
+        let prev_var = prev_pattern
+            .variable
+            .as_ref()
+            .ok_or_else(|| ExecuteError::TypeError("path pattern requires variable".to_string()))?;
 
-        let prev_id = *bindings.get(prev_var).ok_or_else(|| {
-            ExecuteError::UndefinedVariable(prev_var.clone())
-        })?;
+        let prev_id = *bindings
+            .get(prev_var)
+            .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
         // Get edges from previous node
         let edges = self.get_edges_by_direction(prev_id, segment.edge.direction);
@@ -508,9 +512,9 @@ impl<'a> Executor<'a> {
                 ExecuteError::TypeError("path pattern requires variable".to_string())
             })?;
 
-            let start_id = *bindings.get(prev_var).ok_or_else(|| {
-                ExecuteError::UndefinedVariable(prev_var.clone())
-            })?;
+            let start_id = *bindings
+                .get(prev_var)
+                .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
             // BFS to find all reachable nodes within the range
             let mut visited_paths: Vec<(NodeId, u32, Vec<u64>)> = vec![(start_id, 0, vec![])];
@@ -637,9 +641,10 @@ impl<'a> Executor<'a> {
         bindings_list: &[Bindings],
     ) -> Result<ResultSet, ExecuteError> {
         // Check if any aggregation is present
-        let has_aggregation = return_clause.items.iter().any(|item| {
-            matches!(item, ReturnItem::Aggregate(_))
-        });
+        let has_aggregation = return_clause
+            .items
+            .iter()
+            .any(|item| matches!(item, ReturnItem::Aggregate(_)));
 
         if has_aggregation {
             return self.build_aggregated_result_set(return_clause, bindings_list);
@@ -662,7 +667,9 @@ impl<'a> Executor<'a> {
                 row_values.push(self.evaluate_return_item(item, bindings)?);
             }
 
-            rows.push(Row { columns: row_values });
+            rows.push(Row {
+                columns: row_values,
+            });
         }
 
         Ok(ResultSet::new(columns, rows))
@@ -675,16 +682,30 @@ impl<'a> Executor<'a> {
             ReturnItem::All => "*".to_string(),
             ReturnItem::Aggregate(agg) => match agg {
                 AggregateFunction::Count(_) => "COUNT(*)".to_string(),
-                AggregateFunction::Sum(inner) => format!("SUM({})", self.return_item_to_column_name(inner)),
-                AggregateFunction::Avg(inner) => format!("AVG({})", self.return_item_to_column_name(inner)),
-                AggregateFunction::Min(inner) => format!("MIN({})", self.return_item_to_column_name(inner)),
-                AggregateFunction::Max(inner) => format!("MAX({})", self.return_item_to_column_name(inner)),
-                AggregateFunction::Collect(inner) => format!("COLLECT({})", self.return_item_to_column_name(inner)),
+                AggregateFunction::Sum(inner) => {
+                    format!("SUM({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::Avg(inner) => {
+                    format!("AVG({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::Min(inner) => {
+                    format!("MIN({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::Max(inner) => {
+                    format!("MAX({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::Collect(inner) => {
+                    format!("COLLECT({})", self.return_item_to_column_name(inner))
+                }
             },
         }
     }
 
-    fn evaluate_return_item(&self, item: &ReturnItem, bindings: &Bindings) -> Result<Value, ExecuteError> {
+    fn evaluate_return_item(
+        &self,
+        item: &ReturnItem,
+        bindings: &Bindings,
+    ) -> Result<Value, ExecuteError> {
         match item {
             ReturnItem::Variable(var) => {
                 if let Some(&node_id) = bindings.get(var) {
@@ -754,7 +775,9 @@ impl<'a> Executor<'a> {
             row_values.push(value);
         }
 
-        let rows = vec![Row { columns: row_values }];
+        let rows = vec![Row {
+            columns: row_values,
+        }];
         Ok(ResultSet::new(columns, rows))
     }
 
@@ -834,7 +857,11 @@ impl<'a> Executor<'a> {
                         min = Some(match min {
                             None => val,
                             Some(current) => {
-                                if self.compare_values(&val, &current, |o| o.is_lt()).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false) {
+                                if self
+                                    .compare_values(&val, &current, |o| o.is_lt())
+                                    .map(|v| matches!(v, Value::Bool(true)))
+                                    .unwrap_or(false)
+                                {
                                     val
                                 } else {
                                     current
@@ -854,7 +881,11 @@ impl<'a> Executor<'a> {
                         max = Some(match max {
                             None => val,
                             Some(current) => {
-                                if self.compare_values(&val, &current, |o| o.is_gt()).map(|v| matches!(v, Value::Bool(true))).unwrap_or(false) {
+                                if self
+                                    .compare_values(&val, &current, |o| o.is_gt())
+                                    .map(|v| matches!(v, Value::Bool(true)))
+                                    .unwrap_or(false)
+                                {
                                     val
                                 } else {
                                     current
@@ -895,12 +926,10 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, ExecuteError> {
         match expr {
             Expression::Literal(lit) => Ok(Value::from(lit.clone())),
-            Expression::Variable(var) => {
-                bindings
-                    .get(var)
-                    .map(|&id| Value::Node(id))
-                    .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))
-            }
+            Expression::Variable(var) => bindings
+                .get(var)
+                .map(|&id| Value::Node(id))
+                .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone())),
             Expression::Property(var, prop) => {
                 let node_id = *bindings
                     .get(var)
@@ -977,9 +1006,15 @@ impl<'a> Executor<'a> {
     {
         let ordering = match (left, right) {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Int(a), Value::Float(b)) => (*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(a), Value::Int(b)) => a
+                .partial_cmp(&(*b as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             _ => return Err(ExecuteError::TypeError("cannot compare values".to_string())),
         };
@@ -1003,7 +1038,9 @@ impl<'a> Executor<'a> {
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(*a, *b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(*a as f64, *b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(*a, *b as f64))),
-            _ => Err(ExecuteError::TypeError("arithmetic requires numbers".to_string())),
+            _ => Err(ExecuteError::TypeError(
+                "arithmetic requires numbers".to_string(),
+            )),
         }
     }
 
@@ -1016,7 +1053,9 @@ impl<'a> Executor<'a> {
             UnaryOp::Neg => match val {
                 Value::Int(n) => Ok(Value::Int(-n)),
                 Value::Float(n) => Ok(Value::Float(-n)),
-                _ => Err(ExecuteError::TypeError("negation requires number".to_string())),
+                _ => Err(ExecuteError::TypeError(
+                    "negation requires number".to_string(),
+                )),
             },
         }
     }
@@ -1099,18 +1138,32 @@ mod tests {
         let result = execute(&mut graph, "MATCH (n:Person) RETURN n.name").unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
     fn test_match_path() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
 
-        let result = execute(&mut graph, "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
+        )
+        .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
     }
 
@@ -1144,7 +1197,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         let result = execute(&mut graph, "MATCH (n:Person) RETURN SUM(n.age)").unwrap();
 
@@ -1157,7 +1214,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         let result = execute(&mut graph, "MATCH (n:Person) RETURN AVG(n.age)").unwrap();
 
@@ -1170,7 +1231,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         let min_result = execute(&mut graph, "MATCH (n:Person) RETURN MIN(n.age)").unwrap();
         let max_result = execute(&mut graph, "MATCH (n:Person) RETURN MAX(n.age)").unwrap();
@@ -1183,28 +1248,57 @@ mod tests {
     fn test_variable_length_path() {
         let mut graph = Graph::new();
         // Create a chain: Alice -> Bob -> Charlie -> David
-        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
 
         // Get Alice and Bob IDs
-        let alice_id = graph.nodes().find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string()))).unwrap().id;
-        let bob_id = graph.nodes().find(|n| n.properties.get("name") == Some(&PropertyValue::String("Bob".to_string()))).unwrap().id;
+        let alice_id = graph
+            .nodes()
+            .find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string())))
+            .unwrap()
+            .id;
+        let bob_id = graph
+            .nodes()
+            .find(|n| n.properties.get("name") == Some(&PropertyValue::String("Bob".to_string())))
+            .unwrap()
+            .id;
 
         // Create Charlie and David
         let charlie_id = graph.create_node("Person");
-        graph.get_node_mut(charlie_id).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
+        graph
+            .get_node_mut(charlie_id)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Charlie".to_string()));
         graph.create_edge(bob_id, charlie_id, "KNOWS").unwrap();
 
         let david_id = graph.create_node("Person");
-        graph.get_node_mut(david_id).unwrap().set_property("name", PropertyValue::String("David".to_string()));
+        graph
+            .get_node_mut(david_id)
+            .unwrap()
+            .set_property("name", PropertyValue::String("David".to_string()));
         graph.create_edge(charlie_id, david_id, "KNOWS").unwrap();
 
         // Test: Find all people reachable from Alice in 2 hops
-        let result = execute(&mut graph, "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*2]->(b:Person) RETURN b.name").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*2]->(b:Person) RETURN b.name",
+        )
+        .unwrap();
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Charlie".to_string())
+        );
 
         // Test: Find all people reachable from Alice in 1 to 3 hops
-        let result = execute(&mut graph, "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*1..3]->(b:Person) RETURN b.name").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*1..3]->(b:Person) RETURN b.name",
+        )
+        .unwrap();
         assert_eq!(result.row_count(), 3); // Bob, Charlie, David
     }
 
@@ -1213,18 +1307,31 @@ mod tests {
         let mut graph = Graph::new();
         // Create: A -> B -> C
         let a = graph.create_node("Node");
-        graph.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("A".to_string()));
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
 
         let b = graph.create_node("Node");
-        graph.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("B".to_string()));
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
         graph.create_edge(a, b, "NEXT").unwrap();
 
         let c = graph.create_node("Node");
-        graph.get_node_mut(c).unwrap().set_property("name", PropertyValue::String("C".to_string()));
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
         graph.create_edge(b, c, "NEXT").unwrap();
 
         // *2..3 should find C (2 hops) but not B (1 hop)
-        let result = execute(&mut graph, r#"MATCH (a:Node {name: "A"})-[:NEXT*2..3]->(b:Node) RETURN b.name"#).unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[:NEXT*2..3]->(b:Node) RETURN b.name"#,
+        )
+        .unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::String("C".to_string()));
     }

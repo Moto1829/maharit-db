@@ -106,9 +106,9 @@ pub struct LengthRange {
 /// エッジの方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeDirection {
-    Outgoing,  // ->
-    Incoming,  // <-
-    Both,      // --
+    Outgoing, // ->
+    Incoming, // <-
+    Both,     // --
 }
 
 /// RETURN句

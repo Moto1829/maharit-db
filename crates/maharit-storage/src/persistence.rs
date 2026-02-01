@@ -341,7 +341,10 @@ mod tests {
 
         let edge = loaded.edges().next().unwrap();
         assert_eq!(edge.label, "KNOWS");
-        assert_eq!(edge.properties.get("since"), Some(&PropertyValue::Int(2020)));
+        assert_eq!(
+            edge.properties.get("since"),
+            Some(&PropertyValue::Int(2020))
+        );
 
         std::fs::remove_file(path).ok();
     }
@@ -380,7 +383,10 @@ mod tests {
             node.properties.get("bool_val"),
             Some(&PropertyValue::Bool(true))
         );
-        assert_eq!(node.properties.get("int_val"), Some(&PropertyValue::Int(42)));
+        assert_eq!(
+            node.properties.get("int_val"),
+            Some(&PropertyValue::Int(42))
+        );
         assert_eq!(
             node.properties.get("float_val"),
             Some(&PropertyValue::Float(3.14))

@@ -41,22 +41,14 @@ fn run_server(args: &[String]) {
             "--host" | "-h" => {
                 if i + 1 < args.len() {
                     let host = &args[i + 1];
-                    let port = config
-                        .bind_address
-                        .split(':')
-                        .nth(1)
-                        .unwrap_or("7687");
+                    let port = config.bind_address.split(':').nth(1).unwrap_or("7687");
                     config.bind_address = format!("{}:{}", host, port);
                     i += 1;
                 }
             }
             "--port" | "-p" => {
                 if i + 1 < args.len() {
-                    let host = config
-                        .bind_address
-                        .split(':')
-                        .next()
-                        .unwrap_or("127.0.0.1");
+                    let host = config.bind_address.split(':').next().unwrap_or("127.0.0.1");
                     config.bind_address = format!("{}:{}", host, &args[i + 1]);
                     i += 1;
                 }

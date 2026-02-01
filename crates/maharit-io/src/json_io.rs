@@ -162,11 +162,9 @@ impl JsonExporter {
             PropertyValue::Null => serde_json::Value::Null,
             PropertyValue::Bool(b) => serde_json::Value::Bool(*b),
             PropertyValue::Int(n) => serde_json::Value::Number((*n).into()),
-            PropertyValue::Float(n) => {
-                serde_json::Number::from_f64(*n)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
-            }
+            PropertyValue::Float(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
             PropertyValue::String(s) => serde_json::Value::String(s.clone()),
         }
     }

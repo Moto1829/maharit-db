@@ -384,7 +384,9 @@ impl TransactionManager {
                     return Err(TransactionError::Deadlock);
                 }
 
-                let lock_info = locks.entry(resource.to_string()).or_insert_with(LockInfo::new);
+                let lock_info = locks
+                    .entry(resource.to_string())
+                    .or_insert_with(LockInfo::new);
 
                 if lock_info.can_grant(mode, tx_id) {
                     // Grant the lock

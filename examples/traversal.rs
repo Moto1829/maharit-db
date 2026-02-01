@@ -7,9 +7,7 @@
 //! - Dijkstra's algorithm for weighted paths
 //! - A* algorithm with heuristics
 
-use maharit_core::{
-    traversal::Direction, AStar, Dijkstra, Graph, PropertyValue,
-};
+use maharit_core::{AStar, Dijkstra, Graph, PropertyValue, traversal::Direction};
 
 fn main() {
     println!("=== maharit-db Traversal Example ===\n");
@@ -135,7 +133,11 @@ fn main() {
                     .unwrap_or_else(|| id.to_string())
             })
             .collect();
-        println!("   Path: {} (length: {} hops)", names.join(" -> "), path.len() - 1);
+        println!(
+            "   Path: {} (length: {} hops)",
+            names.join(" -> "),
+            path.len() - 1
+        );
     } else {
         println!("   No path found!");
     }

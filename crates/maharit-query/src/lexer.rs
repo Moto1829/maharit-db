@@ -49,30 +49,30 @@ pub enum TokenKind {
     String(String),
 
     // 比較演算子
-    Eq,        // =
-    Neq,       // <>
-    Lt,        // <
-    Gt,        // >
-    Lte,       // <=
-    Gte,       // >=
+    Eq,  // =
+    Neq, // <>
+    Lt,  // <
+    Gt,  // >
+    Lte, // <=
+    Gte, // >=
 
     // 算術演算子
-    Plus,      // +
-    Minus,     // -
-    Star,      // *
-    Slash,     // /
+    Plus,  // +
+    Minus, // -
+    Star,  // *
+    Slash, // /
 
     // 記号
-    LParen,    // (
-    RParen,    // )
-    LBracket,  // [
-    RBracket,  // ]
-    LBrace,    // {
-    RBrace,    // }
-    Colon,     // :
-    Comma,     // ,
-    Dot,       // .
-    Pipe,      // |
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
+    Colon,    // :
+    Comma,    // ,
+    Dot,      // .
+    Pipe,     // |
 
     // 矢印パターン
     Arrow,     // ->
@@ -384,7 +384,8 @@ impl<'a> Lexer<'a> {
                 // Look ahead: if the next char after '.' is also '.', don't consume it
                 // This handles range syntax like "2..5"
                 let next_pos = self.pos + 1;
-                if next_pos < self.input.len() && self.input.as_bytes().get(next_pos) == Some(&b'.') {
+                if next_pos < self.input.len() && self.input.as_bytes().get(next_pos) == Some(&b'.')
+                {
                     break;
                 }
                 // Also check if the char after '.' is a digit (valid float) or not

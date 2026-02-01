@@ -51,7 +51,11 @@ fn main() {
         graph.create_edge(alice, company, "WORKS_AT").unwrap();
         graph.create_edge(bob, company, "WORKS_AT").unwrap();
 
-        println!("   Created graph: {} nodes, {} edges", graph.node_count(), graph.edge_count());
+        println!(
+            "   Created graph: {} nodes, {} edges",
+            graph.node_count(),
+            graph.edge_count()
+        );
 
         // Save to file
         PersistentStorage::save(&graph, db_path).unwrap();
@@ -231,9 +235,17 @@ fn main() {
             let mut graph = Graph::new();
             let lsn = wal.recover(&mut graph).unwrap();
 
-            println!("   Session 2: Recovered {} nodes at LSN {}", graph.node_count(), lsn);
+            println!(
+                "   Session 2: Recovered {} nodes at LSN {}",
+                graph.node_count(),
+                lsn
+            );
             for node in graph.nodes() {
-                println!("     - {} ({})", node.label, node.get_property("username").unwrap());
+                println!(
+                    "     - {} ({})",
+                    node.label,
+                    node.get_property("username").unwrap()
+                );
             }
         }
     }

@@ -8,7 +8,7 @@ pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{
     LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,
 };
-pub use wal::{Lsn, LogRecord, RecordPayload, RecordType, Wal, WalError};
+pub use wal::{LogRecord, Lsn, RecordPayload, RecordType, Wal, WalError};
 
 /// インメモリストレージエンジン
 pub struct InMemoryStorage {
