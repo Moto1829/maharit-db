@@ -22,9 +22,11 @@ maharit-dbをDockerコンテナで実行できるようにする。
 - [ ] ヘルスチェックエンドポイント（将来的）
 
 ### ドキュメント
-- [ ] Docker環境での起動方法
-- [ ] docker-composeでの起動方法
-- [ ] 設定オプションの説明
+- [x] Docker環境での起動方法
+- [x] docker-composeでの起動方法
+- [x] 設定オプションの説明
+
+ドキュメント: `docs/docker.md`
 
 ## 作成ファイル
 - `Dockerfile`
