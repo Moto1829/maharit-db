@@ -6,29 +6,29 @@
 ## 実装内容
 
 ### ORDER BY
-- [ ] 単一カラムでのソート
-- [ ] 複数カラムでのソート
-- [ ] ASC/DESC指定
+- [x] 単一カラムでのソート
+- [x] 複数カラムでのソート
+- [x] ASC/DESC指定
 - [ ] NULL値の扱い（NULLS FIRST/LAST）
 
 ### LIMIT / SKIP
-- [ ] LIMIT句の実装
-- [ ] SKIP句の実装
-- [ ] 組み合わせ: `SKIP 10 LIMIT 20`
+- [x] LIMIT句の実装
+- [x] SKIP句の実装
+- [x] 組み合わせ: `SKIP 10 LIMIT 20`
 
 ### DISTINCT
-- [ ] RETURN DISTINCTの実装
-- [ ] 複数カラムでの重複排除
+- [x] RETURN DISTINCTの実装
+- [x] 複数カラムでの重複排除
 
 ### パーサー拡張
-- [ ] ORDER BY句のパース
-- [ ] LIMIT/SKIP句のパース
-- [ ] DISTINCT修飾子のパース
+- [x] ORDER BY句のパース
+- [x] LIMIT/SKIP句のパース
+- [x] DISTINCT修飾子のパース
 
 ### 実行エンジン拡張
-- [ ] ソート処理の実装
+- [x] ソート処理の実装
 - [ ] メモリ効率の良いソート（大量データ対応）
-- [ ] ページネーション処理
+- [x] ページネーション処理
 
 ## クエリ例
 ```cypher

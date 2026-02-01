@@ -672,7 +672,100 @@ impl<'a> Executor<'a> {
             });
         }
 
+        // Apply DISTINCT
+        if return_clause.distinct {
+            rows = self.apply_distinct(rows);
+        }
+
+        // Apply ORDER BY
+        if let Some(ref order_by) = return_clause.order_by {
+            self.apply_order_by(&mut rows, order_by, &columns);
+        }
+
+        // Apply SKIP
+        if let Some(skip) = return_clause.skip {
+            let skip = skip as usize;
+            if skip < rows.len() {
+                rows = rows.into_iter().skip(skip).collect();
+            } else {
+                rows.clear();
+            }
+        }
+
+        // Apply LIMIT
+        if let Some(limit) = return_clause.limit {
+            rows.truncate(limit as usize);
+        }
+
         Ok(ResultSet::new(columns, rows))
+    }
+
+    fn apply_distinct(&self, rows: Vec<Row>) -> Vec<Row> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        for row in rows {
+            let key = self.row_to_key(&row);
+            if seen.insert(key) {
+                result.push(row);
+            }
+        }
+
+        result
+    }
+
+    fn row_to_key(&self, row: &Row) -> String {
+        row.columns
+            .iter()
+            .map(|v| format!("{:?}", v))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn apply_order_by(&self, rows: &mut [Row], order_by: &OrderByClause, columns: &[String]) {
+        rows.sort_by(|a, b| {
+            for item in &order_by.items {
+                let col_name = match &item.expression {
+                    OrderByExpression::Variable(v) => v.clone(),
+                    OrderByExpression::Property(v, p) => format!("{}.{}", v, p),
+                };
+
+                let col_idx = columns.iter().position(|c| c == &col_name);
+
+                if let Some(idx) = col_idx {
+                    let cmp = self.compare_values_for_sort(&a.columns[idx], &b.columns[idx]);
+                    let cmp = match item.direction {
+                        OrderDirection::Asc => cmp,
+                        OrderDirection::Desc => cmp.reverse(),
+                    };
+                    if cmp != std::cmp::Ordering::Equal {
+                        return cmp;
+                    }
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    fn compare_values_for_sort(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        match (a, b) {
+            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+            (Value::Null, _) => std::cmp::Ordering::Greater, // NULL comes last
+            (_, Value::Null) => std::cmp::Ordering::Less,
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Int(a), Value::Float(b)) => (*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(a), Value::Int(b)) => a
+                .partial_cmp(&(*b as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            _ => std::cmp::Ordering::Equal,
+        }
     }
 
     fn return_item_to_column_name(&self, item: &ReturnItem) -> String {
@@ -1334,5 +1427,164 @@ mod tests {
         .unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::String("C".to_string()));
+    }
+
+    // ========== ORDER BY tests ==========
+
+    #[test]
+    fn test_order_by_asc() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    #[test]
+    fn test_order_by_desc() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_order_by_string() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name ORDER BY n.name ASC",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
+        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    // ========== LIMIT tests ==========
+
+    #[test]
+    fn test_limit() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie"})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n.name LIMIT 2").unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_limit_larger_than_result() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n.name LIMIT 10").unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    // ========== SKIP tests ==========
+
+    #[test]
+    fn test_skip() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age SKIP 1",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    #[test]
+    fn test_skip_and_limit() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "David", age: 40})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age SKIP 1 LIMIT 2",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    // ========== DISTINCT tests ==========
+
+    #[test]
+    fn test_distinct() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN DISTINCT n.city",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_distinct_with_order_by() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN DISTINCT n.city ORDER BY n.city",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Osaka".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Tokyo".to_string()));
     }
 }

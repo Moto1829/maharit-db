@@ -114,7 +114,45 @@ pub enum EdgeDirection {
 /// RETURN句
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReturnClause {
+    /// RETURN DISTINCT かどうか
+    pub distinct: bool,
     pub items: Vec<ReturnItem>,
+    /// ORDER BY句
+    pub order_by: Option<OrderByClause>,
+    /// SKIP句
+    pub skip: Option<u64>,
+    /// LIMIT句
+    pub limit: Option<u64>,
+}
+
+/// ORDER BY句
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByClause {
+    pub items: Vec<OrderByItem>,
+}
+
+/// ORDER BY項目
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByItem {
+    pub expression: OrderByExpression,
+    pub direction: OrderDirection,
+}
+
+/// ORDER BY式
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrderByExpression {
+    /// 変数: ORDER BY n
+    Variable(String),
+    /// プロパティ: ORDER BY n.name
+    Property(String, String),
+}
+
+/// ソート方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrderDirection {
+    #[default]
+    Asc,
+    Desc,
 }
 
 /// RETURN項目

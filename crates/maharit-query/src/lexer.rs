@@ -41,6 +41,14 @@ pub enum TokenKind {
     True,
     False,
     Null,
+    // ソート・ページネーション用キーワード
+    Order,
+    By,
+    Asc,
+    Desc,
+    Limit,
+    Skip,
+    Distinct,
 
     // 識別子とリテラル
     Ident(String),
@@ -99,6 +107,13 @@ impl fmt::Display for TokenKind {
             TokenKind::True => write!(f, "true"),
             TokenKind::False => write!(f, "false"),
             TokenKind::Null => write!(f, "null"),
+            TokenKind::Order => write!(f, "ORDER"),
+            TokenKind::By => write!(f, "BY"),
+            TokenKind::Asc => write!(f, "ASC"),
+            TokenKind::Desc => write!(f, "DESC"),
+            TokenKind::Limit => write!(f, "LIMIT"),
+            TokenKind::Skip => write!(f, "SKIP"),
+            TokenKind::Distinct => write!(f, "DISTINCT"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -367,6 +382,13 @@ impl<'a> Lexer<'a> {
             "TRUE" => TokenKind::True,
             "FALSE" => TokenKind::False,
             "NULL" => TokenKind::Null,
+            "ORDER" => TokenKind::Order,
+            "BY" => TokenKind::By,
+            "ASC" => TokenKind::Asc,
+            "DESC" => TokenKind::Desc,
+            "LIMIT" => TokenKind::Limit,
+            "SKIP" => TokenKind::Skip,
+            "DISTINCT" => TokenKind::Distinct,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

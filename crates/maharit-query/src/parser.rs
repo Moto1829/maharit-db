@@ -164,6 +164,14 @@ impl Parser {
     }
 
     fn parse_return_clause(&mut self) -> Result<ReturnClause, ParseError> {
+        // DISTINCT (optional)
+        let distinct = if self.check(TokenKind::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let mut items = Vec::new();
 
         // First item
@@ -175,7 +183,88 @@ impl Parser {
             items.push(self.parse_return_item()?);
         }
 
-        Ok(ReturnClause { items })
+        // ORDER BY (optional)
+        let order_by = if self.check(TokenKind::Order) {
+            Some(self.parse_order_by_clause()?)
+        } else {
+            None
+        };
+
+        // SKIP (optional)
+        let skip = if self.check(TokenKind::Skip) {
+            self.advance();
+            Some(self.parse_positive_int()?)
+        } else {
+            None
+        };
+
+        // LIMIT (optional)
+        let limit = if self.check(TokenKind::Limit) {
+            self.advance();
+            Some(self.parse_positive_int()?)
+        } else {
+            None
+        };
+
+        Ok(ReturnClause {
+            distinct,
+            items,
+            order_by,
+            skip,
+            limit,
+        })
+    }
+
+    fn parse_order_by_clause(&mut self) -> Result<OrderByClause, ParseError> {
+        self.expect(TokenKind::Order)?;
+        self.expect(TokenKind::By)?;
+
+        let mut items = Vec::new();
+        items.push(self.parse_order_by_item()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            items.push(self.parse_order_by_item()?);
+        }
+
+        Ok(OrderByClause { items })
+    }
+
+    fn parse_order_by_item(&mut self) -> Result<OrderByItem, ParseError> {
+        let var = self.expect_ident()?;
+
+        let expression = if self.check(TokenKind::Dot) {
+            self.advance();
+            let prop = self.expect_ident()?;
+            OrderByExpression::Property(var, prop)
+        } else {
+            OrderByExpression::Variable(var)
+        };
+
+        let direction = if self.check(TokenKind::Desc) {
+            self.advance();
+            OrderDirection::Desc
+        } else if self.check(TokenKind::Asc) {
+            self.advance();
+            OrderDirection::Asc
+        } else {
+            OrderDirection::Asc // default
+        };
+
+        Ok(OrderByItem {
+            expression,
+            direction,
+        })
+    }
+
+    fn parse_positive_int(&mut self) -> Result<u64, ParseError> {
+        match self.peek_kind().cloned() {
+            Some(TokenKind::Int(n)) if n >= 0 => {
+                self.advance();
+                Ok(n as u64)
+            }
+            _ => Err(self.unexpected_token("positive integer")),
+        }
     }
 
     fn parse_return_item(&mut self) -> Result<ReturnItem, ParseError> {
