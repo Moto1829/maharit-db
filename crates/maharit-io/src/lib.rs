@@ -1,7 +1,11 @@
+pub mod bulk_io;
 pub mod csv_io;
+pub mod graphml_io;
 pub mod json_io;
 
+pub use bulk_io::{BulkConfig, BulkLoader, BulkProgress, BulkStats};
 pub use csv_io::{CsvExporter, CsvImporter};
+pub use graphml_io::{GraphMlExporter, GraphMlImporter};
 pub use json_io::{JsonExporter, JsonImporter};
 
 use thiserror::Error;
@@ -14,6 +18,9 @@ pub enum IoError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("XML error: {0}")]
+    Xml(#[from] quick_xml::Error),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
