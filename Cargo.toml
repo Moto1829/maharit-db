@@ -7,6 +7,7 @@ members = [
     "crates/maharit-server",
     "crates/maharit-io",
     "crates/maharit-viz",
+    "crates/maharit-client",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ maharit-storage = { path = "crates/maharit-storage" }
 maharit-query = { path = "crates/maharit-query" }
 maharit-io = { path = "crates/maharit-io" }
 maharit-viz = { path = "crates/maharit-viz" }
+maharit-client = { path = "crates/maharit-client" }
 thiserror = "2"
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
