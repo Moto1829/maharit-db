@@ -72,8 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `maharit-io` | インポート/エクスポート | 1,887 |
 | `maharit-viz` | グラフ可視化 | 487 |
 
-**合計: 14,467行**
-
 ## クエリ言語
 
 ### ノード操作
