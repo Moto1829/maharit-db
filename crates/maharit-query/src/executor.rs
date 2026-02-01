@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use maharit_core::{Graph, NodeId, PropertyValue};
+use maharit_core::{Edge, Graph, NodeId, PropertyValue};
 use thiserror::Error;
 
 use crate::ast::*;
@@ -428,68 +428,169 @@ impl<'a> Executor<'a> {
         prev_pattern: &NodePattern,
         current_bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
+        // Check if this is a variable-length path
+        if let Some(ref range) = segment.edge.length_range {
+            return self.match_variable_length_segment(segment, prev_pattern, current_bindings, range);
+        }
+
+        // Single-hop matching
         let mut result = Vec::new();
 
         for bindings in current_bindings {
-            // Get the previous node
-            let prev_var = prev_pattern.variable.as_ref().ok_or_else(|| {
-                ExecuteError::TypeError("path pattern requires variable".to_string())
-            })?;
+            let matches = self.match_single_hop(segment, prev_pattern, &bindings)?;
+            result.extend(matches);
+        }
 
-            let prev_id = *bindings.get(prev_var).ok_or_else(|| {
-                ExecuteError::UndefinedVariable(prev_var.clone())
-            })?;
+        Ok(result)
+    }
 
-            // Get edges from previous node
-            let edges = match segment.edge.direction {
-                EdgeDirection::Outgoing => self.graph.get_outgoing_edges(prev_id),
-                EdgeDirection::Incoming => self.graph.get_incoming_edges(prev_id),
-                EdgeDirection::Both => {
-                    let mut edges = self.graph.get_outgoing_edges(prev_id);
-                    edges.extend(self.graph.get_incoming_edges(prev_id));
-                    edges
+    fn match_single_hop(
+        &self,
+        segment: &PathSegment,
+        prev_pattern: &NodePattern,
+        bindings: &Bindings,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        let mut result = Vec::new();
+
+        // Get the previous node
+        let prev_var = prev_pattern.variable.as_ref().ok_or_else(|| {
+            ExecuteError::TypeError("path pattern requires variable".to_string())
+        })?;
+
+        let prev_id = *bindings.get(prev_var).ok_or_else(|| {
+            ExecuteError::UndefinedVariable(prev_var.clone())
+        })?;
+
+        // Get edges from previous node
+        let edges = self.get_edges_by_direction(prev_id, segment.edge.direction);
+
+        for edge in edges {
+            // Check edge type
+            if let Some(ref edge_type) = segment.edge.edge_type {
+                if &edge.label != edge_type {
+                    continue;
                 }
-            };
+            }
 
-            for edge in edges {
-                // Check edge type
-                if let Some(ref edge_type) = segment.edge.edge_type {
-                    if &edge.label != edge_type {
-                        continue;
-                    }
+            // Get the other node
+            let next_id = self.get_next_node(prev_id, &edge, segment.edge.direction);
+
+            // Check if next node matches pattern
+            if self.node_matches_pattern(next_id, &segment.node) {
+                let mut new_bindings = bindings.clone();
+
+                if let Some(var) = &segment.node.variable {
+                    new_bindings.insert(var.clone(), next_id);
+                }
+                if let Some(var) = &segment.edge.variable {
+                    new_bindings.insert(var.clone(), edge.id);
                 }
 
-                // Get the other node
-                let next_id = match segment.edge.direction {
-                    EdgeDirection::Outgoing => edge.to,
-                    EdgeDirection::Incoming => edge.from,
-                    EdgeDirection::Both => {
-                        if edge.from == prev_id {
-                            edge.to
-                        } else {
-                            edge.from
-                        }
-                    }
-                };
-
-                // Check if next node matches pattern
-                if self.node_matches_pattern(next_id, &segment.node) {
-                    let mut new_bindings = bindings.clone();
-
-                    if let Some(var) = &segment.node.variable {
-                        new_bindings.insert(var.clone(), next_id);
-                    }
-                    if let Some(var) = &segment.edge.variable {
-                        // Store edge ID (as node ID for simplicity)
-                        new_bindings.insert(var.clone(), edge.id);
-                    }
-
-                    result.push(new_bindings);
-                }
+                result.push(new_bindings);
             }
         }
 
         Ok(result)
+    }
+
+    fn match_variable_length_segment(
+        &self,
+        segment: &PathSegment,
+        prev_pattern: &NodePattern,
+        current_bindings: Vec<Bindings>,
+        range: &LengthRange,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        let mut result = Vec::new();
+        let max_depth = range.max.unwrap_or(10); // Default max depth to prevent infinite loops
+
+        for bindings in current_bindings {
+            let prev_var = prev_pattern.variable.as_ref().ok_or_else(|| {
+                ExecuteError::TypeError("path pattern requires variable".to_string())
+            })?;
+
+            let start_id = *bindings.get(prev_var).ok_or_else(|| {
+                ExecuteError::UndefinedVariable(prev_var.clone())
+            })?;
+
+            // BFS to find all reachable nodes within the range
+            let mut visited_paths: Vec<(NodeId, u32, Vec<u64>)> = vec![(start_id, 0, vec![])];
+            let mut found_paths: Vec<(NodeId, Vec<u64>)> = Vec::new();
+
+            while let Some((current_id, depth, path_edges)) = visited_paths.pop() {
+                // If within range and matches target pattern, add to results
+                if depth >= range.min && self.node_matches_pattern(current_id, &segment.node) {
+                    found_paths.push((current_id, path_edges.clone()));
+                }
+
+                // Don't explore further if at max depth
+                if depth >= max_depth {
+                    continue;
+                }
+
+                // Get edges and explore neighbors
+                let edges = self.get_edges_by_direction(current_id, segment.edge.direction);
+
+                for edge in edges {
+                    // Check edge type
+                    if let Some(ref edge_type) = segment.edge.edge_type {
+                        if &edge.label != edge_type {
+                            continue;
+                        }
+                    }
+
+                    let next_id = self.get_next_node(current_id, &edge, segment.edge.direction);
+
+                    // Avoid cycles (don't revisit nodes in current path)
+                    if next_id == start_id {
+                        continue;
+                    }
+
+                    let mut new_path = path_edges.clone();
+                    new_path.push(edge.id);
+
+                    visited_paths.push((next_id, depth + 1, new_path));
+                }
+            }
+
+            // Convert found paths to bindings
+            for (end_id, _path_edges) in found_paths {
+                let mut new_bindings = bindings.clone();
+
+                if let Some(var) = &segment.node.variable {
+                    new_bindings.insert(var.clone(), end_id);
+                }
+
+                result.push(new_bindings);
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn get_edges_by_direction(&self, node_id: NodeId, direction: EdgeDirection) -> Vec<&Edge> {
+        match direction {
+            EdgeDirection::Outgoing => self.graph.get_outgoing_edges(node_id),
+            EdgeDirection::Incoming => self.graph.get_incoming_edges(node_id),
+            EdgeDirection::Both => {
+                let mut edges = self.graph.get_outgoing_edges(node_id);
+                edges.extend(self.graph.get_incoming_edges(node_id));
+                edges
+            }
+        }
+    }
+
+    fn get_next_node(&self, current_id: NodeId, edge: &Edge, direction: EdgeDirection) -> NodeId {
+        match direction {
+            EdgeDirection::Outgoing => edge.to,
+            EdgeDirection::Incoming => edge.from,
+            EdgeDirection::Both => {
+                if edge.from == current_id {
+                    edge.to
+                } else {
+                    edge.from
+                }
+            }
+        }
     }
 
     fn node_matches_pattern(&self, node_id: NodeId, pattern: &NodePattern) -> bool {
@@ -1076,5 +1177,55 @@ mod tests {
 
         assert_eq!(min_result.rows[0].columns[0], Value::Int(25));
         assert_eq!(max_result.rows[0].columns[0], Value::Int(35));
+    }
+
+    #[test]
+    fn test_variable_length_path() {
+        let mut graph = Graph::new();
+        // Create a chain: Alice -> Bob -> Charlie -> David
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#).unwrap();
+
+        // Get Alice and Bob IDs
+        let alice_id = graph.nodes().find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string()))).unwrap().id;
+        let bob_id = graph.nodes().find(|n| n.properties.get("name") == Some(&PropertyValue::String("Bob".to_string()))).unwrap().id;
+
+        // Create Charlie and David
+        let charlie_id = graph.create_node("Person");
+        graph.get_node_mut(charlie_id).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
+        graph.create_edge(bob_id, charlie_id, "KNOWS").unwrap();
+
+        let david_id = graph.create_node("Person");
+        graph.get_node_mut(david_id).unwrap().set_property("name", PropertyValue::String("David".to_string()));
+        graph.create_edge(charlie_id, david_id, "KNOWS").unwrap();
+
+        // Test: Find all people reachable from Alice in 2 hops
+        let result = execute(&mut graph, "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*2]->(b:Person) RETURN b.name").unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string()));
+
+        // Test: Find all people reachable from Alice in 1 to 3 hops
+        let result = execute(&mut graph, "MATCH (a:Person {name: \"Alice\"})-[:KNOWS*1..3]->(b:Person) RETURN b.name").unwrap();
+        assert_eq!(result.row_count(), 3); // Bob, Charlie, David
+    }
+
+    #[test]
+    fn test_variable_length_path_range() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph.get_node_mut(c).unwrap().set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // *2..3 should find C (2 hops) but not B (1 hop)
+        let result = execute(&mut graph, r#"MATCH (a:Node {name: "A"})-[:NEXT*2..3]->(b:Node) RETURN b.name"#).unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("C".to_string()));
     }
 }

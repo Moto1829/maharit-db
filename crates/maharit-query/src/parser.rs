@@ -349,6 +349,7 @@ impl Parser {
         let mut variable = None;
         let mut edge_type = None;
         let mut properties = HashMap::new();
+        let mut length_range = None;
 
         // Edge details in brackets (optional)
         if self.check(TokenKind::LBracket) {
@@ -363,6 +364,12 @@ impl Parser {
             if self.check(TokenKind::Colon) {
                 self.advance();
                 edge_type = Some(self.expect_ident()?);
+            }
+
+            // Variable-length path: *min..max (optional)
+            if self.check(TokenKind::Star) {
+                self.advance();
+                length_range = Some(self.parse_length_range()?);
             }
 
             // Properties (optional)
@@ -396,7 +403,37 @@ impl Parser {
             edge_type,
             properties,
             direction: final_direction,
+            length_range,
         })
+    }
+
+    fn parse_length_range(&mut self) -> Result<LengthRange, ParseError> {
+        let mut min = 1u32;
+        let mut max = None;
+
+        // Check for min value
+        if let Some(TokenKind::Int(n)) = self.peek_kind().cloned() {
+            min = n as u32;
+            self.advance();
+        }
+
+        // Check for range (..)
+        if self.check(TokenKind::Dot) {
+            self.advance();
+            self.expect(TokenKind::Dot)?;
+
+            // Check for max value
+            if let Some(TokenKind::Int(n)) = self.peek_kind().cloned() {
+                max = Some(n as u32);
+                self.advance();
+            }
+            // If no max after .., it means unlimited
+        } else {
+            // No .., so min is also max (exact count)
+            max = Some(min);
+        }
+
+        Ok(LengthRange { min, max })
     }
 
     fn parse_properties(&mut self) -> Result<HashMap<String, Literal>, ParseError> {
@@ -903,6 +940,63 @@ mod tests {
             assert_eq!(set.items[1].property, "name");
         } else {
             panic!("expected DELETE statement with SET");
+        }
+    }
+
+    // ========== Variable-length path tests ==========
+
+    #[test]
+    fn test_variable_length_path_exact() {
+        let stmt = parse("MATCH (a)-[:KNOWS*2]->(b) RETURN a").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Pattern::Path(path) = &m.patterns[0] {
+                let seg = &path.segments[0];
+                assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
+                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                assert_eq!(range.min, 2);
+                assert_eq!(range.max, Some(2));
+            } else {
+                panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_variable_length_path_range() {
+        let stmt = parse("MATCH (a)-[:KNOWS*2..5]->(b) RETURN a").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Pattern::Path(path) = &m.patterns[0] {
+                let seg = &path.segments[0];
+                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                assert_eq!(range.min, 2);
+                assert_eq!(range.max, Some(5));
+            } else {
+                panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_variable_length_path_unlimited() {
+        let stmt = parse("MATCH (a)-[:KNOWS*2..]->(b) RETURN a").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Pattern::Path(path) = &m.patterns[0] {
+                let seg = &path.segments[0];
+                let range = seg.edge.length_range.as_ref().expect("should have length_range");
+                assert_eq!(range.min, 2);
+                assert_eq!(range.max, None);
+            } else {
+                panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
         }
     }
 }

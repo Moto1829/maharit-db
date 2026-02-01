@@ -90,6 +90,17 @@ pub struct EdgePattern {
     pub edge_type: Option<String>,
     pub properties: HashMap<String, Literal>,
     pub direction: EdgeDirection,
+    /// Variable-length path: *min..max (None means exactly 1 hop)
+    pub length_range: Option<LengthRange>,
+}
+
+/// Length range for variable-length paths
+#[derive(Debug, Clone, PartialEq)]
+pub struct LengthRange {
+    /// Minimum number of hops (default: 1)
+    pub min: u32,
+    /// Maximum number of hops (None means unlimited)
+    pub max: Option<u32>,
 }
 
 /// エッジの方向

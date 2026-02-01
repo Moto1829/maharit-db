@@ -381,6 +381,19 @@ impl<'a> Lexer<'a> {
             if ch.is_ascii_digit() {
                 self.advance();
             } else if ch == '.' && !has_dot {
+                // Look ahead: if the next char after '.' is also '.', don't consume it
+                // This handles range syntax like "2..5"
+                let next_pos = self.pos + 1;
+                if next_pos < self.input.len() && self.input.as_bytes().get(next_pos) == Some(&b'.') {
+                    break;
+                }
+                // Also check if the char after '.' is a digit (valid float) or not
+                if next_pos < self.input.len() {
+                    let next_char = self.input.as_bytes().get(next_pos);
+                    if !matches!(next_char, Some(b'0'..=b'9')) {
+                        break;
+                    }
+                }
                 has_dot = true;
                 self.advance();
             } else {
@@ -664,5 +677,40 @@ mod tests {
     fn test_unterminated_string() {
         let result = Lexer::new("\"hello").tokenize();
         assert!(matches!(result, Err(LexerError::UnterminatedString(1, 1))));
+    }
+
+    #[test]
+    fn test_variable_length_path_tokens() {
+        // Test that 2..5 is tokenized as Int(2), Dot, Dot, Int(5)
+        // and not as Float(2.0), Dot, Int(5)
+        assert_eq!(
+            tokenize("2..5"),
+            vec![
+                TokenKind::Int(2),
+                TokenKind::Dot,
+                TokenKind::Dot,
+                TokenKind::Int(5),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_variable_length_edge_tokens() {
+        assert_eq!(
+            tokenize("[:KNOWS*2..5]"),
+            vec![
+                TokenKind::LBracket,
+                TokenKind::Colon,
+                TokenKind::Ident("KNOWS".to_string()),
+                TokenKind::Star,
+                TokenKind::Int(2),
+                TokenKind::Dot,
+                TokenKind::Dot,
+                TokenKind::Int(5),
+                TokenKind::RBracket,
+                TokenKind::Eof,
+            ]
+        );
     }
 }

@@ -15,6 +15,7 @@ use std::time::Duration;
 use bytes::{Buf, BytesMut};
 use maharit_core::Graph;
 use maharit_query::{Executor, Parser};
+use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -51,7 +52,12 @@ impl Default for ServerConfig {
 pub enum Request {
     /// Execute a query
     #[serde(rename = "query")]
-    Query { query: String },
+    Query {
+        query: String,
+        /// Optional transaction ID for executing within a transaction
+        #[serde(rename = "txId")]
+        tx_id: Option<u64>,
+    },
 
     /// Ping to check server health
     #[serde(rename = "ping")]
@@ -64,6 +70,28 @@ pub enum Request {
     /// Disconnect gracefully
     #[serde(rename = "disconnect")]
     Disconnect,
+
+    /// Begin a new transaction
+    #[serde(rename = "begin")]
+    BeginTransaction {
+        /// If true, the transaction is read-only
+        #[serde(rename = "readOnly", default)]
+        read_only: bool,
+    },
+
+    /// Commit a transaction
+    #[serde(rename = "commit")]
+    Commit {
+        #[serde(rename = "txId")]
+        tx_id: u64,
+    },
+
+    /// Rollback a transaction
+    #[serde(rename = "rollback")]
+    Rollback {
+        #[serde(rename = "txId")]
+        tx_id: u64,
+    },
 }
 
 /// Response message to client
@@ -94,6 +122,27 @@ pub enum Response {
     /// Goodbye response before disconnect
     #[serde(rename = "goodbye")]
     Goodbye,
+
+    /// Transaction started successfully
+    #[serde(rename = "transactionBegun")]
+    TransactionBegun {
+        #[serde(rename = "txId")]
+        tx_id: u64,
+    },
+
+    /// Transaction committed successfully
+    #[serde(rename = "committed")]
+    Committed {
+        #[serde(rename = "txId")]
+        tx_id: u64,
+    },
+
+    /// Transaction rolled back successfully
+    #[serde(rename = "rolledBack")]
+    RolledBack {
+        #[serde(rename = "txId")]
+        tx_id: u64,
+    },
 }
 
 /// Statistics for the server
@@ -110,6 +159,7 @@ pub struct TcpServer {
     graph: Arc<RwLock<Graph>>,
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
+    tx_manager: Arc<TransactionManager>,
 }
 
 impl TcpServer {
@@ -120,6 +170,7 @@ impl TcpServer {
             graph: Arc::new(RwLock::new(Graph::new())),
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            tx_manager: Arc::new(TransactionManager::new()),
         }
     }
 
@@ -130,6 +181,7 @@ impl TcpServer {
             graph: Arc::new(RwLock::new(graph)),
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
+            tx_manager: Arc::new(TransactionManager::new()),
         }
     }
 
@@ -166,6 +218,7 @@ impl TcpServer {
                     let graph = Arc::clone(&self.graph);
                     let stats = Arc::clone(&self.stats);
                     let shutdown = Arc::clone(&self.shutdown);
+                    let tx_manager = Arc::clone(&self.tx_manager);
                     let config = self.config.clone();
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -175,6 +228,7 @@ impl TcpServer {
                             graph,
                             stats.clone(),
                             shutdown,
+                            tx_manager,
                             config,
                             &mut shutdown_rx,
                         )
@@ -216,6 +270,7 @@ async fn handle_connection(
     graph: Arc<RwLock<Graph>>,
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
+    tx_manager: Arc<TransactionManager>,
     config: ServerConfig,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
@@ -262,7 +317,7 @@ async fn handle_connection(
 
         // Handle request
         let response = match request {
-            Request::Query { query } => {
+            Request::Query { query, tx_id: _ } => {
                 stats.total_queries.fetch_add(1, Ordering::SeqCst);
                 execute_query(&graph, &query).await
             }
@@ -279,6 +334,31 @@ async fn handle_connection(
             Request::Disconnect => {
                 send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
                 break;
+            }
+            Request::BeginTransaction { read_only } => {
+                let tx_id = if read_only {
+                    tx_manager.begin_read_only()
+                } else {
+                    tx_manager.begin()
+                };
+                Response::TransactionBegun { tx_id }
+            }
+            Request::Commit { tx_id } => {
+                match tx_manager.commit(tx_id) {
+                    Ok(()) => Response::Committed { tx_id },
+                    Err(e) => Response::Error {
+                        message: format!("Commit failed: {}", e),
+                    },
+                }
+            }
+            Request::Rollback { tx_id } => {
+                let mut g = graph.write().await;
+                match tx_manager.rollback(tx_id, &mut g) {
+                    Ok(()) => Response::RolledBack { tx_id },
+                    Err(e) => Response::Error {
+                        message: format!("Rollback failed: {}", e),
+                    },
+                }
             }
         };
 
@@ -407,9 +487,97 @@ mod tests {
         let json = r#"{"type": "query", "query": "MATCH (n) RETURN n"}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::Query { query } => assert_eq!(query, "MATCH (n) RETURN n"),
+            Request::Query { query, tx_id } => {
+                assert_eq!(query, "MATCH (n) RETURN n");
+                assert!(tx_id.is_none());
+            }
             _ => panic!("Expected Query request"),
         }
+    }
+
+    #[test]
+    fn test_request_parsing_with_tx_id() {
+        let json = r#"{"type": "query", "query": "MATCH (n) RETURN n", "txId": 42}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Query { query, tx_id } => {
+                assert_eq!(query, "MATCH (n) RETURN n");
+                assert_eq!(tx_id, Some(42));
+            }
+            _ => panic!("Expected Query request"),
+        }
+    }
+
+    #[test]
+    fn test_begin_transaction_request() {
+        let json = r#"{"type": "begin"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::BeginTransaction { read_only } => {
+                assert!(!read_only);
+            }
+            _ => panic!("Expected BeginTransaction request"),
+        }
+    }
+
+    #[test]
+    fn test_begin_read_only_transaction_request() {
+        let json = r#"{"type": "begin", "readOnly": true}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::BeginTransaction { read_only } => {
+                assert!(read_only);
+            }
+            _ => panic!("Expected BeginTransaction request"),
+        }
+    }
+
+    #[test]
+    fn test_commit_request() {
+        let json = r#"{"type": "commit", "txId": 123}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Commit { tx_id } => {
+                assert_eq!(tx_id, 123);
+            }
+            _ => panic!("Expected Commit request"),
+        }
+    }
+
+    #[test]
+    fn test_rollback_request() {
+        let json = r#"{"type": "rollback", "txId": 456}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Rollback { tx_id } => {
+                assert_eq!(tx_id, 456);
+            }
+            _ => panic!("Expected Rollback request"),
+        }
+    }
+
+    #[test]
+    fn test_transaction_begun_response() {
+        let response = Response::TransactionBegun { tx_id: 42 };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"transactionBegun\""));
+        assert!(json.contains("\"txId\":42"));
+    }
+
+    #[test]
+    fn test_committed_response() {
+        let response = Response::Committed { tx_id: 42 };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"committed\""));
+        assert!(json.contains("\"txId\":42"));
+    }
+
+    #[test]
+    fn test_rolled_back_response() {
+        let response = Response::RolledBack { tx_id: 42 };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"rolledBack\""));
+        assert!(json.contains("\"txId\":42"));
     }
 
     #[test]

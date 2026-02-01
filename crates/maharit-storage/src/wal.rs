@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -198,7 +198,160 @@ impl Wal {
         self.current_lsn
     }
 
+    /// 古いログを削除（最後のチェックポイント以前のレコードを削除）
+    ///
+    /// チェックポイントがない場合は何もしない。
+    /// 返り値: 削除されたレコード数
+    pub fn cleanup(&mut self) -> Result<usize> {
+        // Flush current buffer first
+        self.sync()?;
+
+        // Read all records and find the last checkpoint
+        let (records, last_checkpoint_lsn) = self.read_all_records()?;
+
+        // If no checkpoint, nothing to clean up
+        let checkpoint_lsn = match last_checkpoint_lsn {
+            Some(lsn) => lsn,
+            None => return Ok(0),
+        };
+
+        // Count how many records to remove
+        let records_before = records.iter().take_while(|r| r.lsn <= checkpoint_lsn).count();
+        if records_before == 0 {
+            return Ok(0);
+        }
+
+        // Keep records after the checkpoint
+        let records_to_keep: Vec<_> = records
+            .into_iter()
+            .filter(|r| r.lsn > checkpoint_lsn)
+            .collect();
+
+        // Create a new temporary WAL file
+        let tmp_path = self.path.with_extension("wal.tmp");
+
+        {
+            let tmp_file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+
+            let mut tmp_writer = BufWriter::new(tmp_file);
+
+            // Write kept records to the temp file
+            for record in &records_to_keep {
+                Self::write_record_to(&mut tmp_writer, record)?;
+            }
+
+            tmp_writer.flush()?;
+            tmp_writer.get_ref().sync_all()?;
+        }
+
+        // Replace old file with new one
+        std::fs::rename(&tmp_path, &self.path)?;
+
+        // Reopen the WAL file
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .truncate(false)
+            .open(&self.path)?;
+
+        self.writer = BufWriter::new(file);
+
+        Ok(records_before)
+    }
+
+    /// ログファイルのサイズを取得（バイト単位）
+    pub fn file_size(&self) -> Result<u64> {
+        let metadata = std::fs::metadata(&self.path)?;
+        Ok(metadata.len())
+    }
+
+    /// レコード数を取得
+    pub fn record_count(&self) -> Result<usize> {
+        let (records, _) = self.read_all_records()?;
+        Ok(records.len())
+    }
+
     // ========== Internal methods ==========
+
+    /// Read all records and find the last checkpoint record's LSN
+    fn read_all_records(&self) -> Result<(Vec<LogRecord>, Option<Lsn>)> {
+        let file = File::open(&self.path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut records = Vec::new();
+        let mut last_checkpoint_record_lsn = None;
+
+        loop {
+            match Self::read_record(&mut reader) {
+                Ok(Some(record)) => {
+                    if record.record_type == RecordType::Checkpoint {
+                        // Store the checkpoint record's own LSN (not the last_lsn inside it)
+                        last_checkpoint_record_lsn = Some(record.lsn);
+                    }
+                    records.push(record);
+                }
+                Ok(None) => break,
+                Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok((records, last_checkpoint_record_lsn))
+    }
+
+    /// Write a record to a writer
+    fn write_record_to<W: Write>(writer: &mut W, record: &LogRecord) -> Result<()> {
+        // LSN
+        writer.write_all(&record.lsn.to_le_bytes())?;
+        // Timestamp
+        writer.write_all(&record.timestamp.to_le_bytes())?;
+        // Record type
+        writer.write_all(&[record.record_type as u8])?;
+
+        // Payload
+        match &record.payload {
+            RecordPayload::CreateNode { node_id, label } => {
+                writer.write_all(&node_id.to_le_bytes())?;
+                Self::write_string(writer, label)?;
+            }
+            RecordPayload::DeleteNode { node_id } => {
+                writer.write_all(&node_id.to_le_bytes())?;
+            }
+            RecordPayload::CreateEdge { edge_id, from, to, label } => {
+                writer.write_all(&edge_id.to_le_bytes())?;
+                writer.write_all(&from.to_le_bytes())?;
+                writer.write_all(&to.to_le_bytes())?;
+                Self::write_string(writer, label)?;
+            }
+            RecordPayload::DeleteEdge { edge_id } => {
+                writer.write_all(&edge_id.to_le_bytes())?;
+            }
+            RecordPayload::SetNodeProperty { node_id, key, value } => {
+                writer.write_all(&node_id.to_le_bytes())?;
+                Self::write_string(writer, key)?;
+                Self::write_property(writer, value)?;
+            }
+            RecordPayload::SetEdgeProperty { edge_id, key, value } => {
+                writer.write_all(&edge_id.to_le_bytes())?;
+                Self::write_string(writer, key)?;
+                Self::write_property(writer, value)?;
+            }
+            RecordPayload::Checkpoint { last_lsn } => {
+                writer.write_all(&last_lsn.to_le_bytes())?;
+            }
+        }
+
+        // Checksum
+        let checksum = record.lsn ^ record.timestamp;
+        writer.write_all(&checksum.to_le_bytes())?;
+
+        Ok(())
+    }
 
     fn find_last_lsn(path: &Path) -> Result<Lsn> {
         if !path.exists() {
@@ -640,6 +793,118 @@ mod tests {
             wal.sync().unwrap();
             assert_eq!(wal.current_lsn(), 2);
         }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_cleanup_without_checkpoint() {
+        let path = temp_path();
+
+        let mut wal = Wal::open(&path).unwrap();
+
+        // Add some records without checkpoint
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 0,
+                label: "A".to_string(),
+            },
+        ).unwrap();
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 1,
+                label: "B".to_string(),
+            },
+        ).unwrap();
+        wal.sync().unwrap();
+
+        // Cleanup should do nothing without checkpoint
+        let removed = wal.cleanup().unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(wal.record_count().unwrap(), 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_cleanup_with_checkpoint() {
+        let path = temp_path();
+
+        let mut wal = Wal::open(&path).unwrap();
+
+        // Add records before checkpoint
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 0,
+                label: "A".to_string(),
+            },
+        ).unwrap();
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 1,
+                label: "B".to_string(),
+            },
+        ).unwrap();
+
+        // Create checkpoint
+        wal.checkpoint().unwrap();
+
+        // Add records after checkpoint
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 2,
+                label: "C".to_string(),
+            },
+        ).unwrap();
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 3,
+                label: "D".to_string(),
+            },
+        ).unwrap();
+        wal.sync().unwrap();
+
+        assert_eq!(wal.record_count().unwrap(), 5); // 2 + checkpoint + 2
+
+        // Cleanup should remove records up to and including checkpoint
+        let removed = wal.cleanup().unwrap();
+        assert_eq!(removed, 3); // 2 records + checkpoint
+
+        // Only 2 records should remain
+        assert_eq!(wal.record_count().unwrap(), 2);
+
+        // Verify recovery still works with the cleaned up log
+        let mut graph = Graph::new();
+        wal.recover(&mut graph).unwrap();
+        // The recovered graph will only have nodes C and D
+        assert_eq!(graph.node_count(), 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_file_size() {
+        let path = temp_path();
+
+        let mut wal = Wal::open(&path).unwrap();
+
+        wal.append(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 0,
+                label: "Test".to_string(),
+            },
+        ).unwrap();
+        wal.sync().unwrap();
+
+        let size = wal.file_size().unwrap();
+        assert!(size > 0);
 
         std::fs::remove_file(&path).ok();
     }

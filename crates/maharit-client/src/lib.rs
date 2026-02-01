@@ -79,12 +79,19 @@ impl Default for ClientConfig {
     }
 }
 
+/// Transaction ID
+pub type TxId = u64;
+
 /// Request message to server
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum Request {
     #[serde(rename = "query")]
-    Query { query: String },
+    Query {
+        query: String,
+        #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
+        tx_id: Option<TxId>,
+    },
 
     #[serde(rename = "ping")]
     Ping,
@@ -94,6 +101,24 @@ enum Request {
 
     #[serde(rename = "disconnect")]
     Disconnect,
+
+    #[serde(rename = "begin")]
+    BeginTransaction {
+        #[serde(rename = "readOnly")]
+        read_only: bool,
+    },
+
+    #[serde(rename = "commit")]
+    Commit {
+        #[serde(rename = "txId")]
+        tx_id: TxId,
+    },
+
+    #[serde(rename = "rollback")]
+    Rollback {
+        #[serde(rename = "txId")]
+        tx_id: TxId,
+    },
 }
 
 /// Response message from server
@@ -119,6 +144,24 @@ enum Response {
 
     #[serde(rename = "goodbye")]
     Goodbye,
+
+    #[serde(rename = "transactionBegun")]
+    TransactionBegun {
+        #[serde(rename = "txId")]
+        tx_id: TxId,
+    },
+
+    #[serde(rename = "committed")]
+    Committed {
+        #[serde(rename = "txId")]
+        tx_id: TxId,
+    },
+
+    #[serde(rename = "rolledBack")]
+    RolledBack {
+        #[serde(rename = "txId")]
+        tx_id: TxId,
+    },
 }
 
 /// Query result
@@ -187,8 +230,14 @@ impl Client {
 
     /// Execute a query and return the result
     pub async fn query(&mut self, query: &str) -> Result<QueryResult> {
+        self.query_in_tx(query, None).await
+    }
+
+    /// Execute a query within a transaction
+    pub async fn query_in_tx(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
         let request = Request::Query {
             query: query.to_string(),
+            tx_id,
         };
 
         self.send_request(&request).await?;
@@ -204,6 +253,58 @@ impl Client {
     pub async fn execute(&mut self, query: &str) -> Result<()> {
         self.query(query).await?;
         Ok(())
+    }
+
+    /// Execute a query within a transaction without returning results
+    pub async fn execute_in_tx(&mut self, query: &str, tx_id: TxId) -> Result<()> {
+        self.query_in_tx(query, Some(tx_id)).await?;
+        Ok(())
+    }
+
+    /// Begin a new transaction
+    pub async fn begin(&mut self) -> Result<TxId> {
+        self.begin_with_options(false).await
+    }
+
+    /// Begin a read-only transaction
+    pub async fn begin_read_only(&mut self) -> Result<TxId> {
+        self.begin_with_options(true).await
+    }
+
+    /// Begin a transaction with options
+    async fn begin_with_options(&mut self, read_only: bool) -> Result<TxId> {
+        let request = Request::BeginTransaction { read_only };
+        self.send_request(&request).await?;
+
+        match self.receive_response().await? {
+            Response::TransactionBegun { tx_id } => Ok(tx_id),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol("expected transaction begun response".to_string())),
+        }
+    }
+
+    /// Commit a transaction
+    pub async fn commit(&mut self, tx_id: TxId) -> Result<()> {
+        let request = Request::Commit { tx_id };
+        self.send_request(&request).await?;
+
+        match self.receive_response().await? {
+            Response::Committed { tx_id: _ } => Ok(()),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol("expected committed response".to_string())),
+        }
+    }
+
+    /// Rollback a transaction
+    pub async fn rollback(&mut self, tx_id: TxId) -> Result<()> {
+        let request = Request::Rollback { tx_id };
+        self.send_request(&request).await?;
+
+        match self.receive_response().await? {
+            Response::RolledBack { tx_id: _ } => Ok(()),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol("expected rolled back response".to_string())),
+        }
     }
 
     /// Ping the server to check connectivity
@@ -332,9 +433,39 @@ pub mod sync {
             self.runtime.block_on(self.client.query(query))
         }
 
+        /// Execute a query within a transaction
+        pub fn query_in_tx(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
+            self.runtime.block_on(self.client.query_in_tx(query, tx_id))
+        }
+
         /// Execute a query without returning results
         pub fn execute(&mut self, query: &str) -> Result<()> {
             self.runtime.block_on(self.client.execute(query))
+        }
+
+        /// Execute a query within a transaction without returning results
+        pub fn execute_in_tx(&mut self, query: &str, tx_id: TxId) -> Result<()> {
+            self.runtime.block_on(self.client.execute_in_tx(query, tx_id))
+        }
+
+        /// Begin a new transaction
+        pub fn begin(&mut self) -> Result<TxId> {
+            self.runtime.block_on(self.client.begin())
+        }
+
+        /// Begin a read-only transaction
+        pub fn begin_read_only(&mut self) -> Result<TxId> {
+            self.runtime.block_on(self.client.begin_read_only())
+        }
+
+        /// Commit a transaction
+        pub fn commit(&mut self, tx_id: TxId) -> Result<()> {
+            self.runtime.block_on(self.client.commit(tx_id))
+        }
+
+        /// Rollback a transaction
+        pub fn rollback(&mut self, tx_id: TxId) -> Result<()> {
+            self.runtime.block_on(self.client.rollback(tx_id))
         }
 
         /// Ping the server
@@ -394,10 +525,78 @@ mod tests {
     fn test_request_serialization() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
+            tx_id: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
         assert!(json.contains("MATCH (n) RETURN n"));
+        // tx_id should not be serialized when None
+        assert!(!json.contains("txId"));
+    }
+
+    #[test]
+    fn test_request_serialization_with_tx_id() {
+        let request = Request::Query {
+            query: "MATCH (n) RETURN n".to_string(),
+            tx_id: Some(42),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"query\""));
+        assert!(json.contains("\"txId\":42"));
+    }
+
+    #[test]
+    fn test_begin_transaction_request() {
+        let request = Request::BeginTransaction { read_only: false };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"begin\""));
+        assert!(json.contains("\"readOnly\":false"));
+    }
+
+    #[test]
+    fn test_commit_request() {
+        let request = Request::Commit { tx_id: 123 };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"commit\""));
+        assert!(json.contains("\"txId\":123"));
+    }
+
+    #[test]
+    fn test_rollback_request() {
+        let request = Request::Rollback { tx_id: 456 };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"rollback\""));
+        assert!(json.contains("\"txId\":456"));
+    }
+
+    #[test]
+    fn test_transaction_begun_response() {
+        let json = r#"{"type":"transactionBegun","txId":42}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::TransactionBegun { tx_id } => assert_eq!(tx_id, 42),
+            _ => panic!("Expected TransactionBegun response"),
+        }
+    }
+
+    #[test]
+    fn test_committed_response() {
+        let json = r#"{"type":"committed","txId":42}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::Committed { tx_id } => assert_eq!(tx_id, 42),
+            _ => panic!("Expected Committed response"),
+        }
+    }
+
+    #[test]
+    fn test_rolled_back_response() {
+        let json = r#"{"type":"rolledBack","txId":42}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::RolledBack { tx_id } => assert_eq!(tx_id, 42),
+            _ => panic!("Expected RolledBack response"),
+        }
     }
 
     #[test]
