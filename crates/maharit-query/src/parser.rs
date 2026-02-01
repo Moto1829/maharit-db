@@ -251,9 +251,26 @@ impl Parser {
             OrderDirection::Asc // default
         };
 
+        // NULLS FIRST / NULLS LAST (optional)
+        let nulls_order = if self.check(TokenKind::Nulls) {
+            self.advance();
+            if self.check(TokenKind::First) {
+                self.advance();
+                NullsOrder::First
+            } else if self.check(TokenKind::Last) {
+                self.advance();
+                NullsOrder::Last
+            } else {
+                return Err(self.unexpected_token("FIRST or LAST"));
+            }
+        } else {
+            NullsOrder::Default
+        };
+
         Ok(OrderByItem {
             expression,
             direction,
+            nulls_order,
         })
     }
 

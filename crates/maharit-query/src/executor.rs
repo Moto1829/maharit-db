@@ -677,9 +677,25 @@ impl<'a> Executor<'a> {
             rows = self.apply_distinct(rows);
         }
 
-        // Apply ORDER BY
+        // Apply ORDER BY with optional LIMIT optimization
         if let Some(ref order_by) = return_clause.order_by {
-            self.apply_order_by(&mut rows, order_by, &columns);
+            // Calculate how many rows we actually need
+            let needed = match (return_clause.skip, return_clause.limit) {
+                (Some(skip), Some(limit)) => Some((skip + limit) as usize),
+                (None, Some(limit)) => Some(limit as usize),
+                _ => None,
+            };
+
+            // Use optimized TopN selection if we need fewer rows than we have
+            if let Some(n) = needed {
+                if n < rows.len() {
+                    rows = self.apply_order_by_topn(rows, order_by, &columns, n);
+                } else {
+                    self.apply_order_by(&mut rows, order_by, &columns);
+                }
+            } else {
+                self.apply_order_by(&mut rows, order_by, &columns);
+            }
         }
 
         // Apply SKIP
@@ -723,35 +739,105 @@ impl<'a> Executor<'a> {
     }
 
     fn apply_order_by(&self, rows: &mut [Row], order_by: &OrderByClause, columns: &[String]) {
-        rows.sort_by(|a, b| {
-            for item in &order_by.items {
-                let col_name = match &item.expression {
-                    OrderByExpression::Variable(v) => v.clone(),
-                    OrderByExpression::Property(v, p) => format!("{}.{}", v, p),
-                };
-
-                let col_idx = columns.iter().position(|c| c == &col_name);
-
-                if let Some(idx) = col_idx {
-                    let cmp = self.compare_values_for_sort(&a.columns[idx], &b.columns[idx]);
-                    let cmp = match item.direction {
-                        OrderDirection::Asc => cmp,
-                        OrderDirection::Desc => cmp.reverse(),
-                    };
-                    if cmp != std::cmp::Ordering::Equal {
-                        return cmp;
-                    }
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
+        rows.sort_by(|a, b| self.compare_rows(a, b, order_by, columns));
     }
 
-    fn compare_values_for_sort(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+    /// Memory-efficient TopN selection using partial sort
+    /// Only keeps the top N rows, reducing memory usage for large result sets
+    fn apply_order_by_topn(
+        &self,
+        mut rows: Vec<Row>,
+        order_by: &OrderByClause,
+        columns: &[String],
+        n: usize,
+    ) -> Vec<Row> {
+        if rows.len() <= n {
+            self.apply_order_by(&mut rows, order_by, columns);
+            return rows;
+        }
+
+        // Use partial_sort via select_nth_unstable_by for efficiency
+        // This partitions the array so that the first n elements are the smallest
+        rows.select_nth_unstable_by(n, |a, b| self.compare_rows(a, b, order_by, columns));
+
+        // Truncate to keep only the top N
+        rows.truncate(n);
+
+        // Sort the top N elements
+        self.apply_order_by(&mut rows, order_by, columns);
+
+        rows
+    }
+
+    fn compare_rows(
+        &self,
+        a: &Row,
+        b: &Row,
+        order_by: &OrderByClause,
+        columns: &[String],
+    ) -> std::cmp::Ordering {
+        for item in &order_by.items {
+            let col_name = match &item.expression {
+                OrderByExpression::Variable(v) => v.clone(),
+                OrderByExpression::Property(v, p) => format!("{}.{}", v, p),
+            };
+
+            let col_idx = columns.iter().position(|c| c == &col_name);
+
+            if let Some(idx) = col_idx {
+                let cmp = self.compare_values_for_sort(
+                    &a.columns[idx],
+                    &b.columns[idx],
+                    item.direction,
+                    item.nulls_order,
+                );
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    fn compare_values_for_sort(
+        &self,
+        a: &Value,
+        b: &Value,
+        direction: OrderDirection,
+        nulls_order: NullsOrder,
+    ) -> std::cmp::Ordering {
+        // Determine where NULLs should go (independent of ASC/DESC for the actual values)
+        let nulls_last = match nulls_order {
+            NullsOrder::First => false,
+            NullsOrder::Last => true,
+            NullsOrder::Default => {
+                // Default: ASC -> NULLS LAST, DESC -> NULLS FIRST
+                matches!(direction, OrderDirection::Asc)
+            }
+        };
+
+        // Handle NULL comparisons (these are final and not affected by ASC/DESC)
         match (a, b) {
-            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            (Value::Null, _) => std::cmp::Ordering::Greater, // NULL comes last
-            (_, Value::Null) => std::cmp::Ordering::Less,
+            (Value::Null, Value::Null) => return std::cmp::Ordering::Equal,
+            (Value::Null, _) => {
+                return if nulls_last {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+            }
+            (_, Value::Null) => {
+                return if nulls_last {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                };
+            }
+            _ => {}
+        }
+
+        // Non-NULL comparisons: apply ASC/DESC
+        let base_cmp = match (a, b) {
             (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Float(a), Value::Float(b)) => {
@@ -765,6 +851,12 @@ impl<'a> Executor<'a> {
                 .unwrap_or(std::cmp::Ordering::Equal),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             _ => std::cmp::Ordering::Equal,
+        };
+
+        // Apply direction for non-NULL values
+        match direction {
+            OrderDirection::Asc => base_cmp,
+            OrderDirection::Desc => base_cmp.reverse(),
         }
     }
 
@@ -1586,5 +1678,141 @@ mod tests {
         assert_eq!(result.row_count(), 2);
         assert_eq!(result.rows[0].columns[0], Value::String("Osaka".to_string()));
         assert_eq!(result.rows[1].columns[0], Value::String("Tokyo".to_string()));
+    }
+
+    // ========== NULLS FIRST/LAST tests ==========
+
+    #[test]
+    fn test_nulls_last_default_asc() {
+        let mut graph = Graph::new();
+        // Create nodes with and without age property
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age ASC",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        // ASC default: NULLS LAST
+        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string())); // age 25
+        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));   // age 30
+        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));     // NULL
+        assert_eq!(result.rows[2].columns[1], Value::Null);
+    }
+
+    #[test]
+    fn test_nulls_first_default_desc() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        // DESC default: NULLS FIRST
+        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));     // NULL
+        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));   // age 30
+        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string())); // age 25
+    }
+
+    #[test]
+    fn test_nulls_first_explicit() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age ASC NULLS FIRST",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        // NULLS FIRST explicitly
+        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));     // NULL
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string())); // age 25
+        assert_eq!(result.rows[2].columns[0], Value::String("Alice".to_string()));   // age 30
+    }
+
+    #[test]
+    fn test_nulls_last_explicit() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC NULLS LAST",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        // NULLS LAST explicitly with DESC
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));   // age 30
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string())); // age 25
+        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));     // NULL
+    }
+
+    // ========== TopN optimization tests ==========
+
+    #[test]
+    fn test_topn_optimization() {
+        let mut graph = Graph::new();
+        // Create 10 nodes
+        for i in 1..=10 {
+            execute(
+                &mut graph,
+                &format!(r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#, i, i * 10),
+            )
+            .unwrap();
+        }
+
+        // Request only top 3 by age DESC
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC LIMIT 3",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[1], Value::Int(100)); // age 100
+        assert_eq!(result.rows[1].columns[1], Value::Int(90));  // age 90
+        assert_eq!(result.rows[2].columns[1], Value::Int(80));  // age 80
+    }
+
+    #[test]
+    fn test_topn_with_skip() {
+        let mut graph = Graph::new();
+        // Create 10 nodes
+        for i in 1..=10 {
+            execute(
+                &mut graph,
+                &format!(r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#, i, i * 10),
+            )
+            .unwrap();
+        }
+
+        // Skip 2, take 3 (should get 3rd, 4th, 5th highest)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC SKIP 2 LIMIT 3",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[1], Value::Int(80)); // 3rd highest
+        assert_eq!(result.rows[1].columns[1], Value::Int(70)); // 4th highest
+        assert_eq!(result.rows[2].columns[1], Value::Int(60)); // 5th highest
     }
 }

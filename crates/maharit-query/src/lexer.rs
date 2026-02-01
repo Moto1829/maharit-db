@@ -49,6 +49,9 @@ pub enum TokenKind {
     Limit,
     Skip,
     Distinct,
+    Nulls,
+    First,
+    Last,
 
     // 識別子とリテラル
     Ident(String),
@@ -114,6 +117,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Limit => write!(f, "LIMIT"),
             TokenKind::Skip => write!(f, "SKIP"),
             TokenKind::Distinct => write!(f, "DISTINCT"),
+            TokenKind::Nulls => write!(f, "NULLS"),
+            TokenKind::First => write!(f, "FIRST"),
+            TokenKind::Last => write!(f, "LAST"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -389,6 +395,9 @@ impl<'a> Lexer<'a> {
             "LIMIT" => TokenKind::Limit,
             "SKIP" => TokenKind::Skip,
             "DISTINCT" => TokenKind::Distinct,
+            "NULLS" => TokenKind::Nulls,
+            "FIRST" => TokenKind::First,
+            "LAST" => TokenKind::Last,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

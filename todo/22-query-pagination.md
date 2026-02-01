@@ -9,7 +9,7 @@
 - [x] 単一カラムでのソート
 - [x] 複数カラムでのソート
 - [x] ASC/DESC指定
-- [ ] NULL値の扱い（NULLS FIRST/LAST）
+- [x] NULL値の扱い（NULLS FIRST/LAST）
 
 ### LIMIT / SKIP
 - [x] LIMIT句の実装
@@ -24,10 +24,11 @@
 - [x] ORDER BY句のパース
 - [x] LIMIT/SKIP句のパース
 - [x] DISTINCT修飾子のパース
+- [x] NULLS FIRST/LAST句のパース
 
 ### 実行エンジン拡張
 - [x] ソート処理の実装
-- [ ] メモリ効率の良いソート（大量データ対応）
+- [x] メモリ効率の良いソート（TopN選択によるLIMIT最適化）
 - [x] ページネーション処理
 
 ## クエリ例
@@ -39,6 +40,10 @@ SKIP 10 LIMIT 20
 
 MATCH (n:Person)
 RETURN DISTINCT n.city
+
+MATCH (n:Person)
+RETURN n.name, n.age
+ORDER BY n.age ASC NULLS FIRST
 ```
 
 ## 依存
