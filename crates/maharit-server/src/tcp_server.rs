@@ -46,6 +46,9 @@ impl Default for ServerConfig {
     }
 }
 
+/// Default chunk size for streaming results
+pub const DEFAULT_CHUNK_SIZE: usize = 100;
+
 /// Request message from client
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -57,6 +60,18 @@ pub enum Request {
         /// Optional transaction ID for executing within a transaction
         #[serde(rename = "txId")]
         tx_id: Option<u64>,
+    },
+
+    /// Execute a query with streaming results
+    #[serde(rename = "streamQuery")]
+    StreamQuery {
+        query: String,
+        /// Optional transaction ID for executing within a transaction
+        #[serde(rename = "txId")]
+        tx_id: Option<u64>,
+        /// Number of rows per chunk (default: 100)
+        #[serde(rename = "chunkSize", default = "default_chunk_size")]
+        chunk_size: usize,
     },
 
     /// Ping to check server health
@@ -92,6 +107,10 @@ pub enum Request {
         #[serde(rename = "txId")]
         tx_id: u64,
     },
+}
+
+fn default_chunk_size() -> usize {
+    DEFAULT_CHUNK_SIZE
 }
 
 /// Response message to client
@@ -143,6 +162,41 @@ pub enum Response {
         #[serde(rename = "txId")]
         tx_id: u64,
     },
+
+    /// Start of streaming response
+    #[serde(rename = "streamStart")]
+    StreamStart {
+        /// Unique stream ID for this stream session
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        /// Total number of rows (if known)
+        #[serde(rename = "totalRows", skip_serializing_if = "Option::is_none")]
+        total_rows: Option<usize>,
+    },
+
+    /// A chunk of streaming data
+    #[serde(rename = "streamChunk")]
+    StreamChunk {
+        /// Stream ID this chunk belongs to
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        /// Chunk sequence number (0-indexed)
+        #[serde(rename = "chunkIndex")]
+        chunk_index: usize,
+        /// Rows in this chunk
+        rows: Vec<HashMap<String, String>>,
+    },
+
+    /// End of streaming response
+    #[serde(rename = "streamEnd")]
+    StreamEnd {
+        /// Stream ID that ended
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        /// Total rows sent
+        #[serde(rename = "totalRows")]
+        total_rows: usize,
+    },
 }
 
 /// Statistics for the server
@@ -151,6 +205,14 @@ pub struct ServerStats {
     pub current_connections: AtomicU64,
     pub total_connections: AtomicU64,
     pub total_queries: AtomicU64,
+    next_stream_id: AtomicU64,
+}
+
+impl ServerStats {
+    /// Generate a unique stream ID
+    pub fn next_stream_id(&self) -> u64 {
+        self.next_stream_id.fetch_add(1, Ordering::SeqCst)
+    }
 }
 
 /// TCP server for MaharitDB
@@ -323,6 +385,31 @@ async fn handle_connection(
                 stats.total_queries.fetch_add(1, Ordering::SeqCst);
                 execute_query(&graph, &query).await
             }
+            Request::StreamQuery {
+                query,
+                tx_id: _,
+                chunk_size,
+            } => {
+                stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                // Execute streaming query
+                if let Err(e) = execute_streaming_query(
+                    &mut socket,
+                    &graph,
+                    &stats,
+                    &query,
+                    chunk_size,
+                    config.write_timeout,
+                )
+                .await
+                {
+                    Response::Error {
+                        message: format!("Streaming error: {}", e),
+                    }
+                } else {
+                    // Streaming responses already sent, continue to next request
+                    continue;
+                }
+            }
             Request::Ping => Response::Pong,
             Request::Stats => {
                 let g = graph.read().await;
@@ -429,6 +516,98 @@ async fn send_response(
             "Write timeout",
         )),
     }
+}
+
+/// Execute a streaming query and send results in chunks
+async fn execute_streaming_query(
+    socket: &mut TcpStream,
+    graph: &Arc<RwLock<Graph>>,
+    stats: &Arc<ServerStats>,
+    query: &str,
+    chunk_size: usize,
+    write_timeout: Duration,
+) -> std::io::Result<()> {
+    // Parse the query
+    let stmt = match Parser::new(query) {
+        Ok(mut parser) => match parser.parse() {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                let response = Response::Error {
+                    message: format!("Parse error: {}", e),
+                };
+                return send_response(socket, &response, write_timeout).await;
+            }
+        },
+        Err(e) => {
+            let response = Response::Error {
+                message: format!("Lexer error: {}", e),
+            };
+            return send_response(socket, &response, write_timeout).await;
+        }
+    };
+
+    // Execute the statement
+    let mut g = graph.write().await;
+    let mut executor = Executor::new(&mut g);
+
+    let result = match executor.execute(stmt) {
+        Ok(result) => result,
+        Err(e) => {
+            let response = Response::Error {
+                message: format!("Execution error: {}", e),
+            };
+            return send_response(socket, &response, write_timeout).await;
+        }
+    };
+
+    // Convert rows to HashMap format
+    let all_rows: Vec<HashMap<String, String>> = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            result
+                .columns
+                .iter()
+                .zip(row.columns.iter())
+                .map(|(col, val)| (col.clone(), val.to_string()))
+                .collect()
+        })
+        .collect();
+
+    let total_rows = all_rows.len();
+    let stream_id = stats.next_stream_id();
+
+    // Send StreamStart
+    let start_response = Response::StreamStart {
+        stream_id,
+        total_rows: Some(total_rows),
+    };
+    send_response(socket, &start_response, write_timeout).await?;
+
+    // Send chunks
+    let chunk_size = if chunk_size == 0 {
+        DEFAULT_CHUNK_SIZE
+    } else {
+        chunk_size
+    };
+
+    for (chunk_index, chunk) in all_rows.chunks(chunk_size).enumerate() {
+        let chunk_response = Response::StreamChunk {
+            stream_id,
+            chunk_index,
+            rows: chunk.to_vec(),
+        };
+        send_response(socket, &chunk_response, write_timeout).await?;
+    }
+
+    // Send StreamEnd
+    let end_response = Response::StreamEnd {
+        stream_id,
+        total_rows,
+    };
+    send_response(socket, &end_response, write_timeout).await?;
+
+    Ok(())
 }
 
 /// Execute a query and return the response
@@ -625,5 +804,83 @@ mod tests {
         let config = ServerConfig::default();
         let server = TcpServer::new(config);
         assert_eq!(server.stats.current_connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_stream_query_request() {
+        let json = r#"{"type": "streamQuery", "query": "MATCH (n) RETURN n", "chunkSize": 50}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::StreamQuery {
+                query,
+                tx_id,
+                chunk_size,
+            } => {
+                assert_eq!(query, "MATCH (n) RETURN n");
+                assert!(tx_id.is_none());
+                assert_eq!(chunk_size, 50);
+            }
+            _ => panic!("Expected StreamQuery request"),
+        }
+    }
+
+    #[test]
+    fn test_stream_query_request_default_chunk_size() {
+        let json = r#"{"type": "streamQuery", "query": "MATCH (n) RETURN n"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::StreamQuery { chunk_size, .. } => {
+                assert_eq!(chunk_size, DEFAULT_CHUNK_SIZE);
+            }
+            _ => panic!("Expected StreamQuery request"),
+        }
+    }
+
+    #[test]
+    fn test_stream_start_response() {
+        let response = Response::StreamStart {
+            stream_id: 1,
+            total_rows: Some(100),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"streamStart\""));
+        assert!(json.contains("\"streamId\":1"));
+        assert!(json.contains("\"totalRows\":100"));
+    }
+
+    #[test]
+    fn test_stream_chunk_response() {
+        let mut row = HashMap::new();
+        row.insert("name".to_string(), "Alice".to_string());
+        let response = Response::StreamChunk {
+            stream_id: 1,
+            chunk_index: 0,
+            rows: vec![row],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"streamChunk\""));
+        assert!(json.contains("\"streamId\":1"));
+        assert!(json.contains("\"chunkIndex\":0"));
+        assert!(json.contains("Alice"));
+    }
+
+    #[test]
+    fn test_stream_end_response() {
+        let response = Response::StreamEnd {
+            stream_id: 1,
+            total_rows: 100,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"streamEnd\""));
+        assert!(json.contains("\"streamId\":1"));
+        assert!(json.contains("\"totalRows\":100"));
+    }
+
+    #[test]
+    fn test_next_stream_id() {
+        let stats = ServerStats::default();
+        assert_eq!(stats.next_stream_id(), 0);
+        assert_eq!(stats.next_stream_id(), 1);
+        assert_eq!(stats.next_stream_id(), 2);
     }
 }

@@ -82,6 +82,9 @@ impl Default for ClientConfig {
 /// Transaction ID
 pub type TxId = u64;
 
+/// Default chunk size for streaming
+pub const DEFAULT_CHUNK_SIZE: usize = 100;
+
 /// Request message to server
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -91,6 +94,15 @@ enum Request {
         query: String,
         #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
         tx_id: Option<TxId>,
+    },
+
+    #[serde(rename = "streamQuery")]
+    StreamQuery {
+        query: String,
+        #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
+        tx_id: Option<TxId>,
+        #[serde(rename = "chunkSize")]
+        chunk_size: usize,
     },
 
     #[serde(rename = "ping")]
@@ -162,6 +174,116 @@ enum Response {
         #[serde(rename = "txId")]
         tx_id: TxId,
     },
+
+    #[serde(rename = "streamStart")]
+    StreamStart {
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        #[serde(rename = "totalRows")]
+        total_rows: Option<usize>,
+    },
+
+    #[serde(rename = "streamChunk")]
+    StreamChunk {
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        #[serde(rename = "chunkIndex")]
+        chunk_index: usize,
+        rows: Vec<HashMap<String, String>>,
+    },
+
+    #[serde(rename = "streamEnd")]
+    StreamEnd {
+        #[serde(rename = "streamId")]
+        stream_id: u64,
+        #[serde(rename = "totalRows")]
+        total_rows: usize,
+    },
+}
+
+/// Stream ID type
+pub type StreamId = u64;
+
+/// Streaming result that allows iterating over chunks
+pub struct StreamingResult<'a> {
+    client: &'a mut Client,
+    stream_id: StreamId,
+    total_rows: Option<usize>,
+    rows_received: usize,
+    finished: bool,
+}
+
+impl<'a> StreamingResult<'a> {
+    /// Get the stream ID
+    pub fn stream_id(&self) -> StreamId {
+        self.stream_id
+    }
+
+    /// Get the total number of rows (if known)
+    pub fn total_rows(&self) -> Option<usize> {
+        self.total_rows
+    }
+
+    /// Get the number of rows received so far
+    pub fn rows_received(&self) -> usize {
+        self.rows_received
+    }
+
+    /// Check if the stream has finished
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Get the next chunk of rows
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<HashMap<String, String>>>> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        match self.client.receive_response().await? {
+            Response::StreamChunk {
+                stream_id,
+                chunk_index: _,
+                rows,
+            } => {
+                if stream_id != self.stream_id {
+                    return Err(ClientError::Protocol(format!(
+                        "stream ID mismatch: expected {}, got {}",
+                        self.stream_id, stream_id
+                    )));
+                }
+                self.rows_received += rows.len();
+                Ok(Some(rows))
+            }
+            Response::StreamEnd {
+                stream_id,
+                total_rows,
+            } => {
+                if stream_id != self.stream_id {
+                    return Err(ClientError::Protocol(format!(
+                        "stream ID mismatch: expected {}, got {}",
+                        self.stream_id, stream_id
+                    )));
+                }
+                self.rows_received = total_rows;
+                self.finished = true;
+                Ok(None)
+            }
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol(
+                "unexpected response during streaming".to_string(),
+            )),
+        }
+    }
+
+    /// Collect all remaining rows into a single vector
+    pub async fn collect_all(mut self) -> Result<Vec<HashMap<String, String>>> {
+        let mut all_rows = Vec::new();
+        while let Some(chunk) = self.next_chunk().await? {
+            all_rows.extend(chunk);
+        }
+        Ok(all_rows)
+    }
 }
 
 /// Query result
@@ -255,6 +377,58 @@ impl Client {
     pub async fn execute(&mut self, query: &str) -> Result<()> {
         self.query(query).await?;
         Ok(())
+    }
+
+    /// Execute a query with streaming results
+    ///
+    /// Returns a `StreamingResult` that allows iterating over chunks of rows.
+    /// This is useful for large result sets that shouldn't be loaded entirely into memory.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut stream = client.query_stream("MATCH (n) RETURN n", 50).await?;
+    /// while let Some(chunk) = stream.next_chunk().await? {
+    ///     for row in chunk {
+    ///         println!("{:?}", row);
+    ///     }
+    /// }
+    /// ```
+    pub async fn query_stream(&mut self, query: &str, chunk_size: usize) -> Result<StreamingResult<'_>> {
+        self.query_stream_in_tx(query, None, chunk_size).await
+    }
+
+    /// Execute a streaming query within a transaction
+    pub async fn query_stream_in_tx(
+        &mut self,
+        query: &str,
+        tx_id: Option<TxId>,
+        chunk_size: usize,
+    ) -> Result<StreamingResult<'_>> {
+        let request = Request::StreamQuery {
+            query: query.to_string(),
+            tx_id,
+            chunk_size: if chunk_size == 0 { DEFAULT_CHUNK_SIZE } else { chunk_size },
+        };
+
+        self.send_request(&request).await?;
+
+        // Wait for StreamStart response
+        match self.receive_response().await? {
+            Response::StreamStart {
+                stream_id,
+                total_rows,
+            } => Ok(StreamingResult {
+                client: self,
+                stream_id,
+                total_rows,
+                rows_received: 0,
+                finished: false,
+            }),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol(
+                "expected StreamStart response".to_string(),
+            )),
+        }
     }
 
     /// Execute a query within a transaction without returning results
@@ -493,6 +667,32 @@ pub mod sync {
         /// Check if the connection is alive
         pub fn is_alive(&mut self) -> bool {
             self.runtime.block_on(self.client.is_alive())
+        }
+
+        /// Execute a query with streaming and collect all results
+        ///
+        /// This is a convenience method that streams results in chunks but
+        /// collects them all into a single QueryResult.
+        pub fn query_stream(&mut self, query: &str, chunk_size: usize) -> Result<QueryResult> {
+            self.runtime.block_on(async {
+                let stream = self.client.query_stream(query, chunk_size).await?;
+                let rows = stream.collect_all().await?;
+                Ok(QueryResult { rows })
+            })
+        }
+
+        /// Execute a streaming query within a transaction and collect all results
+        pub fn query_stream_in_tx(
+            &mut self,
+            query: &str,
+            tx_id: Option<TxId>,
+            chunk_size: usize,
+        ) -> Result<QueryResult> {
+            self.runtime.block_on(async {
+                let stream = self.client.query_stream_in_tx(query, tx_id, chunk_size).await?;
+                let rows = stream.collect_all().await?;
+                Ok(QueryResult { rows })
+            })
         }
     }
 }
