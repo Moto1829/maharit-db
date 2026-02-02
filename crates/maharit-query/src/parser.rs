@@ -309,6 +309,23 @@ impl Parser {
     fn parse_aggregate_function(&mut self, func_name: &str) -> Result<ReturnItem, ParseError> {
         self.expect(TokenKind::LParen)?;
 
+        // Check for scalar functions first (they take a simple variable name)
+        match func_name.to_lowercase().as_str() {
+            "nodes" | "relationships" | "length" => {
+                let var = self.expect_ident()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "nodes" => ScalarFunction::Nodes(var),
+                    "relationships" => ScalarFunction::Relationships(var),
+                    "length" => ScalarFunction::Length(var),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            _ => {}
+        }
+
+        // Aggregate functions
         let inner = if self.check(TokenKind::Star) {
             self.advance();
             None // COUNT(*)
@@ -364,7 +381,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "aggregate function (COUNT, SUM, AVG, MIN, MAX, COLLECT)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });
@@ -1116,6 +1133,56 @@ mod tests {
                 assert_eq!(range.max, None);
             } else {
                 panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_nodes_function() {
+        let stmt = parse("MATCH (a)-[r:KNOWS*2]->(b) RETURN nodes(r)").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.return_clause.items.len(), 1);
+            if let ReturnItem::Function(ScalarFunction::Nodes(var)) = &m.return_clause.items[0] {
+                assert_eq!(var, "r");
+            } else {
+                panic!("expected nodes() function");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_relationships_function() {
+        let stmt = parse("MATCH (a)-[r:KNOWS*2]->(b) RETURN relationships(r)").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.return_clause.items.len(), 1);
+            if let ReturnItem::Function(ScalarFunction::Relationships(var)) =
+                &m.return_clause.items[0]
+            {
+                assert_eq!(var, "r");
+            } else {
+                panic!("expected relationships() function");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_length_function() {
+        let stmt = parse("MATCH (a)-[r:KNOWS*2]->(b) RETURN length(r)").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.return_clause.items.len(), 1);
+            if let ReturnItem::Function(ScalarFunction::Length(var)) = &m.return_clause.items[0] {
+                assert_eq!(var, "r");
+            } else {
+                panic!("expected length() function");
             }
         } else {
             panic!("expected MATCH statement");

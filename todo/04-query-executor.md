@@ -17,7 +17,9 @@
 ### MATCH実行
 - [x] 単一ノードのマッチ: `MATCH (n:Person)`
 - [x] パターンマッチング: `MATCH (a)-[:KNOWS]->(b)`
-- [ ] 複数ホップのパス: `MATCH (a)-[:KNOWS*2..3]->(b)`
+- [x] 複数ホップのパス: `MATCH (a)-[:KNOWS*2..3]->(b)`
+- [ ] `[*]` 構文（デフォルト1..無制限）
+- [ ] `[*0..3]` 構文（ゼロホップ対応）
 
 ### WHERE実行
 - [x] プロパティ比較: `WHERE n.age > 20`
@@ -27,6 +29,7 @@
 - [x] 変数の返却: `RETURN n`
 - [x] プロパティの返却: `RETURN n.name, n.age`
 - [x] 集計関数: `COUNT()`, `SUM()`, `AVG()`, `MIN()`, `MAX()`, `COLLECT()`
+- [x] パス関数: `nodes(path)`, `relationships(path)`, `length(path)`
 
 ### DELETE実行
 - [x] ノード削除: `DELETE n`

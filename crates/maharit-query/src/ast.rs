@@ -184,6 +184,8 @@ pub enum ReturnItem {
     All,
     /// 集計関数: RETURN COUNT(n)
     Aggregate(AggregateFunction),
+    /// スカラー関数: RETURN nodes(r), length(r)
+    Function(ScalarFunction),
 }
 
 /// 集計関数
@@ -201,6 +203,17 @@ pub enum AggregateFunction {
     Max(Box<ReturnItem>),
     /// COLLECT(expr)
     Collect(Box<ReturnItem>),
+}
+
+/// スカラー関数（パス操作用）
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarFunction {
+    /// nodes(path) - パス内のノードリストを返す
+    Nodes(String),
+    /// relationships(path) - パス内のエッジリストを返す
+    Relationships(String),
+    /// length(path) - パスの長さ（ホップ数）を返す
+    Length(String),
 }
 
 /// 式

@@ -62,6 +62,13 @@ pub enum Value {
         label: String,
         properties: HashMap<String, PropertyValue>,
     },
+    /// リスト値（可変長パスのエッジリストなど）
+    List(Vec<Value>),
+    /// パス値（ノードとエッジの交互シーケンス）
+    Path {
+        nodes: Vec<NodeId>,
+        edges: Vec<u64>,
+    },
 }
 
 impl std::fmt::Display for Value {
@@ -74,6 +81,19 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Node(id) => write!(f, "Node({})", id),
             Value::NodeData { id, label, .. } => write!(f, "({}:{})", id, label),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            Value::Path { nodes, edges } => {
+                write!(f, "Path(nodes: {:?}, edges: {:?})", nodes, edges)
+            }
         }
     }
 }
@@ -114,8 +134,40 @@ impl From<Literal> for PropertyValue {
     }
 }
 
+/// バインディング値
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindingValue {
+    /// 単一ノード
+    Node(NodeId),
+    /// 単一エッジ
+    Edge(u64),
+    /// パス（可変長パス用）
+    Path {
+        nodes: Vec<NodeId>,
+        edges: Vec<u64>,
+    },
+}
+
+impl BindingValue {
+    /// ノードIDを取得（Nodeの場合のみ）
+    pub fn as_node(&self) -> Option<NodeId> {
+        match self {
+            BindingValue::Node(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// エッジIDを取得（Edgeの場合のみ）
+    pub fn as_edge(&self) -> Option<u64> {
+        match self {
+            BindingValue::Edge(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
 /// 変数バインディング
-type Bindings = HashMap<String, NodeId>;
+type Bindings = HashMap<String, BindingValue>;
 
 /// クエリエグゼキュータ
 pub struct Executor<'a> {
@@ -211,7 +263,7 @@ impl<'a> Executor<'a> {
 
         // Bind variable
         if let Some(var) = &pattern.variable {
-            bindings.insert(var.clone(), node_id);
+            bindings.insert(var.clone(), BindingValue::Node(node_id));
         }
 
         Ok(node_id)
@@ -243,8 +295,9 @@ impl<'a> Executor<'a> {
         if let Some(set_clause) = &d.set_clause {
             for bindings in &all_bindings {
                 for item in &set_clause.items {
-                    let node_id = *bindings
+                    let node_id = bindings
                         .get(&item.variable)
+                        .and_then(|v| v.as_node())
                         .ok_or_else(|| ExecuteError::UndefinedVariable(item.variable.clone()))?;
 
                     let value = self.evaluate_expression(&item.value, bindings)?;
@@ -263,15 +316,20 @@ impl<'a> Executor<'a> {
 
         for bindings in &all_bindings {
             for var in &d.delete_clause.variables {
-                if let Some(&id) = bindings.get(var) {
-                    // Check if it's a node or edge
-                    if self.graph.get_node(id).is_some() {
-                        if !nodes_to_delete.contains(&id) {
-                            nodes_to_delete.push(id);
+                if let Some(binding_value) = bindings.get(var) {
+                    match binding_value {
+                        BindingValue::Node(id) => {
+                            if !nodes_to_delete.contains(id) {
+                                nodes_to_delete.push(*id);
+                            }
                         }
-                    } else if self.graph.get_edge(id).is_some() {
-                        if !edges_to_delete.contains(&id) {
-                            edges_to_delete.push(id);
+                        BindingValue::Edge(id) => {
+                            if !edges_to_delete.contains(id) {
+                                edges_to_delete.push(*id);
+                            }
+                        }
+                        BindingValue::Path { .. } => {
+                            // Paths cannot be deleted directly
                         }
                     }
                 }
@@ -380,10 +438,12 @@ impl<'a> Executor<'a> {
         for bindings in current_bindings {
             // Check if variable is already bound
             if let Some(var) = &pattern.variable {
-                if let Some(&bound_id) = bindings.get(var) {
-                    // Variable already bound, check if it matches
-                    if self.node_matches_pattern(bound_id, pattern) {
-                        result.push(bindings);
+                if let Some(bound_value) = bindings.get(var) {
+                    if let Some(bound_id) = bound_value.as_node() {
+                        // Variable already bound, check if it matches
+                        if self.node_matches_pattern(bound_id, pattern) {
+                            result.push(bindings);
+                        }
                     }
                     continue;
                 }
@@ -394,7 +454,7 @@ impl<'a> Executor<'a> {
                 if self.node_matches_pattern(node.id, pattern) {
                     let mut new_bindings = bindings.clone();
                     if let Some(var) = &pattern.variable {
-                        new_bindings.insert(var.clone(), node.id);
+                        new_bindings.insert(var.clone(), BindingValue::Node(node.id));
                     }
                     result.push(new_bindings);
                 }
@@ -461,8 +521,9 @@ impl<'a> Executor<'a> {
             .as_ref()
             .ok_or_else(|| ExecuteError::TypeError("path pattern requires variable".to_string()))?;
 
-        let prev_id = *bindings
+        let prev_id = bindings
             .get(prev_var)
+            .and_then(|v| v.as_node())
             .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
         // Get edges from previous node
@@ -484,10 +545,10 @@ impl<'a> Executor<'a> {
                 let mut new_bindings = bindings.clone();
 
                 if let Some(var) = &segment.node.variable {
-                    new_bindings.insert(var.clone(), next_id);
+                    new_bindings.insert(var.clone(), BindingValue::Node(next_id));
                 }
                 if let Some(var) = &segment.edge.variable {
-                    new_bindings.insert(var.clone(), edge.id);
+                    new_bindings.insert(var.clone(), BindingValue::Edge(edge.id));
                 }
 
                 result.push(new_bindings);
@@ -512,18 +573,21 @@ impl<'a> Executor<'a> {
                 ExecuteError::TypeError("path pattern requires variable".to_string())
             })?;
 
-            let start_id = *bindings
+            let start_id = bindings
                 .get(prev_var)
+                .and_then(|v| v.as_node())
                 .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
             // BFS to find all reachable nodes within the range
-            let mut visited_paths: Vec<(NodeId, u32, Vec<u64>)> = vec![(start_id, 0, vec![])];
-            let mut found_paths: Vec<(NodeId, Vec<u64>)> = Vec::new();
+            // Track: (current_node, depth, path_edges, visited_nodes)
+            let mut visited_paths: Vec<(NodeId, u32, Vec<u64>, Vec<NodeId>)> =
+                vec![(start_id, 0, vec![], vec![start_id])];
+            let mut found_paths: Vec<(NodeId, Vec<u64>, Vec<NodeId>)> = Vec::new();
 
-            while let Some((current_id, depth, path_edges)) = visited_paths.pop() {
+            while let Some((current_id, depth, path_edges, visited_nodes)) = visited_paths.pop() {
                 // If within range and matches target pattern, add to results
                 if depth >= range.min && self.node_matches_pattern(current_id, &segment.node) {
-                    found_paths.push((current_id, path_edges.clone()));
+                    found_paths.push((current_id, path_edges.clone(), visited_nodes.clone()));
                 }
 
                 // Don't explore further if at max depth
@@ -544,24 +608,39 @@ impl<'a> Executor<'a> {
 
                     let next_id = self.get_next_node(current_id, &edge, segment.edge.direction);
 
-                    // Avoid cycles (don't revisit nodes in current path)
-                    if next_id == start_id {
+                    // Avoid cycles: don't revisit nodes already in the current path
+                    if visited_nodes.contains(&next_id) {
                         continue;
                     }
 
                     let mut new_path = path_edges.clone();
                     new_path.push(edge.id);
 
-                    visited_paths.push((next_id, depth + 1, new_path));
+                    let mut new_visited = visited_nodes.clone();
+                    new_visited.push(next_id);
+
+                    visited_paths.push((next_id, depth + 1, new_path, new_visited));
                 }
             }
 
             // Convert found paths to bindings
-            for (end_id, _path_edges) in found_paths {
+            for (end_id, path_edges, path_nodes) in found_paths {
                 let mut new_bindings = bindings.clone();
 
+                // Bind the end node
                 if let Some(var) = &segment.node.variable {
-                    new_bindings.insert(var.clone(), end_id);
+                    new_bindings.insert(var.clone(), BindingValue::Node(end_id));
+                }
+
+                // Bind the path variable (edge list) if specified
+                if let Some(var) = &segment.edge.variable {
+                    new_bindings.insert(
+                        var.clone(),
+                        BindingValue::Path {
+                            nodes: path_nodes,
+                            edges: path_edges,
+                        },
+                    );
                 }
 
                 result.push(new_bindings);
@@ -883,6 +962,11 @@ impl<'a> Executor<'a> {
                     format!("COLLECT({})", self.return_item_to_column_name(inner))
                 }
             },
+            ReturnItem::Function(func) => match func {
+                ScalarFunction::Nodes(var) => format!("nodes({})", var),
+                ScalarFunction::Relationships(var) => format!("relationships({})", var),
+                ScalarFunction::Length(var) => format!("length({})", var),
+            },
         }
     }
 
@@ -893,44 +977,65 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, ExecuteError> {
         match item {
             ReturnItem::Variable(var) => {
-                if let Some(&node_id) = bindings.get(var) {
-                    if let Some(node) = self.graph.get_node(node_id) {
-                        Ok(Value::NodeData {
-                            id: node_id,
-                            label: node.label.clone(),
-                            properties: node.properties.clone(),
-                        })
-                    } else {
-                        Ok(Value::Node(node_id))
+                if let Some(binding_value) = bindings.get(var) {
+                    match binding_value {
+                        BindingValue::Node(node_id) => {
+                            if let Some(node) = self.graph.get_node(*node_id) {
+                                Ok(Value::NodeData {
+                                    id: *node_id,
+                                    label: node.label.clone(),
+                                    properties: node.properties.clone(),
+                                })
+                            } else {
+                                Ok(Value::Node(*node_id))
+                            }
+                        }
+                        BindingValue::Edge(edge_id) => {
+                            // Return edge as a simple value
+                            Ok(Value::Int(*edge_id as i64))
+                        }
+                        BindingValue::Path { nodes, edges } => {
+                            Ok(Value::Path {
+                                nodes: nodes.clone(),
+                                edges: edges.clone(),
+                            })
+                        }
                     }
                 } else {
                     Ok(Value::Null)
                 }
             }
             ReturnItem::Property(var, prop) => {
-                if let Some(&node_id) = bindings.get(var) {
-                    if let Some(node) = self.graph.get_node(node_id) {
-                        if let Some(value) = node.get_property(prop) {
-                            Ok(Value::from(value))
-                        } else {
-                            Ok(Value::Null)
+                if let Some(binding_value) = bindings.get(var) {
+                    match binding_value {
+                        BindingValue::Node(node_id) => {
+                            if let Some(node) = self.graph.get_node(*node_id) {
+                                if let Some(value) = node.get_property(prop) {
+                                    Ok(Value::from(value))
+                                } else {
+                                    Ok(Value::Null)
+                                }
+                            } else {
+                                Ok(Value::Null)
+                            }
                         }
-                    } else {
-                        Ok(Value::Null)
+                        _ => Ok(Value::Null),
                     }
                 } else {
                     Ok(Value::Null)
                 }
             }
             ReturnItem::All => {
-                // For *, we return the first bound variable
-                for (_var, &node_id) in bindings {
-                    if let Some(node) = self.graph.get_node(node_id) {
-                        return Ok(Value::NodeData {
-                            id: node_id,
-                            label: node.label.clone(),
-                            properties: node.properties.clone(),
-                        });
+                // For *, we return the first bound node variable
+                for (_var, binding_value) in bindings {
+                    if let BindingValue::Node(node_id) = binding_value {
+                        if let Some(node) = self.graph.get_node(*node_id) {
+                            return Ok(Value::NodeData {
+                                id: *node_id,
+                                label: node.label.clone(),
+                                properties: node.properties.clone(),
+                            });
+                        }
                     }
                 }
                 Ok(Value::Null)
@@ -938,6 +1043,80 @@ impl<'a> Executor<'a> {
             ReturnItem::Aggregate(_) => {
                 // Aggregates are handled separately
                 Ok(Value::Null)
+            }
+            ReturnItem::Function(func) => {
+                self.evaluate_scalar_function(func, bindings)
+            }
+        }
+    }
+
+    fn evaluate_scalar_function(
+        &self,
+        func: &ScalarFunction,
+        bindings: &Bindings,
+    ) -> Result<Value, ExecuteError> {
+        match func {
+            ScalarFunction::Nodes(var) => {
+                if let Some(binding_value) = bindings.get(var) {
+                    if let BindingValue::Path { nodes, .. } = binding_value {
+                        // Return list of node data
+                        let node_values: Vec<Value> = nodes
+                            .iter()
+                            .map(|&node_id| {
+                                if let Some(node) = self.graph.get_node(node_id) {
+                                    Value::NodeData {
+                                        id: node_id,
+                                        label: node.label.clone(),
+                                        properties: node.properties.clone(),
+                                    }
+                                } else {
+                                    Value::Node(node_id)
+                                }
+                            })
+                            .collect();
+                        Ok(Value::List(node_values))
+                    } else {
+                        Err(ExecuteError::TypeError(format!(
+                            "nodes() requires a path variable, got {:?}",
+                            binding_value
+                        )))
+                    }
+                } else {
+                    Err(ExecuteError::UndefinedVariable(var.clone()))
+                }
+            }
+            ScalarFunction::Relationships(var) => {
+                if let Some(binding_value) = bindings.get(var) {
+                    if let BindingValue::Path { edges, .. } = binding_value {
+                        // Return list of edge IDs (or edge data if available)
+                        let edge_values: Vec<Value> = edges
+                            .iter()
+                            .map(|&edge_id| Value::Int(edge_id as i64))
+                            .collect();
+                        Ok(Value::List(edge_values))
+                    } else {
+                        Err(ExecuteError::TypeError(format!(
+                            "relationships() requires a path variable, got {:?}",
+                            binding_value
+                        )))
+                    }
+                } else {
+                    Err(ExecuteError::UndefinedVariable(var.clone()))
+                }
+            }
+            ScalarFunction::Length(var) => {
+                if let Some(binding_value) = bindings.get(var) {
+                    if let BindingValue::Path { edges, .. } = binding_value {
+                        Ok(Value::Int(edges.len() as i64))
+                    } else {
+                        Err(ExecuteError::TypeError(format!(
+                            "length() requires a path variable, got {:?}",
+                            binding_value
+                        )))
+                    }
+                } else {
+                    Err(ExecuteError::UndefinedVariable(var.clone()))
+                }
             }
         }
     }
@@ -1111,14 +1290,27 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, ExecuteError> {
         match expr {
             Expression::Literal(lit) => Ok(Value::from(lit.clone())),
-            Expression::Variable(var) => bindings
-                .get(var)
-                .map(|&id| Value::Node(id))
-                .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone())),
-            Expression::Property(var, prop) => {
-                let node_id = *bindings
+            Expression::Variable(var) => {
+                let binding_value = bindings
                     .get(var)
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
+                match binding_value {
+                    BindingValue::Node(id) => Ok(Value::Node(*id)),
+                    BindingValue::Edge(id) => Ok(Value::Int(*id as i64)),
+                    BindingValue::Path { nodes, edges } => Ok(Value::Path {
+                        nodes: nodes.clone(),
+                        edges: edges.clone(),
+                    }),
+                }
+            }
+            Expression::Property(var, prop) => {
+                let binding_value = bindings
+                    .get(var)
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
+
+                let node_id = binding_value
+                    .as_node()
+                    .ok_or_else(|| ExecuteError::TypeError("expected node".to_string()))?;
 
                 let node = self
                     .graph
@@ -1519,6 +1711,137 @@ mod tests {
         .unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::String("C".to_string()));
+    }
+
+    // ========== Path function tests ==========
+
+    #[test]
+    fn test_path_length_function() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // Test length() function - path from A to C has 2 edges
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[r:NEXT*1..2]->(b:Node) RETURN b.name, length(r)"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 2);
+
+        // Find the row for C (2 hops)
+        let c_row = result
+            .rows
+            .iter()
+            .find(|row| row.columns[0] == Value::String("C".to_string()))
+            .expect("Should find C");
+        assert_eq!(c_row.columns[1], Value::Int(2));
+
+        // Find the row for B (1 hop)
+        let b_row = result
+            .rows
+            .iter()
+            .find(|row| row.columns[0] == Value::String("B".to_string()))
+            .expect("Should find B");
+        assert_eq!(b_row.columns[1], Value::Int(1));
+    }
+
+    #[test]
+    fn test_path_nodes_function() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // Test nodes() function - returns list of nodes in path
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[r:NEXT*2]->(b:Node) RETURN nodes(r)"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+
+        // Should be a list with 3 nodes (A, B, C)
+        if let Value::List(nodes) = &result.rows[0].columns[0] {
+            assert_eq!(nodes.len(), 3);
+        } else {
+            panic!("Expected List value");
+        }
+    }
+
+    #[test]
+    fn test_path_relationships_function() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // Test relationships() function - returns list of edges in path
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[r:NEXT*2]->(b:Node) RETURN relationships(r)"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+
+        // Should be a list with 2 edges
+        if let Value::List(edges) = &result.rows[0].columns[0] {
+            assert_eq!(edges.len(), 2);
+        } else {
+            panic!("Expected List value");
+        }
     }
 
     // ========== ORDER BY tests ==========
