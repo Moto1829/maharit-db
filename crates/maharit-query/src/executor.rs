@@ -1844,6 +1844,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_variable_length_path_star_only() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // [*] means 1..unlimited, should find B and C (1 and 2 hops)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[:NEXT*]->(b:Node) RETURN b.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 2); // B (1 hop) and C (2 hops)
+    }
+
+    #[test]
+    fn test_variable_length_path_zero_hop() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        // [*0..2] means 0, 1, or 2 hops
+        // 0 hops: A itself (if it matches the target pattern)
+        // 1 hop: B
+        // 2 hops: C
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"})-[:NEXT*0..2]->(b:Node) RETURN b.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 3); // A (0 hops), B (1 hop), C (2 hops)
+    }
+
     // ========== ORDER BY tests ==========
 
     #[test]

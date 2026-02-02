@@ -533,10 +533,12 @@ impl Parser {
     fn parse_length_range(&mut self) -> Result<LengthRange, ParseError> {
         let mut min = 1u32;
         let mut max = None;
+        let mut has_min = false;
 
         // Check for min value
         if let Some(TokenKind::Int(n)) = self.peek_kind().cloned() {
             min = n as u32;
+            has_min = true;
             self.advance();
         }
 
@@ -551,10 +553,11 @@ impl Parser {
                 self.advance();
             }
             // If no max after .., it means unlimited
-        } else {
-            // No .., so min is also max (exact count)
+        } else if has_min {
+            // No .., but has min, so min is also max (exact count)
             max = Some(min);
         }
+        // If no min and no .., it's just [*] meaning 1..unlimited (max stays None)
 
         Ok(LengthRange { min, max })
     }
@@ -1183,6 +1186,52 @@ mod tests {
                 assert_eq!(var, "r");
             } else {
                 panic!("expected length() function");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_variable_length_path_star_only() {
+        // [*] should mean 1..unlimited
+        let stmt = parse("MATCH (a)-[:KNOWS*]->(b) RETURN a").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Pattern::Path(path) = &m.patterns[0] {
+                let seg = &path.segments[0];
+                let range = seg
+                    .edge
+                    .length_range
+                    .as_ref()
+                    .expect("should have length_range");
+                assert_eq!(range.min, 1);
+                assert_eq!(range.max, None); // unlimited
+            } else {
+                panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_variable_length_path_zero_min() {
+        // [*0..3] should allow zero hops
+        let stmt = parse("MATCH (a)-[:KNOWS*0..3]->(b) RETURN a").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Pattern::Path(path) = &m.patterns[0] {
+                let seg = &path.segments[0];
+                let range = seg
+                    .edge
+                    .length_range
+                    .as_ref()
+                    .expect("should have length_range");
+                assert_eq!(range.min, 0);
+                assert_eq!(range.max, Some(3));
+            } else {
+                panic!("expected path pattern");
             }
         } else {
             panic!("expected MATCH statement");
