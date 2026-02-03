@@ -214,6 +214,10 @@ pub enum ScalarFunction {
     Relationships(String),
     /// length(path) - パスの長さ（ホップ数）を返す
     Length(String),
+    /// shortestPath(start, end) - 2ノード間の最短パスを返す
+    ShortestPath { start: String, end: String },
+    /// allShortestPaths(start, end) - 2ノード間の全最短パスを返す
+    AllShortestPaths { start: String, end: String },
 }
 
 /// 式

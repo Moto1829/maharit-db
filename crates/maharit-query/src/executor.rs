@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use maharit_core::{Edge, Graph, NodeId, PropertyValue};
+use maharit_core::{traversal, Edge, Graph, NodeId, PropertyValue};
 use thiserror::Error;
 
 use crate::ast::*;
@@ -966,6 +966,12 @@ impl<'a> Executor<'a> {
                 ScalarFunction::Nodes(var) => format!("nodes({})", var),
                 ScalarFunction::Relationships(var) => format!("relationships({})", var),
                 ScalarFunction::Length(var) => format!("length({})", var),
+                ScalarFunction::ShortestPath { start, end } => {
+                    format!("shortestPath({}, {})", start, end)
+                }
+                ScalarFunction::AllShortestPaths { start, end } => {
+                    format!("allShortestPaths({}, {})", start, end)
+                }
             },
         }
     }
@@ -1118,7 +1124,68 @@ impl<'a> Executor<'a> {
                     Err(ExecuteError::UndefinedVariable(var.clone()))
                 }
             }
+            ScalarFunction::ShortestPath { start, end } => {
+                let start_id = bindings
+                    .get(start)
+                    .and_then(|v| v.as_node())
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(start.clone()))?;
+                let end_id = bindings
+                    .get(end)
+                    .and_then(|v| v.as_node())
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
+
+                if let Some(path) = traversal::shortest_path(self.graph, start_id, end_id) {
+                    let edges = self.extract_edge_ids(&path.nodes);
+                    Ok(Value::Path {
+                        nodes: path.nodes,
+                        edges,
+                    })
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            ScalarFunction::AllShortestPaths { start, end } => {
+                let start_id = bindings
+                    .get(start)
+                    .and_then(|v| v.as_node())
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(start.clone()))?;
+                let end_id = bindings
+                    .get(end)
+                    .and_then(|v| v.as_node())
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
+
+                let paths = traversal::all_shortest_paths(self.graph, start_id, end_id);
+                let path_values: Vec<Value> = paths
+                    .into_iter()
+                    .map(|path| {
+                        let edges = self.extract_edge_ids(&path.nodes);
+                        Value::Path {
+                            nodes: path.nodes,
+                            edges,
+                        }
+                    })
+                    .collect();
+
+                Ok(Value::List(path_values))
+            }
         }
+    }
+
+    /// ノードのシーケンスから連続するノード間のエッジIDを抽出する
+    fn extract_edge_ids(&self, nodes: &[NodeId]) -> Vec<u64> {
+        let mut edges = Vec::new();
+        for window in nodes.windows(2) {
+            let from = window[0];
+            let to = window[1];
+            // Find edge from 'from' to 'to'
+            for edge in self.graph.get_outgoing_edges(from) {
+                if edge.to == to {
+                    edges.push(edge.id);
+                    break;
+                }
+            }
+        }
+        edges
     }
 
     fn build_aggregated_result_set(
@@ -2206,5 +2273,183 @@ mod tests {
         assert_eq!(result.rows[0].columns[1], Value::Int(80)); // 3rd highest
         assert_eq!(result.rows[1].columns[1], Value::Int(70)); // 4th highest
         assert_eq!(result.rows[2].columns[1], Value::Int(60)); // 5th highest
+    }
+
+    // ========== shortestPath / allShortestPaths tests ==========
+
+    #[test]
+    fn test_shortest_path_function() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C -> D
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        let d = graph.create_node("Node");
+        graph
+            .get_node_mut(d)
+            .unwrap()
+            .set_property("name", PropertyValue::String("D".to_string()));
+        graph.create_edge(c, d, "NEXT").unwrap();
+
+        // Find shortest path from A to D
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"}), (d:Node {name: "D"}) RETURN shortestPath(a, d)"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        if let Value::Path { nodes, edges } = &result.rows[0].columns[0] {
+            assert_eq!(nodes.len(), 4); // A, B, C, D
+            assert_eq!(edges.len(), 3); // 3 edges
+            assert_eq!(nodes[0], a);
+            assert_eq!(nodes[3], d);
+        } else {
+            panic!("Expected Path value, got {:?}", result.rows[0].columns[0]);
+        }
+    }
+
+    #[test]
+    fn test_shortest_path_no_path() {
+        let mut graph = Graph::new();
+        // Create disconnected nodes: A, B (no edge between them)
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"}), (b:Node {name: "B"}) RETURN shortestPath(a, b)"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Null);
+    }
+
+    #[test]
+    fn test_all_shortest_paths_single() {
+        let mut graph = Graph::new();
+        // Create: A -> B -> C (only one path)
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+        graph.create_edge(a, b, "NEXT").unwrap();
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+        graph.create_edge(b, c, "NEXT").unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"}), (c:Node {name: "C"}) RETURN allShortestPaths(a, c)"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        if let Value::List(paths) = &result.rows[0].columns[0] {
+            assert_eq!(paths.len(), 1);
+            if let Value::Path { nodes, edges } = &paths[0] {
+                assert_eq!(nodes.len(), 3); // A, B, C
+                assert_eq!(edges.len(), 2);
+            } else {
+                panic!("Expected Path value in list");
+            }
+        } else {
+            panic!("Expected List value");
+        }
+    }
+
+    #[test]
+    fn test_all_shortest_paths_multiple() {
+        let mut graph = Graph::new();
+        // Create diamond: A -> B -> D, A -> C -> D
+        let a = graph.create_node("Node");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("A".to_string()));
+
+        let b = graph.create_node("Node");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("name", PropertyValue::String("B".to_string()));
+
+        let c = graph.create_node("Node");
+        graph
+            .get_node_mut(c)
+            .unwrap()
+            .set_property("name", PropertyValue::String("C".to_string()));
+
+        let d = graph.create_node("Node");
+        graph
+            .get_node_mut(d)
+            .unwrap()
+            .set_property("name", PropertyValue::String("D".to_string()));
+
+        graph.create_edge(a, b, "E1").unwrap();
+        graph.create_edge(a, c, "E2").unwrap();
+        graph.create_edge(b, d, "E3").unwrap();
+        graph.create_edge(c, d, "E4").unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Node {name: "A"}), (d:Node {name: "D"}) RETURN allShortestPaths(a, d)"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        if let Value::List(paths) = &result.rows[0].columns[0] {
+            assert_eq!(paths.len(), 2); // Two shortest paths: A-B-D and A-C-D
+            for path in paths {
+                if let Value::Path { nodes, edges } = path {
+                    assert_eq!(nodes.len(), 3); // A, middle, D
+                    assert_eq!(edges.len(), 2);
+                    assert_eq!(nodes[0], a);
+                    assert_eq!(nodes[2], d);
+                } else {
+                    panic!("Expected Path value in list");
+                }
+            }
+        } else {
+            panic!("Expected List value");
+        }
     }
 }

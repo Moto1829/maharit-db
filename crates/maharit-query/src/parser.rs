@@ -322,6 +322,26 @@ impl Parser {
                 };
                 return Ok(ReturnItem::Function(scalar));
             }
+            "shortestpath" => {
+                let start = self.expect_ident()?;
+                self.expect(TokenKind::Comma)?;
+                let end = self.expect_ident()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::ShortestPath {
+                    start,
+                    end,
+                }));
+            }
+            "allshortestpaths" => {
+                let start = self.expect_ident()?;
+                self.expect(TokenKind::Comma)?;
+                let end = self.expect_ident()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::AllShortestPaths {
+                    start,
+                    end,
+                }));
+            }
             _ => {}
         }
 
@@ -381,7 +401,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });
@@ -1232,6 +1252,46 @@ mod tests {
                 assert_eq!(range.max, Some(3));
             } else {
                 panic!("expected path pattern");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== shortestPath / allShortestPaths tests ==========
+
+    #[test]
+    fn test_parse_shortest_path() {
+        let stmt = parse("MATCH (a:Person), (b:Person) RETURN shortestPath(a, b)").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.return_clause.items.len(), 1);
+            if let ReturnItem::Function(ScalarFunction::ShortestPath { start, end }) =
+                &m.return_clause.items[0]
+            {
+                assert_eq!(start, "a");
+                assert_eq!(end, "b");
+            } else {
+                panic!("expected shortestPath() function");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_all_shortest_paths() {
+        let stmt = parse("MATCH (a:Person), (b:Person) RETURN allShortestPaths(a, b)").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.return_clause.items.len(), 1);
+            if let ReturnItem::Function(ScalarFunction::AllShortestPaths { start, end }) =
+                &m.return_clause.items[0]
+            {
+                assert_eq!(start, "a");
+                assert_eq!(end, "b");
+            } else {
+                panic!("expected allShortestPaths() function");
             }
         } else {
             panic!("expected MATCH statement");

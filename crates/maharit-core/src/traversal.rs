@@ -285,6 +285,94 @@ pub fn shortest_path(graph: &Graph, from: NodeId, to: NodeId) -> Option<Path> {
     None
 }
 
+/// 2ノード間の全最短パスを探索
+///
+/// BFSで各ノードの全前任者(predecessors)を記録し、
+/// ゴールから再帰的に全パスを復元する。
+pub fn all_shortest_paths(graph: &Graph, from: NodeId, to: NodeId) -> Vec<Path> {
+    if from == to {
+        return vec![Path::new(vec![from])];
+    }
+
+    let mut queue = VecDeque::new();
+    let mut distances: HashMap<NodeId, usize> = HashMap::new();
+    let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+
+    queue.push_back(from);
+    distances.insert(from, 0);
+
+    let mut target_distance: Option<usize> = None;
+
+    while let Some(current) = queue.pop_front() {
+        let current_dist = distances[&current];
+
+        // If we've found paths to target and current distance exceeds target distance, stop
+        if let Some(td) = target_distance {
+            if current_dist >= td {
+                continue;
+            }
+        }
+
+        for edge in graph.get_outgoing_edges(current) {
+            let neighbor = edge.to;
+            let new_dist = current_dist + 1;
+
+            match distances.get(&neighbor) {
+                None => {
+                    // First time visiting this node
+                    distances.insert(neighbor, new_dist);
+                    predecessors.insert(neighbor, vec![current]);
+                    queue.push_back(neighbor);
+
+                    if neighbor == to {
+                        target_distance = Some(new_dist);
+                    }
+                }
+                Some(&existing_dist) if existing_dist == new_dist => {
+                    // Same distance path found, add predecessor
+                    predecessors.get_mut(&neighbor).unwrap().push(current);
+                }
+                _ => {
+                    // Longer path, ignore
+                }
+            }
+        }
+    }
+
+    // Reconstruct all paths from predecessors
+    if !predecessors.contains_key(&to) && from != to {
+        return vec![];
+    }
+
+    let mut all_paths = Vec::new();
+    reconstruct_all_paths(from, to, &predecessors, &mut vec![to], &mut all_paths);
+    all_paths
+}
+
+/// Helper function to recursively reconstruct all paths from predecessors
+fn reconstruct_all_paths(
+    from: NodeId,
+    current: NodeId,
+    predecessors: &HashMap<NodeId, Vec<NodeId>>,
+    current_path: &mut Vec<NodeId>,
+    all_paths: &mut Vec<Path>,
+) {
+    if current == from {
+        let mut path = current_path.clone();
+        path.reverse();
+        all_paths.push(Path::new(path));
+        return;
+    }
+
+    if let Some(preds) = predecessors.get(&current) {
+        for &pred in preds {
+            current_path.push(pred);
+            reconstruct_all_paths(from, pred, predecessors, current_path, all_paths);
+            current_path.pop();
+        }
+    }
+}
+
 /// 2ノード間にパスが存在するか確認
 pub fn has_path(graph: &Graph, from: NodeId, to: NodeId) -> bool {
     if from == to {
@@ -925,5 +1013,62 @@ mod tests {
         let path = astar.find_path(0, 0).unwrap();
         assert_eq!(path.nodes, vec![0]);
         assert_eq!(path.total_weight, 0.0);
+    }
+
+    // ========== all_shortest_paths tests ==========
+
+    #[test]
+    fn test_all_shortest_paths_single() {
+        let graph = create_test_graph();
+        // A -> B -> C: only one shortest path
+        let paths = all_shortest_paths(&graph, 0, 2);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_all_shortest_paths_multiple() {
+        // Create a diamond graph: A -> B -> D, A -> C -> D
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+        let d = graph.create_node("D");
+
+        graph.create_edge(a, b, "E1").unwrap();
+        graph.create_edge(a, c, "E2").unwrap();
+        graph.create_edge(b, d, "E3").unwrap();
+        graph.create_edge(c, d, "E4").unwrap();
+
+        let paths = all_shortest_paths(&graph, a, d);
+        assert_eq!(paths.len(), 2);
+
+        // Both paths should have length 3 (A, middle, D)
+        for path in &paths {
+            assert_eq!(path.nodes.len(), 3);
+            assert_eq!(path.nodes[0], a);
+            assert_eq!(path.nodes[2], d);
+        }
+
+        // The middle nodes should be B and C (in some order)
+        let middle_nodes: Vec<NodeId> = paths.iter().map(|p| p.nodes[1]).collect();
+        assert!(middle_nodes.contains(&b));
+        assert!(middle_nodes.contains(&c));
+    }
+
+    #[test]
+    fn test_all_shortest_paths_same_node() {
+        let graph = create_test_graph();
+        let paths = all_shortest_paths(&graph, 0, 0);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![0]);
+    }
+
+    #[test]
+    fn test_all_shortest_paths_no_path() {
+        let graph = create_test_graph();
+        // E has no outgoing edges, so no path from E to A
+        let paths = all_shortest_paths(&graph, 4, 0);
+        assert!(paths.is_empty());
     }
 }
