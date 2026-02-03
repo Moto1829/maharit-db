@@ -1433,6 +1433,44 @@ impl<'a> Executor<'a> {
                 let val = self.evaluate_expression(expr, bindings)?;
                 self.apply_unary_op(*op, &val)
             }
+            Expression::Case(case_expr) => self.evaluate_case_expression(case_expr, bindings),
+        }
+    }
+
+    fn evaluate_case_expression(
+        &self,
+        case_expr: &CaseExpression,
+        bindings: &Bindings,
+    ) -> Result<Value, ExecuteError> {
+        // Evaluate operand for simple CASE
+        let operand_value = case_expr
+            .operand
+            .as_ref()
+            .map(|op| self.evaluate_expression(op, bindings))
+            .transpose()?;
+
+        // Check each WHEN clause
+        for when_clause in &case_expr.when_clauses {
+            let condition_value = self.evaluate_expression(&when_clause.condition, bindings)?;
+
+            let matches = if let Some(ref op_val) = operand_value {
+                // Simple CASE: compare operand with condition value
+                self.values_equal(op_val, &condition_value)
+            } else {
+                // Searched CASE: condition should evaluate to boolean
+                matches!(condition_value, Value::Bool(true))
+            };
+
+            if matches {
+                return self.evaluate_expression(&when_clause.result, bindings);
+            }
+        }
+
+        // No WHEN clause matched, return ELSE or NULL
+        if let Some(ref else_expr) = case_expr.else_clause {
+            self.evaluate_expression(else_expr, bindings)
+        } else {
+            Ok(Value::Null)
         }
     }
 
@@ -2556,5 +2594,78 @@ mod tests {
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
         assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
+    }
+
+    // ========== CASE WHEN tests ==========
+
+    #[test]
+    fn test_case_when_searched_in_where() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 15})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 65})"#).unwrap();
+
+        // Use CASE in WHERE to filter: only adults (age >= 18)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE CASE WHEN n.age >= 18 THEN true ELSE false END RETURN n.name ORDER BY n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    #[test]
+    fn test_case_when_with_else() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 15})"#).unwrap();
+
+        // CASE with multiple WHEN and ELSE
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE CASE WHEN n.age < 18 THEN false WHEN n.age >= 18 THEN true ELSE false END RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_case_when_no_match_returns_null() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        // CASE without ELSE and no match returns NULL
+        // This test uses the fact that NULL is not true, so WHERE filters it out
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE CASE WHEN n.age < 18 THEN true END RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 0); // Alice's age is 30, CASE returns NULL, not true
+    }
+
+    #[test]
+    fn test_case_when_simple_form() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", status: 1})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", status: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", status: 1})"#).unwrap();
+
+        // Simple CASE: CASE n.status WHEN 1 THEN true ELSE false END
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE CASE n.status WHEN 1 THEN true ELSE false END RETURN n.name ORDER BY n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
     }
 }

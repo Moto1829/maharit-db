@@ -736,6 +736,7 @@ impl Parser {
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)
             }
+            Some(TokenKind::Case) => self.parse_case_expression(),
             Some(TokenKind::Ident(_)) => {
                 let var = self.expect_ident()?;
                 if self.check(TokenKind::Dot) {
@@ -760,6 +761,47 @@ impl Parser {
             Some(_) => Err(self.unexpected_token("expression")),
             None => Err(ParseError::UnexpectedEof),
         }
+    }
+
+    fn parse_case_expression(&mut self) -> Result<Expression, ParseError> {
+        self.expect(TokenKind::Case)?;
+
+        // Check for simple CASE (CASE expr WHEN ...) vs searched CASE (CASE WHEN ...)
+        let operand = if !self.check(TokenKind::When) {
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+
+        // Parse WHEN clauses
+        let mut when_clauses = Vec::new();
+        while self.check(TokenKind::When) {
+            self.advance();
+            let condition = self.parse_expression()?;
+            self.expect(TokenKind::Then)?;
+            let result = self.parse_expression()?;
+            when_clauses.push(WhenClause { condition, result });
+        }
+
+        if when_clauses.is_empty() {
+            return Err(self.unexpected_token("WHEN"));
+        }
+
+        // Parse optional ELSE clause
+        let else_clause = if self.check(TokenKind::Else) {
+            self.advance();
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::End)?;
+
+        Ok(Expression::Case(CaseExpression {
+            operand,
+            when_clauses,
+            else_clause,
+        }))
     }
 
     fn parse_literal(&mut self) -> Result<Literal, ParseError> {
@@ -1348,6 +1390,70 @@ mod tests {
             assert!(!m.match_clauses[0].optional);
             assert!(m.match_clauses[1].optional);
             assert!(m.match_clauses[2].optional);
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== CASE WHEN tests ==========
+
+    #[test]
+    fn test_case_when_searched() {
+        // Searched CASE: CASE WHEN condition THEN result ... END
+        let stmt = parse(
+            "MATCH (n:Person) WHERE CASE WHEN n.age < 20 THEN true ELSE false END RETURN n",
+        )
+        .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert!(m.where_clause.is_some());
+            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+                assert!(case_expr.operand.is_none()); // Searched CASE
+                assert_eq!(case_expr.when_clauses.len(), 1);
+                assert!(case_expr.else_clause.is_some());
+            } else {
+                panic!("expected CASE expression");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_case_when_simple() {
+        // Simple CASE: CASE expr WHEN value THEN result ... END
+        let stmt = parse(
+            "MATCH (n:Person) WHERE CASE n.status WHEN 1 THEN true WHEN 2 THEN false END RETURN n",
+        )
+        .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert!(m.where_clause.is_some());
+            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+                assert!(case_expr.operand.is_some()); // Simple CASE
+                assert_eq!(case_expr.when_clauses.len(), 2);
+                assert!(case_expr.else_clause.is_none());
+            } else {
+                panic!("expected CASE expression");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_case_when_multiple_when() {
+        let stmt = parse(
+            "MATCH (n:Person) WHERE CASE WHEN n.age < 20 THEN true WHEN n.age < 60 THEN true ELSE false END RETURN n",
+        )
+        .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+                assert_eq!(case_expr.when_clauses.len(), 2);
+            } else {
+                panic!("expected CASE expression");
+            }
         } else {
             panic!("expected MATCH statement");
         }

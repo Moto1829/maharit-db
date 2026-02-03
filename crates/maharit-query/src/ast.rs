@@ -235,6 +235,28 @@ pub enum Expression {
     Property(String, String), // variable.property
     BinaryOp(Box<Expression>, BinaryOp, Box<Expression>),
     UnaryOp(UnaryOp, Box<Expression>),
+    /// CASE式
+    Case(CaseExpression),
+}
+
+/// CASE式
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseExpression {
+    /// 単純CASE式の場合の比較対象（CASE expr WHEN ...）
+    pub operand: Option<Box<Expression>>,
+    /// WHEN節のリスト
+    pub when_clauses: Vec<WhenClause>,
+    /// ELSE節（省略可能）
+    pub else_clause: Option<Box<Expression>>,
+}
+
+/// WHEN節
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhenClause {
+    /// 条件（検索CASE）または比較値（単純CASE）
+    pub condition: Expression,
+    /// 結果値
+    pub result: Expression,
 }
 
 /// 二項演算子
