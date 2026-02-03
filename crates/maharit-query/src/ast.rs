@@ -21,12 +21,48 @@ pub struct MatchClause {
     pub optional: bool,
 }
 
-/// MATCH文（MATCH + OPTIONAL MATCH + WHERE + RETURN）
+/// MATCH文（MATCH + OPTIONAL MATCH + WHERE + WITH/RETURN）
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchStatement {
-    pub match_clauses: Vec<MatchClause>,
-    pub where_clause: Option<Expression>,
+    /// クエリセグメントのリスト（WITH句で区切られる）
+    pub segments: Vec<QuerySegment>,
+    /// 最終的なRETURN句
     pub return_clause: ReturnClause,
+}
+
+/// クエリセグメント（MATCH + WHERE + WITH）
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuerySegment {
+    /// MATCH句（OPTIONAL MATCH含む）
+    pub match_clauses: Vec<MatchClause>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+    /// WITH句（最後のセグメント以外で必須）
+    pub with_clause: Option<WithClause>,
+}
+
+/// WITH句
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    /// DISTINCT かどうか
+    pub distinct: bool,
+    /// 投影項目
+    pub items: Vec<WithItem>,
+    /// ORDER BY句
+    pub order_by: Option<OrderByClause>,
+    /// SKIP句
+    pub skip: Option<u64>,
+    /// LIMIT句
+    pub limit: Option<u64>,
+}
+
+/// WITH項目
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithItem {
+    /// 式
+    pub expression: ReturnItem,
+    /// エイリアス（AS name）
+    pub alias: Option<String>,
 }
 
 /// DELETE文（MATCH + WHERE + SET + DELETE）

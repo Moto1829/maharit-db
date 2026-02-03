@@ -55,6 +55,7 @@ pub enum TokenKind {
     // 高度なクエリ用キーワード
     Optional,
     With,
+    As,
     Case,
     When,
     Then,
@@ -130,6 +131,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Last => write!(f, "LAST"),
             TokenKind::Optional => write!(f, "OPTIONAL"),
             TokenKind::With => write!(f, "WITH"),
+            TokenKind::As => write!(f, "AS"),
             TokenKind::Case => write!(f, "CASE"),
             TokenKind::When => write!(f, "WHEN"),
             TokenKind::Then => write!(f, "THEN"),
@@ -415,6 +417,7 @@ impl<'a> Lexer<'a> {
             "LAST" => TokenKind::Last,
             "OPTIONAL" => TokenKind::Optional,
             "WITH" => TokenKind::With,
+            "AS" => TokenKind::As,
             "CASE" => TokenKind::Case,
             "WHEN" => TokenKind::When,
             "THEN" => TokenKind::Then,

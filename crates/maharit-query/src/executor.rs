@@ -146,6 +146,8 @@ pub enum BindingValue {
         nodes: Vec<NodeId>,
         edges: Vec<u64>,
     },
+    /// スカラー値（WITH句で渡される中間値）
+    Scalar(Value),
 }
 
 impl BindingValue {
@@ -328,8 +330,8 @@ impl<'a> Executor<'a> {
                                 edges_to_delete.push(*id);
                             }
                         }
-                        BindingValue::Path { .. } => {
-                            // Paths cannot be deleted directly
+                        BindingValue::Path { .. } | BindingValue::Scalar(_) => {
+                            // Paths and scalars cannot be deleted directly
                         }
                     }
                 }
@@ -394,27 +396,143 @@ impl<'a> Executor<'a> {
     // ========== MATCH ==========
 
     fn execute_match(&mut self, m: MatchStatement) -> Result<ResultSet, ExecuteError> {
-        // Find all matching bindings
+        // Process each segment
         let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
 
-        for match_clause in &m.match_clauses {
-            all_bindings = self.execute_match_clause(match_clause, all_bindings)?;
+        for segment in &m.segments {
+            all_bindings = self.execute_query_segment(segment, all_bindings)?;
+        }
+
+        // Build result set
+        self.build_result_set(&m.return_clause, &all_bindings)
+    }
+
+    fn execute_query_segment(
+        &self,
+        segment: &QuerySegment,
+        mut bindings: Vec<Bindings>,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        // Execute MATCH clauses
+        for match_clause in &segment.match_clauses {
+            bindings = self.execute_match_clause(match_clause, bindings)?;
         }
 
         // Apply WHERE filter
-        if let Some(where_expr) = &m.where_clause {
-            all_bindings = all_bindings
+        if let Some(where_expr) = &segment.where_clause {
+            bindings = bindings
                 .into_iter()
-                .filter(|bindings| {
-                    self.evaluate_expression(where_expr, bindings)
+                .filter(|b| {
+                    self.evaluate_expression(where_expr, b)
                         .map(|v| matches!(v, Value::Bool(true)))
                         .unwrap_or(false)
                 })
                 .collect();
         }
 
-        // Build result set
-        self.build_result_set(&m.return_clause, &all_bindings)
+        // Apply WITH clause if present
+        if let Some(with_clause) = &segment.with_clause {
+            bindings = self.apply_with_clause(with_clause, bindings)?;
+        }
+
+        Ok(bindings)
+    }
+
+    fn apply_with_clause(
+        &self,
+        with_clause: &WithClause,
+        bindings: Vec<Bindings>,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        // Project bindings through WITH items
+        let mut result: Vec<Bindings> = Vec::new();
+
+        for binding in &bindings {
+            let mut new_binding = Bindings::new();
+
+            for item in &with_clause.items {
+                let value = self.evaluate_return_item(&item.expression, binding)?;
+
+                // Determine the variable name for this item
+                let var_name = if let Some(ref alias) = item.alias {
+                    alias.clone()
+                } else {
+                    // Use the original variable name if available
+                    match &item.expression {
+                        ReturnItem::Variable(v) => v.clone(),
+                        ReturnItem::Property(v, p) => format!("{}.{}", v, p),
+                        ReturnItem::Aggregate(agg) => self.aggregate_to_name(agg),
+                        ReturnItem::Function(func) => self.function_to_name(func),
+                        ReturnItem::All => "*".to_string(),
+                    }
+                };
+
+                // Convert Value back to BindingValue for the new binding
+                match value {
+                    Value::Node(id) | Value::NodeData { id, .. } => {
+                        new_binding.insert(var_name, BindingValue::Node(id));
+                    }
+                    Value::Path { nodes, edges } => {
+                        new_binding.insert(var_name, BindingValue::Path { nodes, edges });
+                    }
+                    other => {
+                        new_binding.insert(var_name, BindingValue::Scalar(other));
+                    }
+                }
+            }
+
+            result.push(new_binding);
+        }
+
+        // Apply DISTINCT if needed
+        if with_clause.distinct {
+            result = self.apply_distinct_bindings(result);
+        }
+
+        // Apply SKIP
+        if let Some(skip) = with_clause.skip {
+            result = result.into_iter().skip(skip as usize).collect();
+        }
+
+        // Apply LIMIT
+        if let Some(limit) = with_clause.limit {
+            result = result.into_iter().take(limit as usize).collect();
+        }
+
+        Ok(result)
+    }
+
+    fn apply_distinct_bindings(&self, bindings: Vec<Bindings>) -> Vec<Bindings> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        for binding in bindings {
+            let key = format!("{:?}", binding);
+            if seen.insert(key) {
+                result.push(binding);
+            }
+        }
+
+        result
+    }
+
+    fn aggregate_to_name(&self, agg: &AggregateFunction) -> String {
+        match agg {
+            AggregateFunction::Count(_) => "count".to_string(),
+            AggregateFunction::Sum(_) => "sum".to_string(),
+            AggregateFunction::Avg(_) => "avg".to_string(),
+            AggregateFunction::Min(_) => "min".to_string(),
+            AggregateFunction::Max(_) => "max".to_string(),
+            AggregateFunction::Collect(_) => "collect".to_string(),
+        }
+    }
+
+    fn function_to_name(&self, func: &ScalarFunction) -> String {
+        match func {
+            ScalarFunction::Nodes(_) => "nodes".to_string(),
+            ScalarFunction::Relationships(_) => "relationships".to_string(),
+            ScalarFunction::Length(_) => "length".to_string(),
+            ScalarFunction::ShortestPath { .. } => "shortestPath".to_string(),
+            ScalarFunction::AllShortestPaths { .. } => "allShortestPaths".to_string(),
+        }
     }
 
     fn execute_match_clause(
@@ -1041,6 +1159,7 @@ impl<'a> Executor<'a> {
                                 edges: edges.clone(),
                             })
                         }
+                        BindingValue::Scalar(value) => Ok(value.clone()),
                     }
                 } else {
                     Ok(Value::Null)
@@ -1403,6 +1522,7 @@ impl<'a> Executor<'a> {
                         nodes: nodes.clone(),
                         edges: edges.clone(),
                     }),
+                    BindingValue::Scalar(value) => Ok(value.clone()),
                 }
             }
             Expression::Property(var, prop) => {
@@ -2661,6 +2781,80 @@ mod tests {
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE CASE n.status WHEN 1 THEN true ELSE false END RETURN n.name ORDER BY n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    // ========== WITH clause tests ==========
+
+    #[test]
+    fn test_with_passthrough() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+
+        // WITH n simply passes bindings through
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) WITH n RETURN n.name ORDER BY n.name",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_with_alias() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+
+        // WITH n.name AS name projects property into a new variable
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WITH n.name AS name RETURN name ORDER BY name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn test_with_limit() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie"})"#).unwrap();
+
+        // WITH n LIMIT 2 restricts intermediate results
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) WITH n LIMIT 2 RETURN n.name",
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_with_where_filter() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+
+        // WITH + WHERE filters on projected values
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WITH n WHERE n.age > 28 RETURN n.name ORDER BY n.name"#,
         )
         .unwrap();
 

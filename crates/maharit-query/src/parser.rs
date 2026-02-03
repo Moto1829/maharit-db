@@ -63,18 +63,100 @@ impl Parser {
     // ========== MATCH ==========
 
     fn parse_match_or_delete(&mut self) -> Result<Statement, ParseError> {
-        self.expect(TokenKind::Match)?;
+        // Parse first segment
+        let (first_segment, is_delete, set_clause, delete_clause) = self.parse_query_segment()?;
 
-        // Parse first MATCH clause (required, non-optional)
-        let first_clause = self.parse_match_clause(false)?;
-        let mut match_clauses = vec![first_clause];
+        if is_delete {
+            // DELETE statement
+            let patterns: Vec<Pattern> = first_segment
+                .match_clauses
+                .into_iter()
+                .flat_map(|c| c.patterns)
+                .collect();
+            return Ok(Statement::Delete(DeleteStatement {
+                patterns,
+                where_clause: first_segment.where_clause,
+                set_clause,
+                delete_clause: delete_clause.unwrap(),
+            }));
+        }
 
-        // Parse additional OPTIONAL MATCH clauses
-        while self.check(TokenKind::Optional) {
-            self.advance();
+        let mut segments = vec![first_segment];
+
+        // Continue parsing segments while we have WITH clauses
+        while segments.last().unwrap().with_clause.is_some() {
+            // After WITH, we may have another MATCH or go directly to RETURN
+            if self.check(TokenKind::Match) || self.check(TokenKind::Optional) {
+                let (segment, is_del, _, _) = self.parse_query_segment()?;
+                if is_del {
+                    return Err(self.unexpected_token("RETURN or WITH"));
+                }
+                segments.push(segment);
+            } else if self.check(TokenKind::Return) {
+                // Final RETURN, exit loop
+                break;
+            } else if self.check(TokenKind::With) {
+                // WITH directly after WITH (chaining)
+                let with_clause = Some(self.parse_with_clause()?);
+                segments.push(QuerySegment {
+                    match_clauses: vec![],
+                    where_clause: None,
+                    with_clause,
+                });
+            } else if self.check(TokenKind::Where) {
+                // WHERE after WITH (filtering on WITH results)
+                self.advance();
+                let where_clause = Some(self.parse_expression()?);
+
+                // Check for WITH or RETURN
+                if self.check(TokenKind::With) {
+                    let with_clause = Some(self.parse_with_clause()?);
+                    segments.push(QuerySegment {
+                        match_clauses: vec![],
+                        where_clause,
+                        with_clause,
+                    });
+                } else {
+                    segments.push(QuerySegment {
+                        match_clauses: vec![],
+                        where_clause,
+                        with_clause: None,
+                    });
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Parse final RETURN clause
+        self.expect(TokenKind::Return)?;
+        let return_clause = self.parse_return_clause()?;
+
+        Ok(Statement::Match(MatchStatement {
+            segments,
+            return_clause,
+        }))
+    }
+
+    fn parse_query_segment(
+        &mut self,
+    ) -> Result<(QuerySegment, bool, Option<SetClause>, Option<DeleteClause>), ParseError> {
+        // Parse MATCH clauses (may be empty if starting with WHERE after WITH)
+        let mut match_clauses = Vec::new();
+
+        if self.check(TokenKind::Match) {
             self.expect(TokenKind::Match)?;
-            let clause = self.parse_match_clause(true)?;
-            match_clauses.push(clause);
+            let first_clause = self.parse_match_clause(false)?;
+            match_clauses.push(first_clause);
+
+            // Parse additional OPTIONAL MATCH clauses
+            while self.check(TokenKind::Optional) {
+                self.advance();
+                self.expect(TokenKind::Match)?;
+                let clause = self.parse_match_clause(true)?;
+                match_clauses.push(clause);
+            }
         }
 
         // WHERE clause (optional)
@@ -85,38 +167,111 @@ impl Parser {
             None
         };
 
-        // SET clause (optional, before DELETE or RETURN)
+        // SET clause (optional, only for DELETE)
         let set_clause = if self.check(TokenKind::Set) {
             Some(self.parse_set_clause()?)
         } else {
             None
         };
 
-        // DELETE or RETURN
+        // Check for DELETE, WITH, or continue to RETURN
         if self.check(TokenKind::Delete) || self.check(TokenKind::Detach) {
             let delete_clause = self.parse_delete_clause()?;
-            // For DELETE, flatten all patterns from all clauses
-            let patterns: Vec<Pattern> = match_clauses
-                .into_iter()
-                .flat_map(|c| c.patterns)
-                .collect();
-            Ok(Statement::Delete(DeleteStatement {
-                patterns,
-                where_clause,
+            return Ok((
+                QuerySegment {
+                    match_clauses,
+                    where_clause,
+                    with_clause: None,
+                },
+                true,
                 set_clause,
-                delete_clause,
-            }))
-        } else {
-            // RETURN clause
-            self.expect(TokenKind::Return)?;
-            let return_clause = self.parse_return_clause()?;
+                Some(delete_clause),
+            ));
+        }
 
-            Ok(Statement::Match(MatchStatement {
+        // WITH clause (optional)
+        let with_clause = if self.check(TokenKind::With) {
+            Some(self.parse_with_clause()?)
+        } else {
+            None
+        };
+
+        Ok((
+            QuerySegment {
                 match_clauses,
                 where_clause,
-                return_clause,
-            }))
+                with_clause,
+            },
+            false,
+            set_clause,
+            None,
+        ))
+    }
+
+    fn parse_with_clause(&mut self) -> Result<WithClause, ParseError> {
+        self.expect(TokenKind::With)?;
+
+        // DISTINCT (optional)
+        let distinct = if self.check(TokenKind::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        // Parse WITH items
+        let mut items = Vec::new();
+        items.push(self.parse_with_item()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            items.push(self.parse_with_item()?);
         }
+
+        // ORDER BY (optional)
+        let order_by = if self.check(TokenKind::Order) {
+            Some(self.parse_order_by_clause()?)
+        } else {
+            None
+        };
+
+        // SKIP (optional)
+        let skip = if self.check(TokenKind::Skip) {
+            self.advance();
+            Some(self.parse_positive_int()?)
+        } else {
+            None
+        };
+
+        // LIMIT (optional)
+        let limit = if self.check(TokenKind::Limit) {
+            self.advance();
+            Some(self.parse_positive_int()?)
+        } else {
+            None
+        };
+
+        Ok(WithClause {
+            distinct,
+            items,
+            order_by,
+            skip,
+            limit,
+        })
+    }
+
+    fn parse_with_item(&mut self) -> Result<WithItem, ParseError> {
+        let expression = self.parse_return_item()?;
+
+        // AS alias (optional)
+        let alias = if self.check(TokenKind::As) {
+            self.advance(); // consume AS
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        Ok(WithItem { expression, alias })
     }
 
     fn parse_match_clause(&mut self, optional: bool) -> Result<MatchClause, ParseError> {
@@ -970,8 +1125,8 @@ mod tests {
         let stmt = parse("MATCH (n:Person) RETURN n").unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert_eq!(m.match_clauses[0].patterns.len(), 1);
-            assert!(m.where_clause.is_none());
+            assert_eq!(m.segments[0].match_clauses[0].patterns.len(), 1);
+            assert!(m.segments[0].where_clause.is_none());
             assert_eq!(m.return_clause.items.len(), 1);
             assert_eq!(
                 m.return_clause.items[0],
@@ -1001,7 +1156,7 @@ mod tests {
         let stmt = parse("MATCH (n:Person) WHERE n.age > 18 RETURN n").unwrap();
 
         if let Statement::Match(m) = stmt {
-            let where_clause = m.where_clause.unwrap();
+            let where_clause = m.segments[0].where_clause.clone().unwrap();
             if let Expression::BinaryOp(left, op, right) = where_clause {
                 assert_eq!(op, BinaryOp::Gt);
                 assert_eq!(
@@ -1023,7 +1178,7 @@ mod tests {
             parse(r#"MATCH (n:Person) WHERE n.age > 18 AND n.name = "Alice" RETURN n"#).unwrap();
 
         if let Statement::Match(m) = stmt {
-            let where_clause = m.where_clause.unwrap();
+            let where_clause = m.segments[0].where_clause.clone().unwrap();
             if let Expression::BinaryOp(_, op, _) = where_clause {
                 assert_eq!(op, BinaryOp::And);
             } else {
@@ -1163,7 +1318,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
+            if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
                 let range = seg
@@ -1186,7 +1341,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2..5]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
+            if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1208,7 +1363,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2..]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
+            if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1281,7 +1436,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
+            if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1304,7 +1459,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*0..3]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
+            if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1368,11 +1523,11 @@ mod tests {
         let stmt = parse("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b").unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert_eq!(m.match_clauses.len(), 2);
-            assert!(!m.match_clauses[0].optional);
-            assert!(m.match_clauses[1].optional);
-            assert_eq!(m.match_clauses[0].patterns.len(), 1);
-            assert_eq!(m.match_clauses[1].patterns.len(), 1);
+            assert_eq!(m.segments[0].match_clauses.len(), 2);
+            assert!(!m.segments[0].match_clauses[0].optional);
+            assert!(m.segments[0].match_clauses[1].optional);
+            assert_eq!(m.segments[0].match_clauses[0].patterns.len(), 1);
+            assert_eq!(m.segments[0].match_clauses[1].patterns.len(), 1);
         } else {
             panic!("expected MATCH statement");
         }
@@ -1386,10 +1541,10 @@ mod tests {
         .unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert_eq!(m.match_clauses.len(), 3);
-            assert!(!m.match_clauses[0].optional);
-            assert!(m.match_clauses[1].optional);
-            assert!(m.match_clauses[2].optional);
+            assert_eq!(m.segments[0].match_clauses.len(), 3);
+            assert!(!m.segments[0].match_clauses[0].optional);
+            assert!(m.segments[0].match_clauses[1].optional);
+            assert!(m.segments[0].match_clauses[2].optional);
         } else {
             panic!("expected MATCH statement");
         }
@@ -1406,8 +1561,8 @@ mod tests {
         .unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert!(m.where_clause.is_some());
-            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+            assert!(m.segments[0].where_clause.is_some());
+            if let Expression::Case(case_expr) = m.segments[0].where_clause.as_ref().unwrap() {
                 assert!(case_expr.operand.is_none()); // Searched CASE
                 assert_eq!(case_expr.when_clauses.len(), 1);
                 assert!(case_expr.else_clause.is_some());
@@ -1428,8 +1583,8 @@ mod tests {
         .unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert!(m.where_clause.is_some());
-            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+            assert!(m.segments[0].where_clause.is_some());
+            if let Expression::Case(case_expr) = m.segments[0].where_clause.as_ref().unwrap() {
                 assert!(case_expr.operand.is_some()); // Simple CASE
                 assert_eq!(case_expr.when_clauses.len(), 2);
                 assert!(case_expr.else_clause.is_none());
@@ -1449,11 +1604,148 @@ mod tests {
         .unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Expression::Case(case_expr) = m.where_clause.as_ref().unwrap() {
+            if let Expression::Case(case_expr) = m.segments[0].where_clause.as_ref().unwrap() {
                 assert_eq!(case_expr.when_clauses.len(), 2);
             } else {
                 panic!("expected CASE expression");
             }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== WITH clause tests ==========
+
+    #[test]
+    fn test_with_clause_basic() {
+        let stmt = parse("MATCH (n:Person) WITH n RETURN n").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            // Single segment with MATCH and WITH
+            assert_eq!(m.segments.len(), 1);
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert!(!with.distinct);
+            assert_eq!(with.items.len(), 1);
+            if let ReturnItem::Variable(name) = &with.items[0].expression {
+                assert_eq!(name, "n");
+            } else {
+                panic!("expected variable in WITH");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_clause_alias() {
+        let stmt = parse("MATCH (n:Person) WITH n.name AS name RETURN name").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert_eq!(with.items.len(), 1);
+            assert_eq!(with.items[0].alias, Some("name".to_string()));
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_distinct() {
+        let stmt = parse("MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert!(with.distinct);
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_order_by() {
+        let stmt =
+            parse("MATCH (n:Person) WITH n ORDER BY n.age RETURN n").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert!(with.order_by.is_some());
+            let order_by = with.order_by.as_ref().unwrap();
+            assert_eq!(order_by.items.len(), 1);
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_limit() {
+        let stmt = parse("MATCH (n:Person) WITH n LIMIT 10 RETURN n").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert_eq!(with.limit, Some(10));
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_skip() {
+        let stmt = parse("MATCH (n:Person) WITH n SKIP 5 RETURN n").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert_eq!(with.skip, Some(5));
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_aggregation() {
+        let stmt =
+            parse("MATCH (n:Person) WITH n.city AS city, COUNT(*) AS count RETURN city, count")
+                .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let with = m.segments[0].with_clause.as_ref().unwrap();
+            assert_eq!(with.items.len(), 2);
+            assert_eq!(with.items[0].alias, Some("city".to_string()));
+            assert_eq!(with.items[1].alias, Some("count".to_string()));
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_with_where() {
+        let stmt =
+            parse("MATCH (n:Person) WITH n.city AS city, COUNT(*) AS count WHERE count > 5 RETURN city")
+                .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            // First segment has MATCH and WITH
+            // Second segment has WHERE (filtering on WITH results)
+            assert_eq!(m.segments.len(), 2);
+            assert!(m.segments[0].with_clause.is_some());
+            assert!(m.segments[1].where_clause.is_some());
+            assert!(m.segments[1].match_clauses.is_empty());
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_multiple_with() {
+        let stmt = parse(
+            "MATCH (n:Person) WITH n.city AS city WITH city RETURN city",
+        )
+        .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            // MATCH + WITH creates 1 segment, second WITH creates another
+            assert_eq!(m.segments.len(), 2);
+            assert!(m.segments[0].with_clause.is_some());
+            assert!(m.segments[1].with_clause.is_some());
         } else {
             panic!("expected MATCH statement");
         }
