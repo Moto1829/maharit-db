@@ -14,10 +14,17 @@ pub struct CreateClause {
     pub patterns: Vec<Pattern>,
 }
 
-/// MATCH文（MATCH + WHERE + RETURN）
+/// MATCH句（パターンとオプショナルフラグ）
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchClause {
+    pub patterns: Vec<Pattern>,
+    pub optional: bool,
+}
+
+/// MATCH文（MATCH + OPTIONAL MATCH + WHERE + RETURN）
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchStatement {
-    pub patterns: Vec<Pattern>,
+    pub match_clauses: Vec<MatchClause>,
     pub where_clause: Option<Expression>,
     pub return_clause: ReturnClause,
 }

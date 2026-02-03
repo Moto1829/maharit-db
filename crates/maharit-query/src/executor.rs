@@ -397,8 +397,8 @@ impl<'a> Executor<'a> {
         // Find all matching bindings
         let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
 
-        for pattern in &m.patterns {
-            all_bindings = self.match_pattern(pattern, all_bindings)?;
+        for match_clause in &m.match_clauses {
+            all_bindings = self.execute_match_clause(match_clause, all_bindings)?;
         }
 
         // Apply WHERE filter
@@ -415,6 +415,41 @@ impl<'a> Executor<'a> {
 
         // Build result set
         self.build_result_set(&m.return_clause, &all_bindings)
+    }
+
+    fn execute_match_clause(
+        &self,
+        clause: &MatchClause,
+        current_bindings: Vec<Bindings>,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        if clause.optional {
+            // OPTIONAL MATCH: if no matches, keep original bindings with NULL for new variables
+            let mut result = Vec::new();
+
+            for bindings in current_bindings {
+                let mut matches = vec![bindings.clone()];
+                for pattern in &clause.patterns {
+                    matches = self.match_pattern(pattern, matches)?;
+                }
+
+                if matches.is_empty() {
+                    // No matches found - keep original bindings (variables from this clause will be NULL/unbound)
+                    result.push(bindings);
+                } else {
+                    // Found matches - use them
+                    result.extend(matches);
+                }
+            }
+
+            Ok(result)
+        } else {
+            // Regular MATCH: filter out non-matches
+            let mut matches = current_bindings;
+            for pattern in &clause.patterns {
+                matches = self.match_pattern(pattern, matches)?;
+            }
+            Ok(matches)
+        }
     }
 
     fn match_pattern(
@@ -2451,5 +2486,75 @@ mod tests {
         } else {
             panic!("Expected List value");
         }
+    }
+
+    // ========== OPTIONAL MATCH tests ==========
+
+    #[test]
+    fn test_optional_match_with_match() {
+        let mut graph = Graph::new();
+        // Create Alice -> Bob, Charlie (no outgoing edge)
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(&mut graph, r#"CREATE (c:Person {name: "Charlie"})"#).unwrap();
+
+        // OPTIONAL MATCH: Alice has a friend, Charlie doesn't
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3); // Alice, Bob, Charlie
+        // Alice -> Bob
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
+        // Bob has no outgoing KNOWS
+        assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
+        assert_eq!(result.rows[1].columns[1], Value::Null);
+        // Charlie has no outgoing KNOWS
+        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(result.rows[2].columns[1], Value::Null);
+    }
+
+    #[test]
+    fn test_optional_match_no_match() {
+        let mut graph = Graph::new();
+        // Create just Alice with no relationships
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::Null);
+    }
+
+    #[test]
+    fn test_optional_match_all_match() {
+        let mut graph = Graph::new();
+        // Everyone knows someone
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
     }
 }

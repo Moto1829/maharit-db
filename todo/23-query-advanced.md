@@ -11,8 +11,8 @@
 - [ ] 集計結果の再利用
 
 ### OPTIONAL MATCH
-- [ ] マッチしない場合にNULLを返す
-- [ ] 複数OPTIONAL MATCHの組み合わせ
+- [x] マッチしない場合にNULLを返す
+- [x] 複数OPTIONAL MATCHの組み合わせ
 
 ### UNION
 - [ ] UNION（重複排除）

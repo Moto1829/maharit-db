@@ -65,12 +65,16 @@ impl Parser {
     fn parse_match_or_delete(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Match)?;
 
-        let mut patterns = Vec::new();
-        patterns.push(self.parse_pattern()?);
+        // Parse first MATCH clause (required, non-optional)
+        let first_clause = self.parse_match_clause(false)?;
+        let mut match_clauses = vec![first_clause];
 
-        while self.check(TokenKind::Comma) {
+        // Parse additional OPTIONAL MATCH clauses
+        while self.check(TokenKind::Optional) {
             self.advance();
-            patterns.push(self.parse_pattern()?);
+            self.expect(TokenKind::Match)?;
+            let clause = self.parse_match_clause(true)?;
+            match_clauses.push(clause);
         }
 
         // WHERE clause (optional)
@@ -91,6 +95,11 @@ impl Parser {
         // DELETE or RETURN
         if self.check(TokenKind::Delete) || self.check(TokenKind::Detach) {
             let delete_clause = self.parse_delete_clause()?;
+            // For DELETE, flatten all patterns from all clauses
+            let patterns: Vec<Pattern> = match_clauses
+                .into_iter()
+                .flat_map(|c| c.patterns)
+                .collect();
             Ok(Statement::Delete(DeleteStatement {
                 patterns,
                 where_clause,
@@ -103,11 +112,23 @@ impl Parser {
             let return_clause = self.parse_return_clause()?;
 
             Ok(Statement::Match(MatchStatement {
-                patterns,
+                match_clauses,
                 where_clause,
                 return_clause,
             }))
         }
+    }
+
+    fn parse_match_clause(&mut self, optional: bool) -> Result<MatchClause, ParseError> {
+        let mut patterns = Vec::new();
+        patterns.push(self.parse_pattern()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            patterns.push(self.parse_pattern()?);
+        }
+
+        Ok(MatchClause { patterns, optional })
     }
 
     // ========== SET ==========
@@ -907,7 +928,7 @@ mod tests {
         let stmt = parse("MATCH (n:Person) RETURN n").unwrap();
 
         if let Statement::Match(m) = stmt {
-            assert_eq!(m.patterns.len(), 1);
+            assert_eq!(m.match_clauses[0].patterns.len(), 1);
             assert!(m.where_clause.is_none());
             assert_eq!(m.return_clause.items.len(), 1);
             assert_eq!(
@@ -1100,7 +1121,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.patterns[0] {
+            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
                 let range = seg
@@ -1123,7 +1144,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2..5]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.patterns[0] {
+            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1145,7 +1166,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*2..]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.patterns[0] {
+            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1218,7 +1239,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.patterns[0] {
+            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1241,7 +1262,7 @@ mod tests {
         let stmt = parse("MATCH (a)-[:KNOWS*0..3]->(b) RETURN a").unwrap();
 
         if let Statement::Match(m) = stmt {
-            if let Pattern::Path(path) = &m.patterns[0] {
+            if let Pattern::Path(path) = &m.match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
                 let range = seg
                     .edge
@@ -1293,6 +1314,40 @@ mod tests {
             } else {
                 panic!("expected allShortestPaths() function");
             }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== OPTIONAL MATCH tests ==========
+
+    #[test]
+    fn test_optional_match() {
+        let stmt = parse("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b").unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.match_clauses.len(), 2);
+            assert!(!m.match_clauses[0].optional);
+            assert!(m.match_clauses[1].optional);
+            assert_eq!(m.match_clauses[0].patterns.len(), 1);
+            assert_eq!(m.match_clauses[1].patterns.len(), 1);
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    #[test]
+    fn test_multiple_optional_match() {
+        let stmt = parse(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (a)-[:WORKS_AT]->(c) RETURN a, b, c",
+        )
+        .unwrap();
+
+        if let Statement::Match(m) = stmt {
+            assert_eq!(m.match_clauses.len(), 3);
+            assert!(!m.match_clauses[0].optional);
+            assert!(m.match_clauses[1].optional);
+            assert!(m.match_clauses[2].optional);
         } else {
             panic!("expected MATCH statement");
         }

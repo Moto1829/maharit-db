@@ -52,6 +52,14 @@ pub enum TokenKind {
     Nulls,
     First,
     Last,
+    // 高度なクエリ用キーワード
+    Optional,
+    With,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
 
     // 識別子とリテラル
     Ident(String),
@@ -120,6 +128,13 @@ impl fmt::Display for TokenKind {
             TokenKind::Nulls => write!(f, "NULLS"),
             TokenKind::First => write!(f, "FIRST"),
             TokenKind::Last => write!(f, "LAST"),
+            TokenKind::Optional => write!(f, "OPTIONAL"),
+            TokenKind::With => write!(f, "WITH"),
+            TokenKind::Case => write!(f, "CASE"),
+            TokenKind::When => write!(f, "WHEN"),
+            TokenKind::Then => write!(f, "THEN"),
+            TokenKind::Else => write!(f, "ELSE"),
+            TokenKind::End => write!(f, "END"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -398,6 +413,13 @@ impl<'a> Lexer<'a> {
             "NULLS" => TokenKind::Nulls,
             "FIRST" => TokenKind::First,
             "LAST" => TokenKind::Last,
+            "OPTIONAL" => TokenKind::Optional,
+            "WITH" => TokenKind::With,
+            "CASE" => TokenKind::Case,
+            "WHEN" => TokenKind::When,
+            "THEN" => TokenKind::Then,
+            "ELSE" => TokenKind::Else,
+            "END" => TokenKind::End,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }
