@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use maharit_core::{traversal, Edge, Graph, NodeId, PropertyValue};
+use regex::Regex;
 use thiserror::Error;
 
 use crate::ast::*;
@@ -187,7 +188,61 @@ impl<'a> Executor<'a> {
             Statement::Create(create) => self.execute_create(create),
             Statement::Match(m) => self.execute_match(m),
             Statement::Delete(d) => self.execute_delete(d),
+            Statement::Union(u) => self.execute_union(u),
         }
+    }
+
+    // ========== UNION ==========
+
+    fn execute_union(&mut self, union_stmt: UnionStatement) -> Result<ResultSet, ExecuteError> {
+        let mut results: Vec<ResultSet> = Vec::new();
+
+        for query in union_stmt.queries {
+            let result = self.execute_match(query)?;
+            results.push(result);
+        }
+
+        if results.is_empty() {
+            return Ok(ResultSet::empty());
+        }
+
+        // Validate all result sets have the same number of columns
+        let col_count = results[0].columns.len();
+        for (i, rs) in results.iter().enumerate().skip(1) {
+            if rs.columns.len() != col_count {
+                return Err(ExecuteError::TypeError(format!(
+                    "UNION: all queries must have the same number of columns (query 1 has {}, query {} has {})",
+                    col_count,
+                    i + 1,
+                    rs.columns.len()
+                )));
+            }
+        }
+
+        // Use column names from the first query
+        let columns = results[0].columns.clone();
+
+        // Collect all rows
+        let mut all_rows: Vec<Row> = Vec::new();
+        for rs in results {
+            all_rows.extend(rs.rows);
+        }
+
+        // Deduplicate for UNION (not UNION ALL)
+        if union_stmt.union_type == UnionType::Union {
+            let mut seen = HashSet::new();
+            let mut unique_rows = Vec::new();
+            for row in all_rows {
+                let key: Vec<String> = row.columns.iter().map(|v| format!("{}", v)).collect();
+                let key_str = key.join("\x00");
+                if seen.insert(key_str) {
+                    unique_rows.push(row);
+                }
+            }
+            all_rows = unique_rows;
+        }
+
+        Ok(ResultSet::new(columns, all_rows))
     }
 
     // ========== CREATE ==========
@@ -1619,6 +1674,19 @@ impl<'a> Executor<'a> {
             BinaryOp::Sub => self.arithmetic_op(left, right, |a, b| a - b, |a, b| a - b),
             BinaryOp::Mul => self.arithmetic_op(left, right, |a, b| a * b, |a, b| a * b),
             BinaryOp::Div => self.arithmetic_op(left, right, |a, b| a / b, |a, b| a / b),
+            BinaryOp::Regex => match (left, right) {
+                (Value::String(s), Value::String(pattern)) => {
+                    // Cypher =~ is full-match, so anchor the pattern
+                    let anchored = format!("(?s)\\A(?:{})\\z", pattern);
+                    let re = Regex::new(&anchored).map_err(|e| {
+                        ExecuteError::TypeError(format!("invalid regex: {}", e))
+                    })?;
+                    Ok(Value::Bool(re.is_match(s)))
+                }
+                _ => Err(ExecuteError::TypeError(
+                    "=~ requires string operands".to_string(),
+                )),
+            },
         }
     }
 
@@ -2861,5 +2929,142 @@ mod tests {
         assert_eq!(result.row_count(), 2);
         assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
         assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+    }
+
+    // ========== Regex match (=~) tests ==========
+
+    #[test]
+    fn test_regex_match() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Anna"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name =~ "A.*" RETURN n.name ORDER BY n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::String("Anna".to_string()));
+    }
+
+    #[test]
+    fn test_regex_no_match() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name =~ "B.*" RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 0);
+    }
+
+    #[test]
+    fn test_regex_full_match() {
+        // =~ should be a full match, not partial
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+
+        // "lic" should NOT match "Alice" (partial match)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name =~ "lic" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 0);
+
+        // ".*lic.*" should match "Alice"
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name =~ ".*lic.*" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[test]
+    fn test_regex_type_mismatch_returns_no_rows() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        // =~ on non-string operand evaluates to false in WHERE context
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age =~ ".*" RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 0);
+    }
+
+    // ========== UNION / UNION ALL tests ==========
+
+    #[test]
+    fn test_union_basic() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Company {name: "Acme"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.columns, vec!["n.name".to_string()]);
+    }
+
+    #[test]
+    fn test_union_dedup() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Company {name: "Alice"})"#).unwrap();
+
+        // UNION should remove duplicates
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_union_all() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Company {name: "Alice"})"#).unwrap();
+
+        // UNION ALL should keep duplicates
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) RETURN n.name UNION ALL MATCH (n:Company) RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_union_column_count_mismatch() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Company {name: "Acme"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) RETURN n.name, n.age UNION MATCH (n:Company) RETURN n.name"#,
+        );
+
+        assert!(result.is_err());
     }
 }

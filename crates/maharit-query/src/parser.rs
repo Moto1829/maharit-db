@@ -36,12 +36,83 @@ impl Parser {
 
     /// 文をパース
     pub fn parse(&mut self) -> Result<Statement, ParseError> {
-        match self.peek_kind() {
-            Some(TokenKind::Create) => self.parse_create(),
-            Some(TokenKind::Match) => self.parse_match_or_delete(),
-            Some(_) => Err(self.unexpected_token("CREATE or MATCH")),
-            None => Err(ParseError::UnexpectedEof),
+        let first = match self.peek_kind() {
+            Some(TokenKind::Create) => self.parse_create()?,
+            Some(TokenKind::Match) => self.parse_match_or_delete()?,
+            Some(_) => return Err(self.unexpected_token("CREATE or MATCH")),
+            None => return Err(ParseError::UnexpectedEof),
+        };
+
+        // Check for UNION
+        if self.check(TokenKind::Union) {
+            return self.parse_union(first);
         }
+
+        Ok(first)
+    }
+
+    /// UNION / UNION ALL をパース
+    fn parse_union(&mut self, first: Statement) -> Result<Statement, ParseError> {
+        let first_match = match first {
+            Statement::Match(m) => m,
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "MATCH statement before UNION".to_string(),
+                    found: "non-MATCH statement".to_string(),
+                    span: self.current_span(),
+                });
+            }
+        };
+
+        let mut queries = vec![first_match];
+
+        // Determine union type from first UNION keyword
+        self.expect(TokenKind::Union)?;
+        let union_type = if self.check(TokenKind::All) {
+            self.advance();
+            UnionType::UnionAll
+        } else {
+            UnionType::Union
+        };
+
+        // Parse the next MATCH statement
+        let next = self.parse_match_or_delete()?;
+        match next {
+            Statement::Match(m) => queries.push(m),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "MATCH statement after UNION".to_string(),
+                    found: "non-MATCH statement".to_string(),
+                    span: self.current_span(),
+                });
+            }
+        }
+
+        // Parse additional UNION [ALL] statements
+        while self.check(TokenKind::Union) {
+            self.advance();
+            // Check consistency: all must be same type
+            if self.check(TokenKind::All) {
+                self.advance();
+            }
+
+            let next = self.parse_match_or_delete()?;
+            match next {
+                Statement::Match(m) => queries.push(m),
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "MATCH statement after UNION".to_string(),
+                        found: "non-MATCH statement".to_string(),
+                        span: self.current_span(),
+                    });
+                }
+            }
+        }
+
+        Ok(Statement::Union(UnionStatement {
+            queries,
+            union_type,
+        }))
     }
 
     // ========== CREATE ==========
@@ -822,6 +893,7 @@ impl Parser {
             Some(TokenKind::Gt) => BinaryOp::Gt,
             Some(TokenKind::Lte) => BinaryOp::Lte,
             Some(TokenKind::Gte) => BinaryOp::Gte,
+            Some(TokenKind::RegexMatch) => BinaryOp::Regex,
             _ => return Ok(left),
         };
 
@@ -1748,6 +1820,79 @@ mod tests {
             assert!(m.segments[1].with_clause.is_some());
         } else {
             panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== Regex match (=~) tests ==========
+
+    #[test]
+    fn test_regex_match_parse() {
+        let stmt = parse(r#"MATCH (n:Person) WHERE n.name =~ "A.*" RETURN n"#).unwrap();
+
+        if let Statement::Match(m) = stmt {
+            let where_clause = m.segments[0].where_clause.clone().unwrap();
+            if let Expression::BinaryOp(left, op, right) = where_clause {
+                assert_eq!(op, BinaryOp::Regex);
+                assert_eq!(
+                    *left,
+                    Expression::Property("n".to_string(), "name".to_string())
+                );
+                assert_eq!(
+                    *right,
+                    Expression::Literal(Literal::String("A.*".to_string()))
+                );
+            } else {
+                panic!("expected binary expression with =~");
+            }
+        } else {
+            panic!("expected MATCH statement");
+        }
+    }
+
+    // ========== UNION / UNION ALL tests ==========
+
+    #[test]
+    fn test_union_parse() {
+        let stmt = parse(
+            "MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name",
+        )
+        .unwrap();
+
+        if let Statement::Union(u) = stmt {
+            assert_eq!(u.queries.len(), 2);
+            assert_eq!(u.union_type, UnionType::Union);
+        } else {
+            panic!("expected UNION statement");
+        }
+    }
+
+    #[test]
+    fn test_union_all_parse() {
+        let stmt = parse(
+            "MATCH (n:Person) RETURN n.name UNION ALL MATCH (n:Company) RETURN n.name",
+        )
+        .unwrap();
+
+        if let Statement::Union(u) = stmt {
+            assert_eq!(u.queries.len(), 2);
+            assert_eq!(u.union_type, UnionType::UnionAll);
+        } else {
+            panic!("expected UNION statement");
+        }
+    }
+
+    #[test]
+    fn test_union_three_queries() {
+        let stmt = parse(
+            "MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name UNION MATCH (n:City) RETURN n.name",
+        )
+        .unwrap();
+
+        if let Statement::Union(u) = stmt {
+            assert_eq!(u.queries.len(), 3);
+            assert_eq!(u.union_type, UnionType::Union);
+        } else {
+            panic!("expected UNION statement");
         }
     }
 }

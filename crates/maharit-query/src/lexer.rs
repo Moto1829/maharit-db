@@ -61,6 +61,8 @@ pub enum TokenKind {
     Then,
     Else,
     End,
+    Union,
+    All,
 
     // 識別子とリテラル
     Ident(String),
@@ -69,12 +71,13 @@ pub enum TokenKind {
     String(String),
 
     // 比較演算子
-    Eq,  // =
-    Neq, // <>
-    Lt,  // <
-    Gt,  // >
-    Lte, // <=
-    Gte, // >=
+    Eq,         // =
+    Neq,        // <>
+    Lt,         // <
+    Gt,         // >
+    Lte,        // <=
+    Gte,        // >=
+    RegexMatch, // =~
 
     // 算術演算子
     Plus,  // +
@@ -137,6 +140,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Then => write!(f, "THEN"),
             TokenKind::Else => write!(f, "ELSE"),
             TokenKind::End => write!(f, "END"),
+            TokenKind::Union => write!(f, "UNION"),
+            TokenKind::All => write!(f, "ALL"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -147,6 +152,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Gt => write!(f, ">"),
             TokenKind::Lte => write!(f, "<="),
             TokenKind::Gte => write!(f, ">="),
+            TokenKind::RegexMatch => write!(f, "=~"),
             TokenKind::Plus => write!(f, "+"),
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Star => write!(f, "*"),
@@ -257,7 +263,12 @@ impl<'a> Lexer<'a> {
             // 演算子と記号
             '=' => {
                 self.advance();
-                TokenKind::Eq
+                if self.peek() == Some('~') {
+                    self.advance();
+                    TokenKind::RegexMatch
+                } else {
+                    TokenKind::Eq
+                }
             }
             '<' => {
                 self.advance();
@@ -423,6 +434,8 @@ impl<'a> Lexer<'a> {
             "THEN" => TokenKind::Then,
             "ELSE" => TokenKind::Else,
             "END" => TokenKind::End,
+            "UNION" => TokenKind::Union,
+            "ALL" => TokenKind::All,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }
@@ -768,6 +781,54 @@ mod tests {
                 TokenKind::RBracket,
                 TokenKind::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn test_regex_match_token() {
+        assert_eq!(
+            tokenize("=~"),
+            vec![TokenKind::RegexMatch, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_regex_match_in_context() {
+        assert_eq!(
+            tokenize(r#"n.name =~ "A.*""#),
+            vec![
+                TokenKind::Ident("n".to_string()),
+                TokenKind::Dot,
+                TokenKind::Ident("name".to_string()),
+                TokenKind::RegexMatch,
+                TokenKind::String("A.*".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_eq_still_works() {
+        // Ensure = still works after adding =~
+        assert_eq!(
+            tokenize("= =~"),
+            vec![TokenKind::Eq, TokenKind::RegexMatch, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_union_keywords() {
+        assert_eq!(
+            tokenize("UNION ALL"),
+            vec![TokenKind::Union, TokenKind::All, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_union_keywords_case_insensitive() {
+        assert_eq!(
+            tokenize("union all"),
+            vec![TokenKind::Union, TokenKind::All, TokenKind::Eof]
         );
     }
 }

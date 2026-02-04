@@ -6,6 +6,23 @@ pub enum Statement {
     Create(CreateClause),
     Match(MatchStatement),
     Delete(DeleteStatement),
+    Union(UnionStatement),
+}
+
+/// UNION文
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnionStatement {
+    pub queries: Vec<MatchStatement>,
+    pub union_type: UnionType,
+}
+
+/// UNIONの種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnionType {
+    /// 重複排除
+    Union,
+    /// 重複許容
+    UnionAll,
 }
 
 /// CREATE文
@@ -310,6 +327,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Regex,
 }
 
 /// 単項演算子
