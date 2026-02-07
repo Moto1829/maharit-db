@@ -1,9 +1,11 @@
+pub mod backup;
 mod persistence;
 mod transaction;
 mod wal;
 
 use maharit_core::Graph;
 
+pub use backup::{Backup, BackupError, BackupMetadata, BackupOptions};
 pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{
     LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,

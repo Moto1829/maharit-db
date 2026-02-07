@@ -7,18 +7,18 @@
 
 ### オンラインバックアップ
 - [ ] サーバー稼働中のバックアップ
-- [ ] スナップショットの作成
+- [x] スナップショットの作成
 - [ ] 増分バックアップ（将来的）
 
 ### バックアップ形式
-- [ ] フルバックアップ（データファイル + WAL）
-- [ ] 圧縮オプション（gzip/zstd）
-- [ ] バックアップのメタデータ（タイムスタンプ、サイズ）
+- [x] フルバックアップ（データファイル + WAL）
+- [x] 圧縮オプション（gzip/zstd）
+- [x] バックアップのメタデータ（タイムスタンプ、サイズ）
 
 ### リストア
-- [ ] バックアップからの復元
+- [x] バックアップからの復元
 - [ ] ポイントインタイムリカバリ（WAL適用）
-- [ ] 復元の検証
+- [x] 復元の検証
 
 ### CLIコマンド
 - [ ] `maharit backup --output backup.tar.gz`
@@ -33,11 +33,19 @@
 ## API
 ```rust
 // プログラムからのバックアップ
-let backup = Backup::create(&db, BackupOptions::default())?;
-backup.save("backup.tar.gz")?;
+let metadata = Backup::create(&graph, "backup.db", &BackupOptions::default())?;
+
+// 圧縮バックアップ
+let metadata = Backup::create(&graph, "backup.db.gz", &BackupOptions::compressed())?;
+
+// メタデータ確認
+let meta = Backup::metadata("backup.db")?;
 
 // リストア
-Backup::restore("backup.tar.gz", &restore_options)?;
+let graph = Backup::restore("backup.db")?;
+
+// バックアップ検証
+let valid = Backup::verify("backup.db")?;
 ```
 
 ## 依存
