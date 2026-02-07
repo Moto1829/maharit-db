@@ -7,17 +7,17 @@ MATCHで取得したノード・エッジのプロパティをSET句で更新す
 ## 実装内容
 
 ### AST拡張
-- [ ] SET句を持つ独立したステートメント型の追加（またはMatchStatementの拡張）
+- [x] SET句を持つ独立したステートメント型の追加（またはMatchStatementの拡張）
 - [ ] SET句での`+=`（プロパティのマージ）対応
 
 ### パーサー拡張
-- [ ] `MATCH ... SET ... RETURN ...` パターンの認識
-- [ ] `MATCH ... WHERE ... SET ... RETURN ...` パターンの認識
-- [ ] DELETE文以外でのSET句パース対応
+- [x] `MATCH ... SET ... RETURN ...` パターンの認識
+- [x] `MATCH ... WHERE ... SET ... RETURN ...` パターンの認識
+- [x] DELETE文以外でのSET句パース対応
 
 ### エグゼキュータ拡張
-- [ ] MATCHバインディングに基づくプロパティ更新
-- [ ] 更新結果のRETURN対応
+- [x] MATCHバインディングに基づくプロパティ更新
+- [x] 更新結果のRETURN対応
 - [ ] ラベルの追加: `SET n:NewLabel`
 
 ## クエリ例

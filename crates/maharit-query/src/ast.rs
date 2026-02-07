@@ -7,6 +7,16 @@ pub enum Statement {
     Match(MatchStatement),
     Delete(DeleteStatement),
     Union(UnionStatement),
+    /// MATCH + CREATE 複合クエリ
+    MatchCreate(MatchCreateStatement),
+    /// MATCH + SET 複合クエリ
+    MatchSet(MatchSetStatement),
+    /// MERGE句（upsert操作）
+    Merge(MergeStatement),
+    /// MATCH + REMOVE 複合クエリ
+    MatchRemove(MatchRemoveStatement),
+    /// UNWIND句
+    Unwind(UnwindStatement),
 }
 
 /// UNION文
@@ -290,6 +300,8 @@ pub enum Expression {
     UnaryOp(UnaryOp, Box<Expression>),
     /// CASE式
     Case(CaseExpression),
+    /// リスト式: [expr, expr, ...]
+    List(Vec<Expression>),
 }
 
 /// CASE式
@@ -345,4 +357,97 @@ pub enum Literal {
     Int(i64),
     Float(f64),
     String(String),
+}
+
+/// MATCH + CREATE 複合文
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchCreateStatement {
+    /// MATCHセグメント（WITH句で区切られる）
+    pub segments: Vec<QuerySegment>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+    /// CREATE句
+    pub create_clause: CreateClause,
+}
+
+/// MATCH + SET 複合文
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchSetStatement {
+    /// MATCHセグメント
+    pub segments: Vec<QuerySegment>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+    /// SET句
+    pub set_clause: SetClause,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// MERGE文
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeStatement {
+    /// オプショナルなMATCH前段（MATCH + MERGE の組み合わせ）
+    pub match_clauses: Vec<MatchClause>,
+    /// MATCH用のWHERE句
+    pub where_clause: Option<Expression>,
+    /// MERGEパターン
+    pub patterns: Vec<Pattern>,
+    /// ON CREATE SET句
+    pub on_create_set: Option<SetClause>,
+    /// ON MATCH SET句
+    pub on_match_set: Option<SetClause>,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// MATCH + REMOVE 複合文
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchRemoveStatement {
+    /// MATCHセグメント
+    pub segments: Vec<QuerySegment>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+    /// REMOVE句
+    pub remove_clause: RemoveClause,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// REMOVE句
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveClause {
+    pub items: Vec<RemoveItem>,
+}
+
+/// REMOVE項目
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    /// プロパティ削除: REMOVE n.prop
+    Property(String, String),
+    /// ラベル削除: REMOVE n:Label
+    Label(String, String),
+}
+
+/// UNWIND文
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindStatement {
+    /// UNWIND対象の式
+    pub expression: Expression,
+    /// AS 変数名
+    pub variable: String,
+    /// 後続のCREATE句（省略可）
+    pub create_clause: Option<CreateClause>,
+    /// 後続のSET句（CREATE用）
+    pub set_clause: Option<SetClause>,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// リスト式（UNWIND用）
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListExpression {
+    /// リテラル配列: [1, 2, 3]
+    LiteralList(Vec<Literal>),
+    /// プロパティアクセス: n.hobbies
+    Property(String, String),
 }

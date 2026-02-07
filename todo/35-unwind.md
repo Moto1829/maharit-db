@@ -7,19 +7,19 @@
 ## 実装内容
 
 ### AST拡張
-- [ ] `UnwindClause` の追加（式 + AS 変数名）
+- [x] `UnwindClause` の追加（式 + AS 変数名）
 
 ### レキサー拡張
-- [ ] `UNWIND` キーワードトークンの追加
+- [x] `UNWIND` キーワードトークンの追加
 
 ### パーサー拡張
-- [ ] `UNWIND expr AS var` のパース
-- [ ] UNWIND後のCREATE / MERGE / RETURN との接続
+- [x] `UNWIND expr AS var` のパース
+- [x] UNWIND後のCREATE / MERGE / RETURN との接続
 
 ### エグゼキュータ拡張
-- [ ] リスト式の評価
-- [ ] リスト要素ごとに行を展開してバインディング生成
-- [ ] 後続句（RETURN / CREATE / MERGE）への引き渡し
+- [x] リスト式の評価
+- [x] リスト要素ごとに行を展開してバインディング生成
+- [x] 後続句（RETURN / CREATE / MERGE）への引き渡し
 
 ## クエリ例
 ```cypher

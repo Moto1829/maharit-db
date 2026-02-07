@@ -39,7 +39,9 @@ impl Parser {
         let first = match self.peek_kind() {
             Some(TokenKind::Create) => self.parse_create()?,
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
-            Some(_) => return Err(self.unexpected_token("CREATE or MATCH")),
+            Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
+            Some(TokenKind::Unwind) => return self.parse_unwind(),
+            Some(_) => return Err(self.unexpected_token("CREATE, MATCH, MERGE, or UNWIND")),
             None => return Err(ParseError::UnexpectedEof),
         };
 
@@ -152,15 +154,108 @@ impl Parser {
             }));
         }
 
+        // Check for MATCH + CREATE
+        if self.check(TokenKind::Create) {
+            let create = self.parse_create_clause()?;
+            return Ok(Statement::MatchCreate(MatchCreateStatement {
+                segments: vec![first_segment.clone()],
+                where_clause: first_segment.where_clause,
+                create_clause: create,
+            }));
+        }
+
+        // Check for MATCH + SET (standalone, not for DELETE)
+        if set_clause.is_some() {
+            let return_clause = if self.check(TokenKind::Return) {
+                self.advance();
+                Some(self.parse_return_clause()?)
+            } else {
+                None
+            };
+            return Ok(Statement::MatchSet(MatchSetStatement {
+                segments: vec![first_segment.clone()],
+                where_clause: first_segment.where_clause,
+                set_clause: set_clause.unwrap(),
+                return_clause,
+            }));
+        }
+
+        // Check for MATCH + REMOVE
+        if self.check(TokenKind::Remove) {
+            let remove_clause = self.parse_remove_clause()?;
+            let return_clause = if self.check(TokenKind::Return) {
+                self.advance();
+                Some(self.parse_return_clause()?)
+            } else {
+                None
+            };
+            return Ok(Statement::MatchRemove(MatchRemoveStatement {
+                segments: vec![first_segment.clone()],
+                where_clause: first_segment.where_clause,
+                remove_clause,
+                return_clause,
+            }));
+        }
+
+        // Check for MATCH + MERGE
+        if self.check(TokenKind::Merge) {
+            let match_clauses = first_segment.match_clauses.clone();
+            let where_clause = first_segment.where_clause.clone();
+            return self.parse_merge(match_clauses, where_clause);
+        }
+
         let mut segments = vec![first_segment];
 
         // Continue parsing segments while we have WITH clauses
         while segments.last().unwrap().with_clause.is_some() {
             // After WITH, we may have another MATCH or go directly to RETURN
             if self.check(TokenKind::Match) || self.check(TokenKind::Optional) {
-                let (segment, is_del, _, _) = self.parse_query_segment()?;
+                let (segment, is_del, set_cl, _) = self.parse_query_segment()?;
                 if is_del {
                     return Err(self.unexpected_token("RETURN or WITH"));
+                }
+                // Check for SET after inner segment
+                if set_cl.is_some() {
+                    let return_clause = if self.check(TokenKind::Return) {
+                        self.advance();
+                        Some(self.parse_return_clause()?)
+                    } else {
+                        None
+                    };
+                    segments.push(segment.clone());
+                    return Ok(Statement::MatchSet(MatchSetStatement {
+                        segments,
+                        where_clause: segment.where_clause,
+                        set_clause: set_cl.unwrap(),
+                        return_clause,
+                    }));
+                }
+                // Check for CREATE after inner segment
+                if self.check(TokenKind::Create) {
+                    let create = self.parse_create_clause()?;
+                    segments.push(segment.clone());
+                    return Ok(Statement::MatchCreate(MatchCreateStatement {
+                        segments,
+                        where_clause: segment.where_clause,
+                        create_clause: create,
+                    }));
+                }
+                // Check for REMOVE after inner segment
+                if self.check(TokenKind::Remove) {
+                    let remove_clause = self.parse_remove_clause()?;
+                    let return_clause = if self.check(TokenKind::Return) {
+                        self.advance();
+                        Some(self.parse_return_clause()?)
+                    } else {
+                        None
+                    };
+                    segments.push(segment.clone());
+                    return Ok(Statement::MatchRemove(MatchRemoveStatement {
+                        segments,
+                        where_clause: segment.where_clause,
+                        remove_clause,
+                        return_clause,
+                    }));
                 }
                 segments.push(segment);
             } else if self.check(TokenKind::Return) {
@@ -238,14 +333,14 @@ impl Parser {
             None
         };
 
-        // SET clause (optional, only for DELETE)
+        // SET clause (optional, for DELETE or standalone MATCH+SET)
         let set_clause = if self.check(TokenKind::Set) {
             Some(self.parse_set_clause()?)
         } else {
             None
         };
 
-        // Check for DELETE, WITH, or continue to RETURN
+        // Check for DELETE, WITH, or continue to RETURN/CREATE/REMOVE
         if self.check(TokenKind::Delete) || self.check(TokenKind::Detach) {
             let delete_clause = self.parse_delete_clause()?;
             return Ok((
@@ -658,6 +753,150 @@ impl Parser {
         Ok(ReturnItem::Aggregate(aggregate))
     }
 
+    // ========== CREATE clause (for MATCH+CREATE) ==========
+
+    fn parse_create_clause(&mut self) -> Result<CreateClause, ParseError> {
+        self.expect(TokenKind::Create)?;
+
+        let mut patterns = Vec::new();
+        patterns.push(self.parse_pattern()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            patterns.push(self.parse_pattern()?);
+        }
+
+        Ok(CreateClause { patterns })
+    }
+
+    // ========== REMOVE ==========
+
+    fn parse_remove_clause(&mut self) -> Result<RemoveClause, ParseError> {
+        self.expect(TokenKind::Remove)?;
+
+        let mut items = Vec::new();
+        items.push(self.parse_remove_item()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            items.push(self.parse_remove_item()?);
+        }
+
+        Ok(RemoveClause { items })
+    }
+
+    fn parse_remove_item(&mut self) -> Result<RemoveItem, ParseError> {
+        let variable = self.expect_ident()?;
+
+        if self.check(TokenKind::Dot) {
+            // REMOVE n.prop
+            self.advance();
+            let property = self.expect_ident()?;
+            Ok(RemoveItem::Property(variable, property))
+        } else if self.check(TokenKind::Colon) {
+            // REMOVE n:Label
+            self.advance();
+            let label = self.expect_ident()?;
+            Ok(RemoveItem::Label(variable, label))
+        } else {
+            Err(self.unexpected_token(". or :"))
+        }
+    }
+
+    // ========== MERGE ==========
+
+    fn parse_merge(
+        &mut self,
+        match_clauses: Vec<MatchClause>,
+        where_clause: Option<Expression>,
+    ) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Merge)?;
+
+        let mut patterns = Vec::new();
+        patterns.push(self.parse_pattern()?);
+
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            patterns.push(self.parse_pattern()?);
+        }
+
+        // ON CREATE SET / ON MATCH SET
+        let mut on_create_set = None;
+        let mut on_match_set = None;
+
+        while self.check(TokenKind::On) {
+            self.advance();
+
+            if self.check(TokenKind::Create) {
+                self.advance();
+                on_create_set = Some(self.parse_set_clause()?);
+            } else if self.check(TokenKind::Match) {
+                self.advance();
+                on_match_set = Some(self.parse_set_clause()?);
+            } else {
+                return Err(self.unexpected_token("CREATE or MATCH"));
+            }
+        }
+
+        // Optional RETURN
+        let return_clause = if self.check(TokenKind::Return) {
+            self.advance();
+            Some(self.parse_return_clause()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::Merge(MergeStatement {
+            match_clauses,
+            where_clause,
+            patterns,
+            on_create_set,
+            on_match_set,
+            return_clause,
+        }))
+    }
+
+    // ========== UNWIND ==========
+
+    fn parse_unwind(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Unwind)?;
+
+        let expression = self.parse_expression()?;
+
+        self.expect(TokenKind::As)?;
+        let variable = self.expect_ident()?;
+
+        // Optional CREATE
+        let create_clause = if self.check(TokenKind::Create) {
+            Some(self.parse_create_clause()?)
+        } else {
+            None
+        };
+
+        // Optional SET (typically after CREATE)
+        let set_clause = if self.check(TokenKind::Set) {
+            Some(self.parse_set_clause()?)
+        } else {
+            None
+        };
+
+        // Optional RETURN
+        let return_clause = if self.check(TokenKind::Return) {
+            self.advance();
+            Some(self.parse_return_clause()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::Unwind(UnwindStatement {
+            expression,
+            variable,
+            create_clause,
+            set_clause,
+            return_clause,
+        }))
+    }
+
     fn current_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -963,6 +1202,10 @@ impl Parser {
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)
             }
+            Some(TokenKind::LBracket) => {
+                // List literal: [expr, expr, ...]
+                self.parse_list_expression()
+            }
             Some(TokenKind::Case) => self.parse_case_expression(),
             Some(TokenKind::Ident(_)) => {
                 let var = self.expect_ident()?;
@@ -988,6 +1231,23 @@ impl Parser {
             Some(_) => Err(self.unexpected_token("expression")),
             None => Err(ParseError::UnexpectedEof),
         }
+    }
+
+    fn parse_list_expression(&mut self) -> Result<Expression, ParseError> {
+        self.expect(TokenKind::LBracket)?;
+
+        let mut elements = Vec::new();
+
+        if !self.check(TokenKind::RBracket) {
+            elements.push(self.parse_expression()?);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                elements.push(self.parse_expression()?);
+            }
+        }
+
+        self.expect(TokenKind::RBracket)?;
+        Ok(Expression::List(elements))
     }
 
     fn parse_case_expression(&mut self) -> Result<Expression, ParseError> {
@@ -1894,5 +2154,270 @@ mod tests {
         } else {
             panic!("expected UNION statement");
         }
+    }
+
+    // ========== MATCH + CREATE tests ==========
+
+    #[test]
+    fn test_parse_match_create() {
+        let stmt = parse(
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchCreate(mc) = stmt {
+            assert_eq!(mc.create_clause.patterns.len(), 1);
+        } else {
+            panic!("expected MatchCreate statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_match_create_with_where() {
+        let stmt = parse(
+            r#"MATCH (a:Person) WHERE a.age > 20 CREATE (a)-[:MEMBER_OF]->(g:Group {name: "Adults"})"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchCreate(mc) = stmt {
+            assert!(mc.where_clause.is_some());
+            assert_eq!(mc.create_clause.patterns.len(), 1);
+        } else {
+            panic!("expected MatchCreate statement");
+        }
+    }
+
+    // ========== MATCH + SET tests ==========
+
+    #[test]
+    fn test_parse_match_set_standalone() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31 RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchSet(ms) = stmt {
+            assert_eq!(ms.set_clause.items.len(), 1);
+            assert!(ms.return_clause.is_some());
+        } else {
+            panic!("expected MatchSet statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_match_set_multiple() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31, n.city = "Tokyo" RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchSet(ms) = stmt {
+            assert_eq!(ms.set_clause.items.len(), 2);
+        } else {
+            panic!("expected MatchSet statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_set_no_return() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchSet(ms) = stmt {
+            assert!(ms.return_clause.is_none());
+        } else {
+            panic!("expected MatchSet statement");
+        }
+    }
+
+    // ========== MERGE tests ==========
+
+    #[test]
+    fn test_parse_merge_simple() {
+        let stmt = parse(r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
+
+        if let Statement::Merge(m) = stmt {
+            assert!(m.match_clauses.is_empty());
+            assert_eq!(m.patterns.len(), 1);
+            assert!(m.on_create_set.is_none());
+            assert!(m.on_match_set.is_none());
+        } else {
+            panic!("expected Merge statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_with_on_create_set() {
+        let stmt = parse(
+            r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25"#,
+        )
+        .unwrap();
+
+        if let Statement::Merge(m) = stmt {
+            assert!(m.on_create_set.is_some());
+            assert!(m.on_match_set.is_none());
+        } else {
+            panic!("expected Merge statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_with_both_on_clauses() {
+        let stmt = parse(
+            r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25 ON MATCH SET n.age = 30"#,
+        )
+        .unwrap();
+
+        if let Statement::Merge(m) = stmt {
+            assert!(m.on_create_set.is_some());
+            assert!(m.on_match_set.is_some());
+        } else {
+            panic!("expected Merge statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_merge() {
+        let stmt = parse(
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        if let Statement::Merge(m) = stmt {
+            assert_eq!(m.match_clauses.len(), 1);
+            assert_eq!(m.patterns.len(), 1);
+        } else {
+            panic!("expected Merge statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_with_return() {
+        let stmt = parse(
+            r#"MERGE (n:Person {name: "Alice"}) RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::Merge(m) = stmt {
+            assert!(m.return_clause.is_some());
+        } else {
+            panic!("expected Merge statement");
+        }
+    }
+
+    // ========== MATCH + REMOVE tests ==========
+
+    #[test]
+    fn test_parse_match_remove_property() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchRemove(mr) = stmt {
+            assert_eq!(mr.remove_clause.items.len(), 1);
+            assert!(matches!(mr.remove_clause.items[0], RemoveItem::Property(_, _)));
+            assert!(mr.return_clause.is_some());
+        } else {
+            panic!("expected MatchRemove statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_match_remove_label() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n:Person RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchRemove(mr) = stmt {
+            assert_eq!(mr.remove_clause.items.len(), 1);
+            if let RemoveItem::Label(var, label) = &mr.remove_clause.items[0] {
+                assert_eq!(var, "n");
+                assert_eq!(label, "Person");
+            } else {
+                panic!("expected Label remove item");
+            }
+        } else {
+            panic!("expected MatchRemove statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_remove_multiple() {
+        let stmt = parse(
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age, n.city RETURN n"#,
+        )
+        .unwrap();
+
+        if let Statement::MatchRemove(mr) = stmt {
+            assert_eq!(mr.remove_clause.items.len(), 2);
+        } else {
+            panic!("expected MatchRemove statement");
+        }
+    }
+
+    // ========== UNWIND tests ==========
+
+    #[test]
+    fn test_parse_unwind_list() {
+        let stmt = parse("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+
+        if let Statement::Unwind(uw) = stmt {
+            assert_eq!(uw.variable, "x");
+            assert!(uw.return_clause.is_some());
+            assert!(uw.create_clause.is_none());
+        } else {
+            panic!("expected Unwind statement, got {:?}", stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_unwind_string_list() {
+        let stmt = parse(r#"UNWIND ["a", "b"] AS name RETURN name"#).unwrap();
+
+        if let Statement::Unwind(uw) = stmt {
+            assert_eq!(uw.variable, "name");
+        } else {
+            panic!("expected Unwind statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_expression() {
+        let stmt = parse("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+
+        if let Statement::Unwind(uw) = stmt {
+            if let Expression::List(elems) = &uw.expression {
+                assert_eq!(elems.len(), 3);
+            } else {
+                panic!("expected List expression");
+            }
+        } else {
+            panic!("expected Unwind statement");
+        }
+    }
+
+    // ========== Lexer keyword tests ==========
+
+    #[test]
+    fn test_parse_merge_keyword() {
+        // Just make sure MERGE is recognized as keyword
+        let stmt = parse(r#"MERGE (n:Person {name: "Alice"})"#);
+        assert!(stmt.is_ok());
+    }
+
+    #[test]
+    fn test_parse_remove_keyword() {
+        let stmt = parse(r#"MATCH (n:Person) REMOVE n.age"#);
+        assert!(stmt.is_ok());
+    }
+
+    #[test]
+    fn test_parse_unwind_keyword() {
+        let stmt = parse("UNWIND [1] AS x RETURN x");
+        assert!(stmt.is_ok());
     }
 }

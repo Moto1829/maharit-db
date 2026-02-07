@@ -7,21 +7,21 @@ SET句の逆操作にあたる。
 ## 実装内容
 
 ### AST拡張
-- [ ] `RemoveClause` の追加
-- [ ] `RemoveItem`（プロパティ削除 / ラベル削除）の定義
+- [x] `RemoveClause` の追加
+- [x] `RemoveItem`（プロパティ削除 / ラベル削除）の定義
 
 ### レキサー拡張
-- [ ] `REMOVE` キーワードトークンの追加
+- [x] `REMOVE` キーワードトークンの追加
 
 ### パーサー拡張
-- [ ] `MATCH ... REMOVE ... RETURN ...` パターンの認識
-- [ ] プロパティ削除: `REMOVE n.prop` のパース
-- [ ] ラベル削除: `REMOVE n:Label` のパース
+- [x] `MATCH ... REMOVE ... RETURN ...` パターンの認識
+- [x] プロパティ削除: `REMOVE n.prop` のパース
+- [x] ラベル削除: `REMOVE n:Label` のパース
 
 ### エグゼキュータ拡張
-- [ ] MATCHバインディングに基づくプロパティ削除
-- [ ] ラベル削除の実行
-- [ ] 削除後の結果をRETURN
+- [x] MATCHバインディングに基づくプロパティ削除
+- [x] ラベル削除の実行
+- [x] 削除後の結果をRETURN
 
 ## クエリ例
 ```cypher

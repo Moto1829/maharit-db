@@ -24,6 +24,11 @@ impl Node {
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
     }
+
+    /// プロパティを削除
+    pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
+        self.properties.remove(key)
+    }
 }
 
 /// エッジ（辺）を表す構造体
@@ -45,6 +50,11 @@ impl Edge {
     /// プロパティを取得
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
+    }
+
+    /// プロパティを削除
+    pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
+        self.properties.remove(key)
     }
 }
 

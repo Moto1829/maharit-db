@@ -7,23 +7,23 @@ ON CREATE SETとON MATCH SETによる条件付きプロパティ設定もサポ�
 ## 実装内容
 
 ### AST拡張
-- [ ] `MergeClause` ステートメント型の追加
-- [ ] `ON CREATE SET` 句の追加
-- [ ] `ON MATCH SET` 句の追加
+- [x] `MergeClause` ステートメント型の追加
+- [x] `ON CREATE SET` 句の追加
+- [x] `ON MATCH SET` 句の追加
 
 ### レキサー拡張
-- [ ] `MERGE` キーワードトークンの追加
+- [x] `MERGE` キーワードトークンの追加
 
 ### パーサー拡張
-- [ ] `MERGE (n:Label {props})` パターンの認識
-- [ ] `MERGE (a)-[:REL]->(b)` リレーションシップパターンの認識
-- [ ] `ON CREATE SET` / `ON MATCH SET` のパース
+- [x] `MERGE (n:Label {props})` パターンの認識
+- [x] `MERGE (a)-[:REL]->(b)` リレーションシップパターンの認識
+- [x] `ON CREATE SET` / `ON MATCH SET` のパース
 
 ### エグゼキュータ拡張
-- [ ] パターンの存在確認（MATCH試行）
-- [ ] 存在しない場合のCREATE実行
-- [ ] ON CREATE SET / ON MATCH SET の条件分岐実行
-- [ ] MATCH + MERGE の組み合わせ対応
+- [x] パターンの存在確認（MATCH試行）
+- [x] 存在しない場合のCREATE実行
+- [x] ON CREATE SET / ON MATCH SET の条件分岐実行
+- [x] MATCH + MERGE の組み合わせ対応
 
 ## クエリ例
 ```cypher

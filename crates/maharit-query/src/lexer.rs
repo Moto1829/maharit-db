@@ -63,6 +63,11 @@ pub enum TokenKind {
     End,
     Union,
     All,
+    // 複合クエリ用キーワード
+    Merge,
+    Remove,
+    Unwind,
+    On,
 
     // 識別子とリテラル
     Ident(String),
@@ -142,6 +147,10 @@ impl fmt::Display for TokenKind {
             TokenKind::End => write!(f, "END"),
             TokenKind::Union => write!(f, "UNION"),
             TokenKind::All => write!(f, "ALL"),
+            TokenKind::Merge => write!(f, "MERGE"),
+            TokenKind::Remove => write!(f, "REMOVE"),
+            TokenKind::Unwind => write!(f, "UNWIND"),
+            TokenKind::On => write!(f, "ON"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -436,6 +445,10 @@ impl<'a> Lexer<'a> {
             "END" => TokenKind::End,
             "UNION" => TokenKind::Union,
             "ALL" => TokenKind::All,
+            "MERGE" => TokenKind::Merge,
+            "REMOVE" => TokenKind::Remove,
+            "UNWIND" => TokenKind::Unwind,
+            "ON" => TokenKind::On,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

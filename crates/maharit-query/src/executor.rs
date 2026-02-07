@@ -189,6 +189,11 @@ impl<'a> Executor<'a> {
             Statement::Match(m) => self.execute_match(m),
             Statement::Delete(d) => self.execute_delete(d),
             Statement::Union(u) => self.execute_union(u),
+            Statement::MatchCreate(mc) => self.execute_match_create(mc),
+            Statement::MatchSet(ms) => self.execute_match_set(ms),
+            Statement::Merge(merge) => self.execute_merge(merge),
+            Statement::MatchRemove(mr) => self.execute_match_remove(mr),
+            Statement::Unwind(uw) => self.execute_unwind(uw),
         }
     }
 
@@ -433,6 +438,489 @@ impl<'a> Executor<'a> {
         }];
 
         Ok(ResultSet::new(columns, rows))
+    }
+
+    // ========== MATCH + CREATE ==========
+
+    fn execute_match_create(
+        &mut self,
+        mc: MatchCreateStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        // Execute MATCH segments to get bindings
+        let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
+
+        for segment in &mc.segments {
+            all_bindings = self.execute_query_segment(segment, all_bindings)?;
+        }
+
+        // Apply WHERE filter (from last segment)
+        if let Some(where_expr) = &mc.where_clause {
+            all_bindings = all_bindings
+                .into_iter()
+                .filter(|b| {
+                    self.evaluate_expression(where_expr, b)
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .unwrap_or(false)
+                })
+                .collect();
+        }
+
+        // Execute CREATE for each binding set
+        let mut created_nodes = 0i64;
+        let mut created_edges = 0i64;
+
+        for bindings in &all_bindings {
+            let (cn, ce) = self.execute_create_with_bindings(&mc.create_clause, bindings)?;
+            created_nodes += cn;
+            created_edges += ce;
+        }
+
+        let columns = vec!["created_nodes".to_string(), "created_edges".to_string()];
+        let rows = vec![Row {
+            columns: vec![Value::Int(created_nodes), Value::Int(created_edges)],
+        }];
+        Ok(ResultSet::new(columns, rows))
+    }
+
+    fn execute_create_with_bindings(
+        &mut self,
+        create: &CreateClause,
+        existing_bindings: &Bindings,
+    ) -> Result<(i64, i64), ExecuteError> {
+        let mut bindings = existing_bindings.clone();
+        let mut created_nodes = 0i64;
+        let mut created_edges = 0i64;
+
+        for pattern in &create.patterns {
+            match pattern {
+                Pattern::Node(node_pattern) => {
+                    // If variable is already bound, skip creation
+                    if let Some(var) = &node_pattern.variable {
+                        if bindings.contains_key(var) {
+                            continue;
+                        }
+                    }
+                    self.create_node(node_pattern, &mut bindings)?;
+                    created_nodes += 1;
+                }
+                Pattern::Path(path_pattern) => {
+                    // Check if start node is already bound
+                    let start_id = if let Some(var) = &path_pattern.start.variable {
+                        if let Some(bound) = bindings.get(var) {
+                            bound.as_node().ok_or_else(|| {
+                                ExecuteError::TypeError("expected node binding".to_string())
+                            })?
+                        } else {
+                            let id = self.create_node(&path_pattern.start, &mut bindings)?;
+                            created_nodes += 1;
+                            id
+                        }
+                    } else {
+                        let id = self.create_node(&path_pattern.start, &mut bindings)?;
+                        created_nodes += 1;
+                        id
+                    };
+
+                    let mut current_id = start_id;
+
+                    for segment in &path_pattern.segments {
+                        // Check if end node is already bound
+                        let end_id = if let Some(var) = &segment.node.variable {
+                            if let Some(bound) = bindings.get(var) {
+                                bound.as_node().ok_or_else(|| {
+                                    ExecuteError::TypeError("expected node binding".to_string())
+                                })?
+                            } else {
+                                let id = self.create_node(&segment.node, &mut bindings)?;
+                                created_nodes += 1;
+                                id
+                            }
+                        } else {
+                            let id = self.create_node(&segment.node, &mut bindings)?;
+                            created_nodes += 1;
+                            id
+                        };
+
+                        // Create edge
+                        let (from, to) = match segment.edge.direction {
+                            EdgeDirection::Outgoing => (current_id, end_id),
+                            EdgeDirection::Incoming => (end_id, current_id),
+                            EdgeDirection::Both => (current_id, end_id),
+                        };
+
+                        let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+                        let edge_id = self.graph.create_edge(from, to, edge_label)?;
+
+                        // Set edge properties
+                        if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+                            for (key, value) in &segment.edge.properties {
+                                edge.set_property(key.clone(), PropertyValue::from(value.clone()));
+                            }
+                        }
+
+                        created_edges += 1;
+                        current_id = end_id;
+                    }
+                }
+            }
+        }
+
+        Ok((created_nodes, created_edges))
+    }
+
+    // ========== MATCH + SET ==========
+
+    fn execute_match_set(
+        &mut self,
+        ms: MatchSetStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        // Execute MATCH segments
+        let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
+
+        for segment in &ms.segments {
+            all_bindings = self.execute_query_segment(segment, all_bindings)?;
+        }
+
+        // Apply WHERE filter
+        if let Some(where_expr) = &ms.where_clause {
+            all_bindings = all_bindings
+                .into_iter()
+                .filter(|b| {
+                    self.evaluate_expression(where_expr, b)
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .unwrap_or(false)
+                })
+                .collect();
+        }
+
+        // Apply SET clause
+        self.apply_set_clause(&ms.set_clause, &all_bindings)?;
+
+        // Build result set
+        if let Some(return_clause) = &ms.return_clause {
+            self.build_result_set(return_clause, &all_bindings)
+        } else {
+            let columns = vec!["properties_set".to_string()];
+            let rows = vec![Row {
+                columns: vec![Value::Int(
+                    ms.set_clause.items.len() as i64 * all_bindings.len() as i64,
+                )],
+            }];
+            Ok(ResultSet::new(columns, rows))
+        }
+    }
+
+    fn apply_set_clause(
+        &mut self,
+        set_clause: &SetClause,
+        all_bindings: &[Bindings],
+    ) -> Result<(), ExecuteError> {
+        for bindings in all_bindings {
+            for item in &set_clause.items {
+                let binding_value = bindings
+                    .get(&item.variable)
+                    .ok_or_else(|| ExecuteError::UndefinedVariable(item.variable.clone()))?;
+
+                let value = self.evaluate_expression(&item.value, bindings)?;
+                let prop_value = self.value_to_property(&value)?;
+
+                match binding_value {
+                    BindingValue::Node(node_id) => {
+                        if let Some(node) = self.graph.get_node_mut(*node_id) {
+                            node.set_property(&item.property, prop_value);
+                        }
+                    }
+                    BindingValue::Edge(edge_id) => {
+                        if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                            edge.set_property(&item.property, prop_value);
+                        }
+                    }
+                    _ => {
+                        return Err(ExecuteError::TypeError(
+                            "SET requires node or edge binding".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ========== MERGE ==========
+
+    fn execute_merge(&mut self, merge: MergeStatement) -> Result<ResultSet, ExecuteError> {
+        // If there are MATCH clauses, execute them first
+        let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
+
+        if !merge.match_clauses.is_empty() {
+            for clause in &merge.match_clauses {
+                all_bindings = self.execute_match_clause(clause, all_bindings)?;
+            }
+
+            if let Some(where_expr) = &merge.where_clause {
+                all_bindings = all_bindings
+                    .into_iter()
+                    .filter(|b| {
+                        self.evaluate_expression(where_expr, b)
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+            }
+        }
+
+        let mut result_bindings = Vec::new();
+
+        for bindings in &all_bindings {
+            // Try to MATCH the merge patterns
+            let mut match_result = vec![bindings.clone()];
+            for pattern in &merge.patterns {
+                match_result = self.match_pattern(pattern, match_result)?;
+            }
+
+            if match_result.is_empty() {
+                // Pattern not found -> CREATE
+                let mut new_bindings = bindings.clone();
+                for pattern in &merge.patterns {
+                    self.create_pattern(pattern, &mut new_bindings)?;
+                }
+                // Apply ON CREATE SET
+                if let Some(on_create_set) = &merge.on_create_set {
+                    self.apply_set_clause(on_create_set, &[new_bindings.clone()])?;
+                }
+                result_bindings.push(new_bindings);
+            } else {
+                // Pattern found -> use existing
+                // Apply ON MATCH SET
+                if let Some(on_match_set) = &merge.on_match_set {
+                    self.apply_set_clause(on_match_set, &match_result)?;
+                }
+                result_bindings.extend(match_result);
+            }
+        }
+
+        if let Some(return_clause) = &merge.return_clause {
+            self.build_result_set(return_clause, &result_bindings)
+        } else {
+            Ok(ResultSet::new(
+                vec!["merge_result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String("ok".to_string())],
+                }],
+            ))
+        }
+    }
+
+    fn create_pattern(
+        &mut self,
+        pattern: &Pattern,
+        bindings: &mut Bindings,
+    ) -> Result<(), ExecuteError> {
+        match pattern {
+            Pattern::Node(node_pattern) => {
+                if let Some(var) = &node_pattern.variable {
+                    if bindings.contains_key(var) {
+                        return Ok(());
+                    }
+                }
+                self.create_node(node_pattern, bindings)?;
+                Ok(())
+            }
+            Pattern::Path(path_pattern) => {
+                let start_id = if let Some(var) = &path_pattern.start.variable {
+                    if let Some(bound) = bindings.get(var) {
+                        bound.as_node().ok_or_else(|| {
+                            ExecuteError::TypeError("expected node".to_string())
+                        })?
+                    } else {
+                        self.create_node(&path_pattern.start, bindings)?
+                    }
+                } else {
+                    self.create_node(&path_pattern.start, bindings)?
+                };
+
+                let mut current_id = start_id;
+
+                for segment in &path_pattern.segments {
+                    let end_id = if let Some(var) = &segment.node.variable {
+                        if let Some(bound) = bindings.get(var) {
+                            bound.as_node().ok_or_else(|| {
+                                ExecuteError::TypeError("expected node".to_string())
+                            })?
+                        } else {
+                            self.create_node(&segment.node, bindings)?
+                        }
+                    } else {
+                        self.create_node(&segment.node, bindings)?
+                    };
+
+                    let (from, to) = match segment.edge.direction {
+                        EdgeDirection::Outgoing => (current_id, end_id),
+                        EdgeDirection::Incoming => (end_id, current_id),
+                        EdgeDirection::Both => (current_id, end_id),
+                    };
+
+                    let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+                    let edge_id = self.graph.create_edge(from, to, edge_label)?;
+
+                    if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+                        for (key, value) in &segment.edge.properties {
+                            edge.set_property(key.clone(), PropertyValue::from(value.clone()));
+                        }
+                    }
+
+                    current_id = end_id;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // ========== MATCH + REMOVE ==========
+
+    fn execute_match_remove(
+        &mut self,
+        mr: MatchRemoveStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        // Execute MATCH segments
+        let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
+
+        for segment in &mr.segments {
+            all_bindings = self.execute_query_segment(segment, all_bindings)?;
+        }
+
+        // Apply WHERE filter
+        if let Some(where_expr) = &mr.where_clause {
+            all_bindings = all_bindings
+                .into_iter()
+                .filter(|b| {
+                    self.evaluate_expression(where_expr, b)
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .unwrap_or(false)
+                })
+                .collect();
+        }
+
+        // Apply REMOVE clause
+        for bindings in &all_bindings {
+            for item in &mr.remove_clause.items {
+                match item {
+                    RemoveItem::Property(var, prop) => {
+                        let binding_value = bindings
+                            .get(var)
+                            .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
+
+                        match binding_value {
+                            BindingValue::Node(node_id) => {
+                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                    node.remove_property(prop);
+                                }
+                            }
+                            BindingValue::Edge(edge_id) => {
+                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                    edge.remove_property(prop);
+                                }
+                            }
+                            _ => {
+                                return Err(ExecuteError::TypeError(
+                                    "REMOVE requires node or edge binding".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    RemoveItem::Label(var, _label) => {
+                        let _binding_value = bindings
+                            .get(var)
+                            .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
+                        // Label removal: set label to empty string
+                        // (Full label management would require multi-label support)
+                        if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
+                            if let Some(node) = self.graph.get_node_mut(node_id) {
+                                node.label = String::new();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build result set
+        if let Some(return_clause) = &mr.return_clause {
+            self.build_result_set(return_clause, &all_bindings)
+        } else {
+            Ok(ResultSet::new(
+                vec!["properties_removed".to_string()],
+                vec![Row {
+                    columns: vec![Value::Int(
+                        mr.remove_clause.items.len() as i64 * all_bindings.len() as i64,
+                    )],
+                }],
+            ))
+        }
+    }
+
+    // ========== UNWIND ==========
+
+    fn execute_unwind(&mut self, uw: UnwindStatement) -> Result<ResultSet, ExecuteError> {
+        let empty_bindings = Bindings::new();
+        let list_value = self.evaluate_expression(&uw.expression, &empty_bindings)?;
+
+        let items = match list_value {
+            Value::List(items) => items,
+            _ => {
+                return Err(ExecuteError::TypeError(
+                    "UNWIND requires a list expression".to_string(),
+                ));
+            }
+        };
+
+        // Expand list into bindings
+        let mut all_bindings: Vec<Bindings> = Vec::new();
+        for item in &items {
+            let mut bindings = Bindings::new();
+            bindings.insert(uw.variable.clone(), BindingValue::Scalar(item.clone()));
+            all_bindings.push(bindings);
+        }
+
+        // Execute CREATE if present
+        if let Some(create_clause) = &uw.create_clause {
+            let mut created_nodes = 0i64;
+            let mut created_edges = 0i64;
+
+            for bindings in &all_bindings {
+                let (cn, ce) = self.execute_create_with_bindings(create_clause, bindings)?;
+                created_nodes += cn;
+                created_edges += ce;
+            }
+
+            // Apply SET if present (after CREATE)
+            if let Some(set_clause) = &uw.set_clause {
+                self.apply_set_clause(set_clause, &all_bindings)?;
+            }
+
+            if let Some(return_clause) = &uw.return_clause {
+                return self.build_result_set(return_clause, &all_bindings);
+            }
+
+            return Ok(ResultSet::new(
+                vec!["created_nodes".to_string(), "created_edges".to_string()],
+                vec![Row {
+                    columns: vec![Value::Int(created_nodes), Value::Int(created_edges)],
+                }],
+            ));
+        }
+
+        // Build result set
+        if let Some(return_clause) = &uw.return_clause {
+            self.build_result_set(return_clause, &all_bindings)
+        } else {
+            Ok(ResultSet::new(
+                vec!["unwound_rows".to_string()],
+                vec![Row {
+                    columns: vec![Value::Int(all_bindings.len() as i64)],
+                }],
+            ))
+        }
     }
 
     fn value_to_property(&self, value: &Value) -> Result<PropertyValue, ExecuteError> {
@@ -1609,6 +2097,13 @@ impl<'a> Executor<'a> {
                 self.apply_unary_op(*op, &val)
             }
             Expression::Case(case_expr) => self.evaluate_case_expression(case_expr, bindings),
+            Expression::List(elements) => {
+                let values: Vec<Value> = elements
+                    .iter()
+                    .map(|e| self.evaluate_expression(e, bindings))
+                    .collect::<Result<_, _>>()?;
+                Ok(Value::List(values))
+            }
         }
     }
 
@@ -3066,5 +3561,458 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    // ========== MATCH + CREATE tests ==========
+
+    #[test]
+    fn test_match_create_relationship() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.edge_count(), 1);
+        let edge = graph.edges().next().unwrap();
+        assert_eq!(edge.label, "KNOWS");
+        // created_nodes should be 0 (reusing existing), created_edges should be 1
+        assert_eq!(result.rows[0].columns[1], Value::Int(1));
+    }
+
+    #[test]
+    fn test_match_create_new_node_and_relationship() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}) CREATE (a)-[:OWNS]->(c:Car {model: "Tesla"})"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edge_count(), 1);
+
+        let car = graph
+            .nodes()
+            .find(|n| n.label == "Car")
+            .expect("Car node should exist");
+        assert_eq!(
+            car.get_property("model"),
+            Some(&PropertyValue::String("Tesla".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_match_create_with_where() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice", age: 25})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob", age: 15})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person) WHERE a.age > 20 CREATE (a)-[:MEMBER_OF]->(g:Group {name: "Adults"})"#,
+        )
+        .unwrap();
+
+        // Only Alice (age 25) should have the relationship
+        assert_eq!(graph.edge_count(), 1);
+    }
+
+    // ========== MATCH + SET tests ==========
+
+    #[test]
+    fn test_match_set_property() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(31)));
+    }
+
+    #[test]
+    fn test_match_set_multiple_properties() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31, n.city = "Tokyo""#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(31)));
+        assert_eq!(
+            node.get_property("city"),
+            Some(&PropertyValue::String("Tokyo".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_match_set_with_return() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31 RETURN n.name, n.age"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(result.rows[0].columns[1], Value::Int(31));
+    }
+
+    #[test]
+    fn test_match_set_edge_property() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r.since = 2024"#,
+        )
+        .unwrap();
+
+        let edge = graph.edges().next().unwrap();
+        assert_eq!(edge.get_property("since"), Some(&PropertyValue::Int(2024)));
+    }
+
+    // ========== MERGE tests ==========
+
+    #[test]
+    fn test_merge_create_new() {
+        let mut graph = Graph::new();
+
+        execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.label, "Person");
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_merge_match_existing() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        assert_eq!(graph.node_count(), 1);
+
+        execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        // Should still be 1 node (matched existing)
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_merge_on_create_set() {
+        let mut graph = Graph::new();
+
+        execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(25)));
+    }
+
+    #[test]
+    fn test_merge_on_match_set() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 25})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Alice"}) ON MATCH SET n.age = 30"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(30)));
+    }
+
+    #[test]
+    fn test_merge_with_match_prefix() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob"})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_merge_with_return() {
+        let mut graph = Graph::new();
+
+        let result = execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Charlie"}) ON CREATE SET n.age = 25 RETURN n.name, n.age"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Charlie".to_string())
+        );
+        assert_eq!(result.rows[0].columns[1], Value::Int(25));
+    }
+
+    // ========== MATCH + REMOVE tests ==========
+
+    #[test]
+    fn test_match_remove_property() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice", age: 30, city: "Tokyo"})"#,
+        )
+        .unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), None);
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_match_remove_multiple_properties() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice", age: 30, city: "Tokyo"})"#,
+        )
+        .unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age, n.city"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("age"), None);
+        assert_eq!(node.get_property("city"), None);
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_match_remove_with_return() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice", age: 30})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_remove_edge_property() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // First set a property on the edge
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r.since = 2024"#,
+        )
+        .unwrap();
+
+        // Then remove it
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person)-[r:KNOWS]->(b:Person) REMOVE r.since"#,
+        )
+        .unwrap();
+
+        let edge = graph.edges().next().unwrap();
+        assert_eq!(edge.get_property("since"), None);
+    }
+
+    #[test]
+    fn test_match_remove_label() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n:Person"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.label, "");
+    }
+
+    // ========== UNWIND tests ==========
+
+    #[test]
+    fn test_unwind_list() {
+        let mut graph = Graph::new();
+
+        let result = execute(&mut graph, "UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[1].columns[0], Value::Int(2));
+        assert_eq!(result.rows[2].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_unwind_string_list() {
+        let mut graph = Graph::new();
+
+        let result = execute(
+            &mut graph,
+            r#"UNWIND ["Alice", "Bob", "Charlie"] AS name RETURN name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Charlie".to_string())
+        );
+    }
+
+    #[test]
+    fn test_unwind_empty_list() {
+        let mut graph = Graph::new();
+
+        let result = execute(&mut graph, "UNWIND [] AS x RETURN x").unwrap();
+
+        assert_eq!(result.row_count(), 0);
+    }
+
+    // ========== Parser tests for new features ==========
+
+    #[test]
+    fn test_parse_match_create() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob"})"#).unwrap();
+
+        // Verify the query parses and executes correctly
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:FRIENDS]->(b)"#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_match_set() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31 RETURN n.age"#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_merge() {
+        let mut graph = Graph::new();
+
+        let result = execute(
+            &mut graph,
+            r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25 ON MATCH SET n.age = 30 RETURN n"#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_remove() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age RETURN n.name"#,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_unwind() {
+        let mut graph = Graph::new();
+
+        let result = execute(&mut graph, "UNWIND [1, 2, 3] AS x RETURN x");
+        assert!(result.is_ok());
     }
 }
