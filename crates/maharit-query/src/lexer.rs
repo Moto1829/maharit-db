@@ -76,6 +76,9 @@ pub enum TokenKind {
     Drop,
     For,
     Is,
+    // クエリオプティマイザ用キーワード
+    Explain,
+    Profile,
 
     // 識別子とリテラル
     Ident(String),
@@ -166,6 +169,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Drop => write!(f, "DROP"),
             TokenKind::For => write!(f, "FOR"),
             TokenKind::Is => write!(f, "IS"),
+            TokenKind::Explain => write!(f, "EXPLAIN"),
+            TokenKind::Profile => write!(f, "PROFILE"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -471,6 +476,8 @@ impl<'a> Lexer<'a> {
             "DROP" => TokenKind::Drop,
             "FOR" => TokenKind::For,
             "IS" => TokenKind::Is,
+            "EXPLAIN" => TokenKind::Explain,
+            "PROFILE" => TokenKind::Profile,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

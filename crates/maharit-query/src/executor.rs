@@ -217,6 +217,8 @@ impl<'a> Executor<'a> {
             Statement::CreateConstraint(cc) => self.execute_create_constraint(cc),
             Statement::DropConstraint(dc) => self.execute_drop_constraint(dc),
             Statement::ShowConstraints => self.execute_show_constraints(),
+            Statement::Explain(inner) => self.execute_explain(*inner),
+            Statement::Profile(inner) => self.execute_profile(*inner),
         }
     }
 
@@ -1051,6 +1053,60 @@ impl<'a> Executor<'a> {
             ],
             rows,
         ))
+    }
+
+    // ========== EXPLAIN / PROFILE ==========
+
+    fn execute_explain(&self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
+        let node_count = self.graph.node_count() as u64;
+        let edge_count = self.graph.edge_count() as u64;
+        let plan = crate::planner::build_plan(&stmt, node_count, edge_count);
+        let plan_text = format!("{}", plan);
+
+        let mut rows = Vec::new();
+        for line in plan_text.lines() {
+            rows.push(Row {
+                columns: vec![Value::String(line.to_string())],
+            });
+        }
+
+        Ok(ResultSet::new(vec!["plan".to_string()], rows))
+    }
+
+    fn execute_profile(&mut self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
+        let node_count = self.graph.node_count() as u64;
+        let edge_count = self.graph.edge_count() as u64;
+        let mut plan = crate::planner::build_plan(&stmt, node_count, edge_count);
+
+        // Execute the statement and measure time
+        let start = std::time::Instant::now();
+        let result = self.execute(stmt)?;
+        let elapsed = start.elapsed();
+
+        // Annotate plan nodes with actual stats
+        let actual_rows = result.rows.len() as u64;
+        let time_us = elapsed.as_micros() as u64;
+        if let Some(last) = plan.nodes.last_mut() {
+            last.actual_rows = Some(actual_rows);
+            last.actual_time_us = Some(time_us);
+        }
+
+        // Return plan + result summary
+        let plan_text = format!("{}", plan);
+        let mut rows = Vec::new();
+        for line in plan_text.lines() {
+            rows.push(Row {
+                columns: vec![Value::String(line.to_string())],
+            });
+        }
+        rows.push(Row {
+            columns: vec![Value::String(format!(
+                "Rows: {}, Time: {} us",
+                actual_rows, time_us
+            ))],
+        });
+
+        Ok(ResultSet::new(vec!["profile".to_string()], rows))
     }
 
     fn value_to_property(&self, value: &Value) -> Result<PropertyValue, ExecuteError> {
@@ -4435,5 +4491,187 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(stmt, Statement::ShowConstraints);
+    }
+
+    // ========== EXPLAIN / PROFILE tests ==========
+
+    #[test]
+    fn test_explain_match() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        let result = execute(&mut graph, "EXPLAIN MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.columns, vec!["plan"]);
+        assert!(!result.rows.is_empty());
+
+        // Check that plan contains expected operators
+        let plan_text: String = result
+            .rows
+            .iter()
+            .map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    s.clone()
+                } else {
+                    String::new()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("NodeByLabelScan"));
+        assert!(plan_text.contains("Projection"));
+    }
+
+    #[test]
+    fn test_explain_match_with_filter() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            "EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n",
+        )
+        .unwrap();
+        let plan_text: String = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("NodeByLabelScan"));
+        assert!(plan_text.contains("Filter"));
+        assert!(plan_text.contains("Projection"));
+    }
+
+    #[test]
+    fn test_explain_create() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            r#"EXPLAIN CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let plan_text: String = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("CreateNode"));
+        // EXPLAIN should NOT actually create the node
+        assert_eq!(graph.node_count(), 0);
+    }
+
+    #[test]
+    fn test_explain_does_not_mutate_graph() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        assert_eq!(graph.node_count(), 1);
+
+        // EXPLAIN should not add/remove nodes
+        execute(
+            &mut graph,
+            r#"EXPLAIN CREATE (m:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_profile_match() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
+
+        let result = execute(&mut graph, "PROFILE MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.columns, vec!["profile"]);
+        assert!(!result.rows.is_empty());
+
+        let plan_text: String = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // PROFILE output should contain actual execution stats
+        assert!(plan_text.contains("Rows:"));
+        assert!(plan_text.contains("Time:"));
+    }
+
+    #[test]
+    fn test_profile_executes_query() {
+        let mut graph = Graph::new();
+        // PROFILE CREATE should actually create the node (unlike EXPLAIN)
+        let result = execute(
+            &mut graph,
+            r#"PROFILE CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(!result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_explain_path_pattern() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            "EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b",
+        )
+        .unwrap();
+        let plan_text: String = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("NodeByLabelScan"));
+        assert!(plan_text.contains("Expand"));
+    }
+
+    #[test]
+    fn test_explain_merge() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            r#"EXPLAIN MERGE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let plan_text: String = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("Merge"));
+        // EXPLAIN should not create the node
+        assert_eq!(graph.node_count(), 0);
     }
 }

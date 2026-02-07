@@ -36,6 +36,18 @@ impl Parser {
 
     /// 文をパース
     pub fn parse(&mut self) -> Result<Statement, ParseError> {
+        // Handle EXPLAIN / PROFILE prefixes
+        if self.check(TokenKind::Explain) {
+            self.advance();
+            let inner = self.parse()?;
+            return Ok(Statement::Explain(Box::new(inner)));
+        }
+        if self.check(TokenKind::Profile) {
+            self.advance();
+            let inner = self.parse()?;
+            return Ok(Statement::Profile(Box::new(inner)));
+        }
+
         let first = match self.peek_kind() {
             Some(TokenKind::Create) => {
                 // Peek ahead to check for CREATE CONSTRAINT
@@ -51,7 +63,7 @@ impl Parser {
             Some(TokenKind::Show) => return self.parse_show_constraints(),
             Some(_) => {
                 return Err(
-                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, or SHOW"),
+                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, SHOW, EXPLAIN, or PROFILE"),
                 )
             }
             None => return Err(ParseError::UnexpectedEof),

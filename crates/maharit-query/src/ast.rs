@@ -23,6 +23,10 @@ pub enum Statement {
     DropConstraint(DropConstraintStatement),
     /// SHOW CONSTRAINTS
     ShowConstraints,
+    /// EXPLAIN文（実行計画の表示）
+    Explain(Box<Statement>),
+    /// PROFILE文（実行統計付き実行）
+    Profile(Box<Statement>),
 }
 
 /// UNION文
