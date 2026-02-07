@@ -1,5 +1,6 @@
 pub mod algorithms;
 pub mod constraint;
+pub mod fulltext;
 mod graph;
 mod index;
 mod property;
@@ -12,6 +13,7 @@ pub use algorithms::{
     topological_sort,
 };
 pub use constraint::{Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType};
+pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;
 pub use property::PropertyValue;

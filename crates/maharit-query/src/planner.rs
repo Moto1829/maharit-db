@@ -136,6 +136,12 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         Statement::ShowConstraints => {
             vec![PlanNode::new("ShowConstraints", 1, 1, "")]
         }
+        Statement::CreateFulltextIndex(_) => {
+            vec![PlanNode::new("CreateFulltextIndex", 1, 1, "")]
+        }
+        Statement::DropFulltextIndex(_) => {
+            vec![PlanNode::new("DropFulltextIndex", 1, 1, "")]
+        }
         Statement::Explain(inner) => return build_plan(inner, node_count, edge_count),
         Statement::Profile(inner) => return build_plan(inner, node_count, edge_count),
     };

@@ -23,6 +23,10 @@ pub enum Statement {
     DropConstraint(DropConstraintStatement),
     /// SHOW CONSTRAINTS
     ShowConstraints,
+    /// CREATE FULLTEXT INDEX
+    CreateFulltextIndex(CreateFulltextIndexStatement),
+    /// DROP FULLTEXT INDEX
+    DropFulltextIndex(DropFulltextIndexStatement),
     /// EXPLAIN文（実行計画の表示）
     Explain(Box<Statement>),
     /// PROFILE文（実行統計付き実行）
@@ -350,6 +354,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Regex,
+    Contains,
 }
 
 /// 単項演算子
@@ -501,5 +506,25 @@ pub enum PropertyTypeAst {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropConstraintStatement {
     /// 制約名
+    pub name: String,
+}
+
+/// CREATE FULLTEXT INDEX文
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFulltextIndexStatement {
+    /// インデックス名
+    pub name: String,
+    /// 対象ラベル
+    pub label: String,
+    /// 対象のノード変数名
+    pub variable: String,
+    /// 対象プロパティリスト
+    pub properties: Vec<String>,
+}
+
+/// DROP FULLTEXT INDEX文
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropFulltextIndexStatement {
+    /// インデックス名
     pub name: String,
 }

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use maharit_core::{
-    traversal, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge, Graph, NodeId,
-    PropertyType, PropertyValue,
+    traversal, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge,
+    FulltextError, FulltextManager, Graph, NodeId, PropertyType, PropertyValue,
 };
 use regex::Regex;
 use thiserror::Error;
@@ -23,6 +23,9 @@ pub enum ExecuteError {
 
     #[error("constraint error: {0}")]
     ConstraintError(#[from] ConstraintError),
+
+    #[error("fulltext error: {0}")]
+    FulltextError(#[from] FulltextError),
 }
 
 /// 実行結果の行
@@ -182,6 +185,7 @@ type Bindings = HashMap<String, BindingValue>;
 pub struct Executor<'a> {
     graph: &'a mut Graph,
     constraints: ConstraintManager,
+    fulltext: FulltextManager,
 }
 
 impl<'a> Executor<'a> {
@@ -189,6 +193,7 @@ impl<'a> Executor<'a> {
         Self {
             graph,
             constraints: ConstraintManager::new(),
+            fulltext: FulltextManager::new(),
         }
     }
 
@@ -200,6 +205,16 @@ impl<'a> Executor<'a> {
     /// 制約マネージャーへの可変参照を取得
     pub fn constraint_manager_mut(&mut self) -> &mut ConstraintManager {
         &mut self.constraints
+    }
+
+    /// 全文検索マネージャーへの参照を取得
+    pub fn fulltext_manager(&self) -> &FulltextManager {
+        &self.fulltext
+    }
+
+    /// 全文検索マネージャーへの可変参照を取得
+    pub fn fulltext_manager_mut(&mut self) -> &mut FulltextManager {
+        &mut self.fulltext
     }
 
     /// 文を実行
@@ -217,6 +232,8 @@ impl<'a> Executor<'a> {
             Statement::CreateConstraint(cc) => self.execute_create_constraint(cc),
             Statement::DropConstraint(dc) => self.execute_drop_constraint(dc),
             Statement::ShowConstraints => self.execute_show_constraints(),
+            Statement::CreateFulltextIndex(cfi) => self.execute_create_fulltext_index(cfi),
+            Statement::DropFulltextIndex(dfi) => self.execute_drop_fulltext_index(dfi),
             Statement::Explain(inner) => self.execute_explain(*inner),
             Statement::Profile(inner) => self.execute_profile(*inner),
         }
@@ -349,7 +366,7 @@ impl<'a> Executor<'a> {
         self.constraints
             .validate_node_create(self.graph, &label, &props, None)?;
 
-        let node_id = self.graph.create_node(label);
+        let node_id = self.graph.create_node(label.clone());
 
         // Set properties
         if let Some(node) = self.graph.get_node_mut(node_id) {
@@ -357,6 +374,9 @@ impl<'a> Executor<'a> {
                 node.set_property(key.clone(), PropertyValue::from(value.clone()));
             }
         }
+
+        // Index in fulltext indexes
+        self.fulltext.index_node(node_id, &label, &props);
 
         // Bind variable
         if let Some(var) = &pattern.variable {
@@ -1052,6 +1072,58 @@ impl<'a> Executor<'a> {
                 "type".to_string(),
             ],
             rows,
+        ))
+    }
+
+    // ========== FULLTEXT INDEX ==========
+
+    fn execute_create_fulltext_index(
+        &mut self,
+        cfi: CreateFulltextIndexStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        self.fulltext
+            .create_index(&cfi.name, &cfi.label, cfi.properties)?;
+
+        // Index existing nodes that match the label
+        let node_ids: Vec<NodeId> = self
+            .graph
+            .nodes()
+            .filter(|n| n.label == cfi.label)
+            .map(|n| n.id)
+            .collect();
+
+        for node_id in node_ids {
+            if let Some(node) = self.graph.get_node(node_id) {
+                let props = node.properties.clone();
+                self.fulltext.index_node(node_id, &cfi.label, &props);
+            }
+        }
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Fulltext index '{}' created",
+                    cfi.name
+                ))],
+            }],
+        ))
+    }
+
+    fn execute_drop_fulltext_index(
+        &mut self,
+        dfi: DropFulltextIndexStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        self.fulltext.drop_index(&dfi.name)?;
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Fulltext index '{}' dropped",
+                    dfi.name
+                ))],
+            }],
         ))
     }
 
@@ -2366,6 +2438,15 @@ impl<'a> Executor<'a> {
                 }
                 _ => Err(ExecuteError::TypeError(
                     "=~ requires string operands".to_string(),
+                )),
+            },
+            BinaryOp::Contains => match (left, right) {
+                (Value::String(haystack), Value::String(needle)) => {
+                    let result = haystack.to_lowercase().contains(&needle.to_lowercase());
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(ExecuteError::TypeError(
+                    "CONTAINS requires string operands".to_string(),
                 )),
             },
         }
@@ -4673,5 +4754,165 @@ mod tests {
         assert!(plan_text.contains("Merge"));
         // EXPLAIN should not create the node
         assert_eq!(graph.node_count(), 0);
+    }
+
+    // ========== CONTAINS operator tests ==========
+
+    #[test]
+    fn test_contains_operator() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {title: "Graph Database Tutorial"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {title: "Relational Database Guide"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {title: "Machine Learning Basics"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.title CONTAINS "Database" RETURN n.title"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_contains_case_insensitive() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {title: "Graph Database"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.title CONTAINS "database" RETURN n.title"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.title CONTAINS "DATABASE" RETURN n.title"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    // ========== Fulltext index tests ==========
+
+    #[test]
+    fn test_create_fulltext_index() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            r#"CREATE FULLTEXT INDEX article_search FOR (n:Article) ON (n.title, n.body)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        if let Value::String(s) = &result.rows[0].columns[0] {
+            assert!(s.contains("article_search"));
+        }
+    }
+
+    #[test]
+    fn test_drop_fulltext_index() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        let stmt = Parser::new(
+            r#"CREATE FULLTEXT INDEX article_search FOR (n:Article) ON (n.title)"#,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        executor.execute(stmt).unwrap();
+
+        let stmt = Parser::new("DROP FULLTEXT INDEX article_search")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result = executor.execute(stmt).unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_drop_nonexistent_fulltext_index() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        let stmt = Parser::new("DROP FULLTEXT INDEX nonexistent")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result = executor.execute(stmt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_fulltext_index_indexes_existing_nodes() {
+        let mut graph = Graph::new();
+        // Create nodes first
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {title: "Graph Database Tutorial", body: "Learn about graphs"})"#,
+        )
+        .unwrap();
+
+        // Then create the index - it should index existing nodes
+        let stmt = Parser::new(
+            r#"CREATE FULLTEXT INDEX article_search FOR (n:Article) ON (n.title, n.body)"#,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let mut executor = Executor::new(&mut graph);
+        executor.execute(stmt).unwrap();
+
+        // Verify the index has content
+        let results = executor.fulltext_manager().get_index("article_search")
+            .unwrap()
+            .search("graph");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_index() {
+        let stmt = Parser::new(
+            r#"CREATE FULLTEXT INDEX my_idx FOR (n:Person) ON (n.name, n.bio)"#,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        if let Statement::CreateFulltextIndex(cfi) = stmt {
+            assert_eq!(cfi.name, "my_idx");
+            assert_eq!(cfi.label, "Person");
+            assert_eq!(cfi.variable, "n");
+            assert_eq!(cfi.properties, vec!["name", "bio"]);
+        } else {
+            panic!("expected CreateFulltextIndex statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_fulltext_index() {
+        let stmt = Parser::new("DROP FULLTEXT INDEX my_idx")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::DropFulltextIndex(dfi) = stmt {
+            assert_eq!(dfi.name, "my_idx");
+        } else {
+            panic!("expected DropFulltextIndex statement");
+        }
     }
 }

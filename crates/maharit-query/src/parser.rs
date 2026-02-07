@@ -54,12 +54,22 @@ impl Parser {
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Constraint) {
                     return self.parse_create_constraint();
                 }
+                // Peek ahead to check for CREATE FULLTEXT INDEX
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
+                    return self.parse_create_fulltext_index();
+                }
                 self.parse_create()?
             }
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
             Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
             Some(TokenKind::Unwind) => return self.parse_unwind(),
-            Some(TokenKind::Drop) => return self.parse_drop_constraint(),
+            Some(TokenKind::Drop) => {
+                // Peek ahead to check for DROP FULLTEXT INDEX vs DROP CONSTRAINT
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
+                    return self.parse_drop_fulltext_index();
+                }
+                return self.parse_drop_constraint();
+            }
             Some(TokenKind::Show) => return self.parse_show_constraints(),
             Some(_) => {
                 return Err(
@@ -1022,6 +1032,66 @@ impl Parser {
         Ok(Statement::ShowConstraints)
     }
 
+    // ========== Fulltext Index ==========
+
+    /// CREATE FULLTEXT INDEX name FOR (n:Label) ON (n.prop1, n.prop2)
+    fn parse_create_fulltext_index(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Create)?;
+        self.expect(TokenKind::Fulltext)?;
+        self.expect(TokenKind::Index)?;
+
+        let name = self.expect_ident()?;
+
+        self.expect(TokenKind::For)?;
+        self.expect(TokenKind::LParen)?;
+        let variable = self.expect_ident()?;
+        self.expect(TokenKind::Colon)?;
+        let label = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+
+        self.expect(TokenKind::On)?;
+        self.expect(TokenKind::LParen)?;
+
+        let mut properties = Vec::new();
+        loop {
+            let prop_var = self.expect_ident()?;
+            if prop_var != variable {
+                return Err(ParseError::UnexpectedToken {
+                    expected: format!("{}.property", variable),
+                    found: prop_var,
+                    span: self.current_span(),
+                });
+            }
+            self.expect(TokenKind::Dot)?;
+            let prop_name = self.expect_ident()?;
+            properties.push(prop_name);
+
+            if !self.check(TokenKind::Comma) {
+                break;
+            }
+            self.advance();
+        }
+
+        self.expect(TokenKind::RParen)?;
+
+        Ok(Statement::CreateFulltextIndex(CreateFulltextIndexStatement {
+            name,
+            label,
+            variable,
+            properties,
+        }))
+    }
+
+    /// DROP FULLTEXT INDEX name
+    fn parse_drop_fulltext_index(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Drop)?;
+        self.expect(TokenKind::Fulltext)?;
+        self.expect(TokenKind::Index)?;
+        let name = self.expect_ident()?;
+
+        Ok(Statement::DropFulltextIndex(DropFulltextIndexStatement { name }))
+    }
+
     fn current_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -1258,6 +1328,7 @@ impl Parser {
             Some(TokenKind::Lte) => BinaryOp::Lte,
             Some(TokenKind::Gte) => BinaryOp::Gte,
             Some(TokenKind::RegexMatch) => BinaryOp::Regex,
+            Some(TokenKind::Contains) => BinaryOp::Contains,
             _ => return Ok(left),
         };
 

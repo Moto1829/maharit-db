@@ -79,6 +79,10 @@ pub enum TokenKind {
     // クエリオプティマイザ用キーワード
     Explain,
     Profile,
+    // 全文検索用キーワード
+    Contains,
+    Fulltext,
+    Index,
 
     // 識別子とリテラル
     Ident(String),
@@ -171,6 +175,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Is => write!(f, "IS"),
             TokenKind::Explain => write!(f, "EXPLAIN"),
             TokenKind::Profile => write!(f, "PROFILE"),
+            TokenKind::Contains => write!(f, "CONTAINS"),
+            TokenKind::Fulltext => write!(f, "FULLTEXT"),
+            TokenKind::Index => write!(f, "INDEX"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -478,6 +485,9 @@ impl<'a> Lexer<'a> {
             "IS" => TokenKind::Is,
             "EXPLAIN" => TokenKind::Explain,
             "PROFILE" => TokenKind::Profile,
+            "CONTAINS" => TokenKind::Contains,
+            "FULLTEXT" => TokenKind::Fulltext,
+            "INDEX" => TokenKind::Index,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }
