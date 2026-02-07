@@ -68,6 +68,14 @@ pub enum TokenKind {
     Remove,
     Unwind,
     On,
+    // スキーマ制約用キーワード
+    Constraint,
+    Require,
+    Unique,
+    Show,
+    Drop,
+    For,
+    Is,
 
     // 識別子とリテラル
     Ident(String),
@@ -151,6 +159,13 @@ impl fmt::Display for TokenKind {
             TokenKind::Remove => write!(f, "REMOVE"),
             TokenKind::Unwind => write!(f, "UNWIND"),
             TokenKind::On => write!(f, "ON"),
+            TokenKind::Constraint => write!(f, "CONSTRAINT"),
+            TokenKind::Require => write!(f, "REQUIRE"),
+            TokenKind::Unique => write!(f, "UNIQUE"),
+            TokenKind::Show => write!(f, "SHOW"),
+            TokenKind::Drop => write!(f, "DROP"),
+            TokenKind::For => write!(f, "FOR"),
+            TokenKind::Is => write!(f, "IS"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -449,6 +464,13 @@ impl<'a> Lexer<'a> {
             "REMOVE" => TokenKind::Remove,
             "UNWIND" => TokenKind::Unwind,
             "ON" => TokenKind::On,
+            "CONSTRAINT" => TokenKind::Constraint,
+            "REQUIRE" => TokenKind::Require,
+            "UNIQUE" => TokenKind::Unique,
+            "SHOW" => TokenKind::Show,
+            "DROP" => TokenKind::Drop,
+            "FOR" => TokenKind::For,
+            "IS" => TokenKind::Is,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use maharit_core::{traversal, Edge, Graph, NodeId, PropertyValue};
+use maharit_core::{
+    traversal, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge, Graph, NodeId,
+    PropertyType, PropertyValue,
+};
 use regex::Regex;
 use thiserror::Error;
 
@@ -17,6 +20,9 @@ pub enum ExecuteError {
 
     #[error("graph error: {0}")]
     GraphError(#[from] maharit_core::GraphError),
+
+    #[error("constraint error: {0}")]
+    ConstraintError(#[from] ConstraintError),
 }
 
 /// 実行結果の行
@@ -175,11 +181,25 @@ type Bindings = HashMap<String, BindingValue>;
 /// クエリエグゼキュータ
 pub struct Executor<'a> {
     graph: &'a mut Graph,
+    constraints: ConstraintManager,
 }
 
 impl<'a> Executor<'a> {
     pub fn new(graph: &'a mut Graph) -> Self {
-        Self { graph }
+        Self {
+            graph,
+            constraints: ConstraintManager::new(),
+        }
+    }
+
+    /// 制約マネージャーへの参照を取得
+    pub fn constraint_manager(&self) -> &ConstraintManager {
+        &self.constraints
+    }
+
+    /// 制約マネージャーへの可変参照を取得
+    pub fn constraint_manager_mut(&mut self) -> &mut ConstraintManager {
+        &mut self.constraints
     }
 
     /// 文を実行
@@ -194,6 +214,9 @@ impl<'a> Executor<'a> {
             Statement::Merge(merge) => self.execute_merge(merge),
             Statement::MatchRemove(mr) => self.execute_match_remove(mr),
             Statement::Unwind(uw) => self.execute_unwind(uw),
+            Statement::CreateConstraint(cc) => self.execute_create_constraint(cc),
+            Statement::DropConstraint(dc) => self.execute_drop_constraint(dc),
+            Statement::ShowConstraints => self.execute_show_constraints(),
         }
     }
 
@@ -314,6 +337,16 @@ impl<'a> Executor<'a> {
         bindings: &mut Bindings,
     ) -> Result<NodeId, ExecuteError> {
         let label = pattern.label.clone().unwrap_or_default();
+
+        // Validate constraints before creating
+        let props: HashMap<String, PropertyValue> = pattern
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), PropertyValue::from(v.clone())))
+            .collect();
+        self.constraints
+            .validate_node_create(self.graph, &label, &props, None)?;
+
         let node_id = self.graph.create_node(label);
 
         // Set properties
@@ -626,6 +659,15 @@ impl<'a> Executor<'a> {
 
                 match binding_value {
                     BindingValue::Node(node_id) => {
+                        // Validate constraint before setting
+                        if let Some(node) = self.graph.get_node(*node_id) {
+                            self.constraints.validate_property_set(
+                                self.graph,
+                                node,
+                                &item.property,
+                                &prop_value,
+                            )?;
+                        }
                         if let Some(node) = self.graph.get_node_mut(*node_id) {
                             node.set_property(&item.property, prop_value);
                         }
@@ -812,6 +854,11 @@ impl<'a> Executor<'a> {
 
                         match binding_value {
                             BindingValue::Node(node_id) => {
+                                // Validate constraint before removing
+                                if let Some(node) = self.graph.get_node(*node_id) {
+                                    self.constraints
+                                        .validate_property_remove(node, prop)?;
+                                }
                                 if let Some(node) = self.graph.get_node_mut(*node_id) {
                                     node.remove_property(prop);
                                 }
@@ -921,6 +968,89 @@ impl<'a> Executor<'a> {
                 }],
             ))
         }
+    }
+
+    // ========== CONSTRAINT DDL ==========
+
+    fn execute_create_constraint(
+        &mut self,
+        cc: CreateConstraintStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        let constraint_type = match cc.constraint_type {
+            ConstraintTypeAst::Unique => ConstraintType::Unique,
+            ConstraintTypeAst::NotNull => ConstraintType::NotNull,
+            ConstraintTypeAst::TypeCheck(t) => {
+                let prop_type = match t {
+                    PropertyTypeAst::Integer => PropertyType::Int,
+                    PropertyTypeAst::Float => PropertyType::Float,
+                    PropertyTypeAst::String => PropertyType::String,
+                    PropertyTypeAst::Boolean => PropertyType::Bool,
+                };
+                ConstraintType::TypeCheck(prop_type)
+            }
+        };
+
+        let constraint = Constraint {
+            name: cc.name.clone(),
+            label: cc.label,
+            property: cc.property,
+            constraint_type,
+        };
+
+        self.constraints.create_constraint(constraint)?;
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Constraint '{}' created",
+                    cc.name
+                ))],
+            }],
+        ))
+    }
+
+    fn execute_drop_constraint(
+        &mut self,
+        dc: DropConstraintStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        self.constraints.drop_constraint(&dc.name)?;
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Constraint '{}' dropped",
+                    dc.name
+                ))],
+            }],
+        ))
+    }
+
+    fn execute_show_constraints(&self) -> Result<ResultSet, ExecuteError> {
+        let constraints = self.constraints.list_constraints();
+
+        let mut rows = Vec::new();
+        for c in constraints {
+            rows.push(Row {
+                columns: vec![
+                    Value::String(c.name.clone()),
+                    Value::String(c.label.clone()),
+                    Value::String(c.property.clone()),
+                    Value::String(c.constraint_type.to_string()),
+                ],
+            });
+        }
+
+        Ok(ResultSet::new(
+            vec![
+                "name".to_string(),
+                "label".to_string(),
+                "property".to_string(),
+                "type".to_string(),
+            ],
+            rows,
+        ))
     }
 
     fn value_to_property(&self, value: &Value) -> Result<PropertyValue, ExecuteError> {
@@ -4014,5 +4144,296 @@ mod tests {
 
         let result = execute(&mut graph, "UNWIND [1, 2, 3] AS x RETURN x");
         assert!(result.is_ok());
+    }
+
+    // ========== Constraint DDL tests ==========
+
+    fn execute_with_constraints(
+        graph: &mut Graph,
+        queries: &[&str],
+    ) -> Vec<Result<ResultSet, ExecuteError>> {
+        let mut executor = Executor::new(graph);
+        queries
+            .iter()
+            .map(|q| {
+                let stmt = Parser::new(q).unwrap().parse().unwrap();
+                executor.execute(stmt)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_create_unique_constraint() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &["CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE"],
+        );
+        assert!(results[0].is_ok());
+        let rs = results[0].as_ref().unwrap();
+        assert_eq!(rs.rows[0].columns[0], Value::String("Constraint 'unique_email' created".to_string()));
+    }
+
+    #[test]
+    fn test_create_not_null_constraint() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &["CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL"],
+        );
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_create_type_constraint() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &["CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER"],
+        );
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_drop_constraint() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                "DROP CONSTRAINT unique_email",
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        let rs = results[1].as_ref().unwrap();
+        assert_eq!(rs.rows[0].columns[0], Value::String("Constraint 'unique_email' dropped".to_string()));
+    }
+
+    #[test]
+    fn test_drop_nonexistent_constraint() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &["DROP CONSTRAINT nonexistent"],
+        );
+        assert!(matches!(results[0], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_show_constraints() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                "CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL",
+                "SHOW CONSTRAINTS",
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok());
+        let rs = results[2].as_ref().unwrap();
+        assert_eq!(rs.columns, vec!["name", "label", "property", "type"]);
+        assert_eq!(rs.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_show_constraints_empty() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &["SHOW CONSTRAINTS"],
+        );
+        assert!(results[0].is_ok());
+        let rs = results[0].as_ref().unwrap();
+        assert_eq!(rs.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_unique_constraint_enforced_on_create() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                r#"CREATE (n:Person {email: "alice@example.com"})"#,
+                r#"CREATE (n:Person {email: "alice@example.com"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(matches!(results[2], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_not_null_constraint_enforced_on_create() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL",
+                r#"CREATE (n:Person {age: 30})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_type_constraint_enforced_on_create() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER",
+                r#"CREATE (n:Person {age: "thirty"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_type_constraint_allows_valid_type() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER",
+                r#"CREATE (n:Person {age: 30})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+    }
+
+    #[test]
+    fn test_unique_constraint_enforced_on_set() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                r#"CREATE (n:Person {name: "Alice", email: "alice@example.com"})"#,
+                r#"CREATE (n:Person {name: "Bob", email: "bob@example.com"})"#,
+                r#"MATCH (n:Person {name: "Bob"}) SET n.email = "alice@example.com""#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok());
+        assert!(matches!(results[3], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_not_null_constraint_enforced_on_remove() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL",
+                r#"CREATE (n:Person {name: "Alice"})"#,
+                r#"MATCH (n:Person {name: "Alice"}) REMOVE n.name"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(matches!(results[2], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_constraint_different_label_not_enforced() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                r#"CREATE (n:Person {email: "shared@example.com"})"#,
+                r#"CREATE (n:Company {email: "shared@example.com"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok()); // different label, should pass
+    }
+
+    #[test]
+    fn test_duplicate_constraint_name_error() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT c1 FOR (n:Person) REQUIRE n.email IS UNIQUE",
+                "CREATE CONSTRAINT c1 FOR (n:Person) REQUIRE n.name IS NOT NULL",
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_parse_create_constraint() {
+        let stmt = Parser::new("CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.name, "unique_email");
+            assert_eq!(cc.label, "Person");
+            assert_eq!(cc.property, "email");
+            assert_eq!(cc.constraint_type, ConstraintTypeAst::Unique);
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_not_null() {
+        let stmt = Parser::new("CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.constraint_type, ConstraintTypeAst::NotNull);
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_type_check() {
+        let stmt = Parser::new("CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.constraint_type, ConstraintTypeAst::TypeCheck(PropertyTypeAst::Integer));
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_constraint() {
+        let stmt = Parser::new("DROP CONSTRAINT unique_email")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::DropConstraint(dc) = stmt {
+            assert_eq!(dc.name, "unique_email");
+        } else {
+            panic!("expected DropConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_constraints() {
+        let stmt = Parser::new("SHOW CONSTRAINTS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(stmt, Statement::ShowConstraints);
     }
 }

@@ -17,6 +17,12 @@ pub enum Statement {
     MatchRemove(MatchRemoveStatement),
     /// UNWIND句
     Unwind(UnwindStatement),
+    /// CREATE CONSTRAINT
+    CreateConstraint(CreateConstraintStatement),
+    /// DROP CONSTRAINT
+    DropConstraint(DropConstraintStatement),
+    /// SHOW CONSTRAINTS
+    ShowConstraints,
 }
 
 /// UNION文
@@ -450,4 +456,46 @@ pub enum ListExpression {
     LiteralList(Vec<Literal>),
     /// プロパティアクセス: n.hobbies
     Property(String, String),
+}
+
+/// CREATE CONSTRAINT文
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateConstraintStatement {
+    /// 制約名
+    pub name: String,
+    /// 対象ラベル
+    pub label: String,
+    /// 対象のノード変数名
+    pub variable: String,
+    /// 制約の種類
+    pub constraint_type: ConstraintTypeAst,
+    /// 対象プロパティ
+    pub property: String,
+}
+
+/// 制約の種類（AST用）
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintTypeAst {
+    /// IS UNIQUE
+    Unique,
+    /// IS NOT NULL
+    NotNull,
+    /// IS :: TYPE
+    TypeCheck(PropertyTypeAst),
+}
+
+/// プロパティ型（AST用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyTypeAst {
+    Integer,
+    Float,
+    String,
+    Boolean,
+}
+
+/// DROP CONSTRAINT文
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropConstraintStatement {
+    /// 制約名
+    pub name: String,
 }

@@ -37,11 +37,23 @@ impl Parser {
     /// 文をパース
     pub fn parse(&mut self) -> Result<Statement, ParseError> {
         let first = match self.peek_kind() {
-            Some(TokenKind::Create) => self.parse_create()?,
+            Some(TokenKind::Create) => {
+                // Peek ahead to check for CREATE CONSTRAINT
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Constraint) {
+                    return self.parse_create_constraint();
+                }
+                self.parse_create()?
+            }
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
             Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
             Some(TokenKind::Unwind) => return self.parse_unwind(),
-            Some(_) => return Err(self.unexpected_token("CREATE, MATCH, MERGE, or UNWIND")),
+            Some(TokenKind::Drop) => return self.parse_drop_constraint(),
+            Some(TokenKind::Show) => return self.parse_show_constraints(),
+            Some(_) => {
+                return Err(
+                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, or SHOW"),
+                )
+            }
             None => return Err(ParseError::UnexpectedEof),
         };
 
@@ -895,6 +907,107 @@ impl Parser {
             set_clause,
             return_clause,
         }))
+    }
+
+    // ========== CONSTRAINT DDL ==========
+
+    /// CREATE CONSTRAINT name FOR (n:Label) REQUIRE n.prop IS UNIQUE/NOT NULL/:: TYPE
+    fn parse_create_constraint(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Create)?;
+        self.expect(TokenKind::Constraint)?;
+
+        let name = self.expect_ident()?;
+
+        self.expect(TokenKind::For)?;
+
+        // Parse (variable:Label)
+        self.expect(TokenKind::LParen)?;
+        let variable = self.expect_ident()?;
+        self.expect(TokenKind::Colon)?;
+        let label = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+
+        self.expect(TokenKind::Require)?;
+
+        // Parse variable.property
+        let req_var = self.expect_ident()?;
+        if req_var != variable {
+            return Err(ParseError::UnexpectedToken {
+                expected: format!("variable '{}'", variable),
+                found: req_var,
+                span: self.current_span(),
+            });
+        }
+        self.expect(TokenKind::Dot)?;
+        let property = self.expect_ident()?;
+
+        self.expect(TokenKind::Is)?;
+
+        // Parse constraint type: UNIQUE, NOT NULL, or :: TYPE
+        let constraint_type = if self.check(TokenKind::Unique) {
+            self.advance();
+            ConstraintTypeAst::Unique
+        } else if self.check(TokenKind::Not) {
+            self.advance();
+            self.expect(TokenKind::Null)?;
+            ConstraintTypeAst::NotNull
+        } else if self.check(TokenKind::Colon) {
+            // IS :: TYPE
+            self.advance();
+            self.expect(TokenKind::Colon)?;
+            let type_name = self.expect_ident()?;
+            let prop_type = match type_name.to_uppercase().as_str() {
+                "INTEGER" | "INT" => PropertyTypeAst::Integer,
+                "FLOAT" | "DOUBLE" => PropertyTypeAst::Float,
+                "STRING" => PropertyTypeAst::String,
+                "BOOLEAN" | "BOOL" => PropertyTypeAst::Boolean,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "INTEGER, FLOAT, STRING, or BOOLEAN".to_string(),
+                        found: type_name,
+                        span: self.current_span(),
+                    });
+                }
+            };
+            ConstraintTypeAst::TypeCheck(prop_type)
+        } else {
+            return Err(self.unexpected_token("UNIQUE, NOT NULL, or :: TYPE"));
+        };
+
+        Ok(Statement::CreateConstraint(CreateConstraintStatement {
+            name,
+            label,
+            variable,
+            constraint_type,
+            property,
+        }))
+    }
+
+    /// DROP CONSTRAINT name
+    fn parse_drop_constraint(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Drop)?;
+        self.expect(TokenKind::Constraint)?;
+
+        let name = self.expect_ident()?;
+
+        Ok(Statement::DropConstraint(DropConstraintStatement { name }))
+    }
+
+    /// SHOW CONSTRAINTS
+    fn parse_show_constraints(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Show)?;
+
+        // Expect CONSTRAINTS (as an identifier since it's not a keyword)
+        let ident = self.expect_ident()?;
+        if ident.to_uppercase() != "CONSTRAINTS" {
+            return Err(ParseError::UnexpectedToken {
+                expected: "CONSTRAINTS".to_string(),
+                found: ident,
+                span: self.current_span(),
+            });
+        }
+
+        Ok(Statement::ShowConstraints)
     }
 
     fn current_span(&self) -> Span {

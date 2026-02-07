@@ -1,4 +1,5 @@
 pub mod algorithms;
+pub mod constraint;
 mod graph;
 mod index;
 mod property;
@@ -10,6 +11,7 @@ pub use algorithms::{
     connected_components, find_cycles, has_cycle, pagerank, strongly_connected_components,
     topological_sort,
 };
+pub use constraint::{Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType};
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;
 pub use property::PropertyValue;
