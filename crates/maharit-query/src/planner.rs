@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::ast::*;
@@ -126,6 +126,8 @@ pub struct GraphStats {
     pub edge_count: u64,
     /// Number of nodes per label.
     pub label_counts: HashMap<String, u64>,
+    /// Set of indexed (label, property) pairs for index selection.
+    pub indexed_properties: HashSet<(String, String)>,
 }
 
 impl GraphStats {
@@ -140,7 +142,22 @@ impl GraphStats {
             node_count: graph.node_count() as u64,
             edge_count: graph.edge_count() as u64,
             label_counts,
+            indexed_properties: HashSet::new(),
         }
+    }
+
+    /// Collect statistics from a graph including index information.
+    pub fn from_graph_with_indexes(
+        graph: &Graph,
+        property_index: &maharit_core::PropertyIndex,
+    ) -> Self {
+        let mut stats = Self::from_graph(graph);
+        for idx in property_index.list_indexes() {
+            stats
+                .indexed_properties
+                .insert((idx.label.clone(), idx.property.clone()));
+        }
+        stats
     }
 
     /// Create stats with just total counts (no label distribution).
@@ -149,6 +166,7 @@ impl GraphStats {
             node_count,
             edge_count,
             label_counts: HashMap::new(),
+            indexed_properties: HashSet::new(),
         }
     }
 
@@ -163,6 +181,12 @@ impl GraphStats {
             // Label not found in stats, likely 0 but estimate 1
             1
         }
+    }
+
+    /// Check if a (label, property) pair has an index.
+    pub fn has_index(&self, label: &str, property: &str) -> bool {
+        self.indexed_properties
+            .contains(&(label.to_string(), property.to_string()))
     }
 }
 
@@ -480,10 +504,90 @@ fn is_simple_operand(expr: &Expression) -> bool {
     )
 }
 
+/// Filter classification for index selection.
+enum FilterType {
+    /// Equality filter: var.property = value
+    IndexSeek { _variable: String, property: String },
+    /// Range filter: var.property > value (or <, >=, <=)
+    IndexRange { _variable: String, property: String },
+    /// Not indexable
+    Other,
+}
+
+/// Classify a WHERE expression for index selection.
+fn classify_filter(expr: &Expression) -> FilterType {
+    match expr {
+        Expression::BinaryOp(left, op, right) => match op {
+            BinaryOp::Eq => {
+                if let Some((var, prop)) = extract_property_access(left) {
+                    if is_literal_or_value(right) {
+                        return FilterType::IndexSeek {
+                            _variable: var,
+                            property: prop,
+                        };
+                    }
+                }
+                if let Some((var, prop)) = extract_property_access(right) {
+                    if is_literal_or_value(left) {
+                        return FilterType::IndexSeek {
+                            _variable: var,
+                            property: prop,
+                        };
+                    }
+                }
+                FilterType::Other
+            }
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte => {
+                if let Some((var, prop)) = extract_property_access(left) {
+                    if is_literal_or_value(right) {
+                        return FilterType::IndexRange {
+                            _variable: var,
+                            property: prop,
+                        };
+                    }
+                }
+                if let Some((var, prop)) = extract_property_access(right) {
+                    if is_literal_or_value(left) {
+                        return FilterType::IndexRange {
+                            _variable: var,
+                            property: prop,
+                        };
+                    }
+                }
+                FilterType::Other
+            }
+            BinaryOp::And => {
+                // For AND, check the left side first
+                let left_type = classify_filter(left);
+                if matches!(left_type, FilterType::IndexSeek { .. }) {
+                    return left_type;
+                }
+                classify_filter(right)
+            }
+            _ => FilterType::Other,
+        },
+        _ => FilterType::Other,
+    }
+}
+
+fn extract_property_access(expr: &Expression) -> Option<(String, String)> {
+    if let Expression::Property(var, prop) = expr {
+        Some((var.clone(), prop.clone()))
+    } else {
+        None
+    }
+}
+
+fn is_literal_or_value(expr: &Expression) -> bool {
+    matches!(expr, Expression::Literal(_) | Expression::Variable(_))
+}
+
 fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
 
     for segment in &m.segments {
+        let mut used_index = false;
+
         for clause in &segment.match_clauses {
             for pattern in &clause.patterns {
                 match pattern {
@@ -495,9 +599,57 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             .map(|l| format!(":{}", l))
                             .unwrap_or_default();
 
-                        // Filter pushdown: if WHERE is a simple property comparison,
-                        // show it as part of the scan node
-                        if let Some(ref where_expr) = segment.where_clause {
+                        // Index selection: check if WHERE filters on an indexed property
+                        if let (Some(label), Some(where_expr)) =
+                            (&np.label, &segment.where_clause)
+                        {
+                            let filter_type = classify_filter(where_expr);
+                            match filter_type {
+                                FilterType::IndexSeek {
+                                    ref property, ..
+                                } if stats.has_index(label, property) => {
+                                    // IndexSeek: O(1) lookup, very cheap
+                                    let seek_est = 1u64.max(est / 100);
+                                    nodes.push(PlanNode::new(
+                                        "IndexSeek",
+                                        seek_est,
+                                        2,
+                                        &format!("{}.{}", label_info, property),
+                                    ));
+                                    used_index = true;
+                                    continue;
+                                }
+                                FilterType::IndexRange {
+                                    ref property, ..
+                                } if stats.has_index(label, property) => {
+                                    // IndexRangeScan: scan a range in the index
+                                    let range_est = (est / 5).max(1);
+                                    nodes.push(PlanNode::new(
+                                        "IndexRangeScan",
+                                        range_est,
+                                        range_est / 10 + 1,
+                                        &format!("{}.{}", label_info, property),
+                                    ));
+                                    used_index = true;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+
+                            // Filter pushdown: if WHERE is a simple property comparison,
+                            // show it as part of the scan node
+                            if is_pushable_filter(where_expr) {
+                                let filtered = (est / 2).max(1);
+                                nodes.push(PlanNode::new(
+                                    "NodeByLabelScan+Filter",
+                                    filtered,
+                                    est / 10 + 1,
+                                    &format!("{} (filter pushed down)", label_info),
+                                ));
+                                continue;
+                            }
+                        } else if let Some(ref where_expr) = segment.where_clause {
+                            // No label but has WHERE - still try filter pushdown
                             if is_pushable_filter(where_expr) {
                                 let filtered = (est / 2).max(1);
                                 nodes.push(PlanNode::new(
@@ -545,8 +697,8 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
             }
         }
 
-        // Only add separate Filter if not already pushed down
-        if segment.where_clause.is_some() {
+        // Only add separate Filter if not already handled by index or pushdown
+        if segment.where_clause.is_some() && !used_index {
             let already_pushed = nodes
                 .last()
                 .map(|n| n.operator == "NodeByLabelScan+Filter")
@@ -848,6 +1000,7 @@ mod tests {
             node_count: 550,
             edge_count: 1000,
             label_counts,
+            indexed_properties: HashSet::new(),
         };
 
         assert_eq!(stats.estimate_label_count("Person"), 500);
@@ -873,6 +1026,7 @@ mod tests {
             node_count: 550,
             edge_count: 1000,
             label_counts,
+            indexed_properties: HashSet::new(),
         };
 
         let stmt = Parser::new("MATCH (n:Person) RETURN n")
@@ -897,6 +1051,7 @@ mod tests {
             node_count: 505,
             edge_count: 100,
             label_counts,
+            indexed_properties: HashSet::new(),
         };
 
         let stmt = Parser::new("MATCH (n:Admin) RETURN n")
@@ -971,5 +1126,115 @@ mod tests {
         // Path patterns should not get pushdown (filter applies after expand)
         assert!(ops.contains(&"Filter"));
         assert!(!ops.contains(&"NodeByLabelScan+Filter"));
+    }
+
+    // ===== Index selection tests =====
+
+    fn stats_with_index(label: &str, property: &str) -> GraphStats {
+        let mut stats = GraphStats::simple(1000, 5000);
+        stats
+            .indexed_properties
+            .insert((label.to_string(), property.to_string()));
+        stats
+    }
+
+    #[test]
+    fn test_index_seek_on_equality() {
+        let stats = stats_with_index("Person", "email");
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.email = 'alice@test.com' RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"IndexSeek"));
+        assert!(!ops.contains(&"NodeByLabelScan"));
+        assert!(!ops.contains(&"Filter"));
+    }
+
+    #[test]
+    fn test_index_range_scan_on_comparison() {
+        let stats = stats_with_index("Person", "age");
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.age > 30 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"IndexRangeScan"));
+        assert!(!ops.contains(&"NodeByLabelScan"));
+    }
+
+    #[test]
+    fn test_no_index_when_not_indexed() {
+        // No index on Person.age
+        let stats = stats_with_index("Person", "email");
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.age > 30 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        // Should fall back to filter pushdown, not index scan
+        assert!(!ops.contains(&"IndexSeek"));
+        assert!(!ops.contains(&"IndexRangeScan"));
+        assert!(ops.contains(&"NodeByLabelScan+Filter"));
+    }
+
+    #[test]
+    fn test_index_seek_lower_cost_than_scan() {
+        let stats = stats_with_index("Person", "name");
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        // IndexSeek should have very low cost
+        let seek_node = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "IndexSeek")
+            .unwrap();
+        assert!(seek_node.estimated_cost <= 2);
+        assert!(seek_node.estimated_rows <= 10);
+    }
+
+    #[test]
+    fn test_index_seek_details_show_property() {
+        let stats = stats_with_index("Person", "email");
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.email = 'test' RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let seek_node = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "IndexSeek")
+            .unwrap();
+        assert!(seek_node.details.contains("email"));
+    }
+
+    #[test]
+    fn test_has_index() {
+        let mut stats = GraphStats::simple(100, 50);
+        assert!(!stats.has_index("Person", "name"));
+
+        stats
+            .indexed_properties
+            .insert(("Person".to_string(), "name".to_string()));
+        assert!(stats.has_index("Person", "name"));
+        assert!(!stats.has_index("Person", "age"));
+        assert!(!stats.has_index("Company", "name"));
     }
 }
