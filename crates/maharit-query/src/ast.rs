@@ -486,8 +486,8 @@ pub struct CreateConstraintStatement {
     pub variable: String,
     /// 制約の種類
     pub constraint_type: ConstraintTypeAst,
-    /// 対象プロパティ
-    pub property: String,
+    /// 対象プロパティ（複合制約の場合は複数）
+    pub properties: Vec<String>,
 }
 
 /// 制約の種類（AST用）

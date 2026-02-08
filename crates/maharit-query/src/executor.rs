@@ -1039,7 +1039,7 @@ impl<'a> Executor<'a> {
         let constraint = Constraint {
             name: cc.name.clone(),
             label: cc.label,
-            property: cc.property,
+            properties: cc.properties,
             constraint_type,
         };
 
@@ -1082,7 +1082,7 @@ impl<'a> Executor<'a> {
                 columns: vec![
                     Value::String(c.name.clone()),
                     Value::String(c.label.clone()),
-                    Value::String(c.property.clone()),
+                    Value::String(c.properties.join(", ")),
                     Value::String(c.constraint_type.to_string()),
                 ],
             });
@@ -1092,7 +1092,7 @@ impl<'a> Executor<'a> {
             vec![
                 "name".to_string(),
                 "label".to_string(),
-                "property".to_string(),
+                "properties".to_string(),
                 "type".to_string(),
             ],
             rows,
@@ -4396,7 +4396,7 @@ mod tests {
         assert!(results[1].is_ok());
         assert!(results[2].is_ok());
         let rs = results[2].as_ref().unwrap();
-        assert_eq!(rs.columns, vec!["name", "label", "property", "type"]);
+        assert_eq!(rs.columns, vec!["name", "label", "properties", "type"]);
         assert_eq!(rs.rows.len(), 2);
     }
 
@@ -4521,6 +4521,60 @@ mod tests {
     }
 
     #[test]
+    fn test_composite_unique_constraint_enforced() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_name_email FOR (n:Person) REQUIRE (n.name, n.email) IS UNIQUE",
+                r#"CREATE (n:Person {name: "Alice", email: "alice@example.com"})"#,
+                r#"CREATE (n:Person {name: "Alice", email: "different@example.com"})"#, // Different email, should pass
+                r#"CREATE (n:Person {name: "Bob", email: "alice@example.com"})"#, // Different name, should pass
+                r#"CREATE (n:Person {name: "Alice", email: "alice@example.com"})"#, // Same combo, should fail
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok()); // different combo, should pass
+        assert!(results[3].is_ok()); // different combo, should pass
+        assert!(matches!(results[4], Err(ExecuteError::ConstraintError(_)))); // duplicate combo
+    }
+
+    #[test]
+    fn test_composite_unique_constraint_missing_property() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT unique_name_email FOR (n:Person) REQUIRE (n.name, n.email) IS UNIQUE",
+                r#"CREATE (n:Person {name: "Alice", email: "alice@example.com"})"#,
+                r#"CREATE (n:Person {name: "Bob"})"#, // Missing email, constraint doesn't apply
+                r#"CREATE (n:Person {email: "alice@example.com"})"#, // Missing name, constraint doesn't apply
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok()); // missing property, should pass
+        assert!(results[3].is_ok()); // missing property, should pass
+    }
+
+    #[test]
+    fn test_parse_composite_unique_constraint() {
+        let stmt = Parser::new("CREATE CONSTRAINT unique_name_email FOR (n:Person) REQUIRE (n.name, n.email) IS UNIQUE")
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.name, "unique_name_email");
+            assert_eq!(cc.label, "Person");
+            assert_eq!(cc.properties, vec!["name".to_string(), "email".to_string()]);
+            assert_eq!(cc.constraint_type, ConstraintTypeAst::Unique);
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
     fn test_duplicate_constraint_name_error() {
         let mut graph = Graph::new();
         let results = execute_with_constraints(
@@ -4543,7 +4597,7 @@ mod tests {
         if let Statement::CreateConstraint(cc) = stmt {
             assert_eq!(cc.name, "unique_email");
             assert_eq!(cc.label, "Person");
-            assert_eq!(cc.property, "email");
+            assert_eq!(cc.properties, vec!["email".to_string()]);
             assert_eq!(cc.constraint_type, ConstraintTypeAst::Unique);
         } else {
             panic!("expected CreateConstraint statement");

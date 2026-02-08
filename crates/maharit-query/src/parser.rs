@@ -960,17 +960,47 @@ impl Parser {
 
         self.expect(TokenKind::Require)?;
 
-        // Parse variable.property
-        let req_var = self.expect_ident()?;
-        if req_var != variable {
-            return Err(ParseError::UnexpectedToken {
-                expected: format!("variable '{}'", variable),
-                found: req_var,
-                span: self.current_span(),
-            });
-        }
-        self.expect(TokenKind::Dot)?;
-        let property = self.expect_ident()?;
+        // Parse variable.property or (variable.property, variable.property, ...)
+        let properties = if self.check(TokenKind::LParen) {
+            // Composite constraint: (var.prop, var.prop, ...)
+            self.advance(); // consume '('
+            let mut props = Vec::new();
+
+            loop {
+                let req_var = self.expect_ident()?;
+                if req_var != variable {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: format!("variable '{}'", variable),
+                        found: req_var,
+                        span: self.current_span(),
+                    });
+                }
+                self.expect(TokenKind::Dot)?;
+                let prop = self.expect_ident()?;
+                props.push(prop);
+
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance(); // consume ','
+            }
+
+            self.expect(TokenKind::RParen)?;
+            props
+        } else {
+            // Single property constraint: var.prop
+            let req_var = self.expect_ident()?;
+            if req_var != variable {
+                return Err(ParseError::UnexpectedToken {
+                    expected: format!("variable '{}'", variable),
+                    found: req_var,
+                    span: self.current_span(),
+                });
+            }
+            self.expect(TokenKind::Dot)?;
+            let property = self.expect_ident()?;
+            vec![property]
+        };
 
         self.expect(TokenKind::Is)?;
 
@@ -1010,7 +1040,7 @@ impl Parser {
             label,
             variable,
             constraint_type,
-            property,
+            properties,
         }))
     }
 
