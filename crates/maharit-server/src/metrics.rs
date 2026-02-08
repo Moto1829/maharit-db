@@ -7,6 +7,89 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Get the current process memory usage (RSS) in bytes.
+///
+/// Returns the resident set size on macOS and Linux, or 0 on unsupported platforms.
+pub fn memory_usage_bytes() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        macos_memory_usage()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_memory_usage()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_memory_usage() -> u64 {
+    use std::mem;
+
+    unsafe extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(
+            target_task: u32,
+            flavor: u32,
+            task_info_out: *mut i32,
+            task_info_count: *mut u32,
+        ) -> i32;
+    }
+
+    // MACH_TASK_BASIC_INFO = 20
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+
+    let mut info: MachTaskBasicInfo = unsafe { mem::zeroed() };
+    let mut count = (mem::size_of::<MachTaskBasicInfo>() / mem::size_of::<i32>()) as u32;
+
+    let result = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            &mut info as *mut MachTaskBasicInfo as *mut i32,
+            &mut count,
+        )
+    };
+
+    if result == 0 {
+        info.resident_size
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_memory_usage() -> u64 {
+    // Read from /proc/self/status
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<u64>() {
+                        return kb * 1024; // Convert kB to bytes
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Query type for tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryType {
@@ -164,6 +247,8 @@ pub struct Metrics {
     current_connections: AtomicI64,
     /// Total number of connections ever created (counter).
     total_connections: AtomicU64,
+    /// Time when the metrics collector was created.
+    start_time: Instant,
 }
 
 impl Default for Metrics {
@@ -199,7 +284,18 @@ impl Metrics {
             edge_count: AtomicI64::new(0),
             current_connections: AtomicI64::new(0),
             total_connections: AtomicU64::new(0),
+            start_time: Instant::now(),
         }
+    }
+
+    /// Get the current process memory usage (RSS) in bytes.
+    pub fn memory_usage(&self) -> u64 {
+        memory_usage_bytes()
+    }
+
+    /// Get the server uptime.
+    pub fn uptime(&self) -> Duration {
+        self.start_time.elapsed()
     }
 
     /// Record a query execution.
@@ -359,6 +455,18 @@ impl Metrics {
             "maharit_connections_total {}\n",
             self.total_connections()
         ));
+
+        // Memory usage
+        let memory = memory_usage_bytes();
+        output.push_str("# HELP maharit_memory_usage_bytes Current process memory usage (RSS)\n");
+        output.push_str("# TYPE maharit_memory_usage_bytes gauge\n");
+        output.push_str(&format!("maharit_memory_usage_bytes {}\n", memory));
+
+        // Uptime
+        let uptime = self.start_time.elapsed().as_secs();
+        output.push_str("# HELP maharit_uptime_seconds Server uptime in seconds\n");
+        output.push_str("# TYPE maharit_uptime_seconds gauge\n");
+        output.push_str(&format!("maharit_uptime_seconds {}\n", uptime));
 
         output
     }
@@ -542,6 +650,35 @@ mod tests {
         assert!(output.contains("maharit_query_latency_microseconds{quantile=\"0.5\"}"));
         assert!(output.contains("maharit_query_latency_microseconds{quantile=\"0.95\"}"));
         assert!(output.contains("maharit_query_latency_microseconds{quantile=\"0.99\"}"));
+        assert!(output.contains("maharit_memory_usage_bytes"));
+        assert!(output.contains("maharit_uptime_seconds"));
+    }
+
+    #[test]
+    fn test_memory_usage() {
+        let memory = memory_usage_bytes();
+        // On supported platforms, memory usage should be > 0
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(memory > 0, "memory usage should be positive");
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert_eq!(memory, 0);
+    }
+
+    #[test]
+    fn test_memory_usage_via_metrics() {
+        let metrics = Metrics::new();
+        let memory = metrics.memory_usage();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(memory > 0);
+        let _ = memory; // suppress unused warning on unsupported platforms
+    }
+
+    #[test]
+    fn test_uptime() {
+        let metrics = Metrics::new();
+        thread::sleep(Duration::from_millis(10));
+        let uptime = metrics.uptime();
+        assert!(uptime >= Duration::from_millis(10));
     }
 
     #[test]
