@@ -2,6 +2,7 @@ pub mod auth;
 pub mod metrics;
 mod repl;
 pub mod tcp_server;
+pub mod tls;
 
 use repl::Repl;
 use tcp_server::{ServerConfig, TcpServer};

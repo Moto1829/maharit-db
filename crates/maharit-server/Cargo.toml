@@ -20,3 +20,7 @@ bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
