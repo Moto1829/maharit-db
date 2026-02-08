@@ -788,11 +788,20 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
     }
 
     let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+
+    // Column pruning: analyze RETURN clause to determine needed columns
+    let projection_details = analyze_projection(&m.return_clause);
+    let projection_cost = if projection_details.is_empty() {
+        final_est / 10 + 1
+    } else {
+        // Reduced cost when only fetching specific properties
+        final_est / 20 + 1
+    };
     nodes.push(PlanNode::new(
         "Projection",
         final_est,
-        final_est / 10 + 1,
-        "",
+        projection_cost,
+        &projection_details,
     ));
 
     if let Some(ref ob) = m.return_clause.order_by {
@@ -808,6 +817,42 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
     }
 
     nodes
+}
+
+/// Analyze the RETURN clause to determine which columns are needed.
+/// Returns a details string describing the pruning.
+fn analyze_projection(return_clause: &ReturnClause) -> String {
+    let mut has_all = false;
+    let mut has_variable = false;
+    let mut properties: Vec<String> = Vec::new();
+
+    for item in &return_clause.items {
+        match item {
+            ReturnItem::All => {
+                has_all = true;
+            }
+            ReturnItem::Variable(_) => {
+                has_variable = true;
+            }
+            ReturnItem::Property(var, prop) => {
+                properties.push(format!("{}.{}", var, prop));
+            }
+            ReturnItem::Aggregate(_) | ReturnItem::Function(_) => {
+                // Aggregates need full data, no pruning possible
+                has_variable = true;
+            }
+        }
+    }
+
+    if has_all {
+        // RETURN * needs everything
+        String::new()
+    } else if !has_variable && !properties.is_empty() {
+        // Only specific properties returned - column pruning applies
+        format!("columns: {}", properties.join(", "))
+    } else {
+        String::new()
+    }
 }
 
 fn plan_delete_with_stats(d: &DeleteStatement, stats: &GraphStats) -> Vec<PlanNode> {
@@ -1395,5 +1440,96 @@ mod tests {
         let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
         assert!(ops.contains(&"Expand"));
         assert!(!ops.contains(&"ExpandReverse"));
+    }
+
+    // ===== Column pruning tests =====
+
+    #[test]
+    fn test_column_pruning_specific_properties() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n.name, n.age")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let projection = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "Projection")
+            .unwrap();
+        assert!(projection.details.contains("n.name"));
+        assert!(projection.details.contains("n.age"));
+        assert!(projection.details.starts_with("columns: "));
+    }
+
+    #[test]
+    fn test_no_column_pruning_return_variable() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let projection = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "Projection")
+            .unwrap();
+        // No pruning when returning full variable
+        assert!(projection.details.is_empty());
+    }
+
+    #[test]
+    fn test_no_column_pruning_return_all() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN *")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let projection = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "Projection")
+            .unwrap();
+        assert!(projection.details.is_empty());
+    }
+
+    #[test]
+    fn test_column_pruning_reduces_cost() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt_full = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan_full = build_plan_with_stats(&stmt_full, &stats);
+
+        let stmt_pruned = Parser::new("MATCH (n:Person) RETURN n.name")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan_pruned = build_plan_with_stats(&stmt_pruned, &stats);
+
+        let cost_full = plan_full
+            .nodes
+            .iter()
+            .find(|n| n.operator == "Projection")
+            .unwrap()
+            .estimated_cost;
+        let cost_pruned = plan_pruned
+            .nodes
+            .iter()
+            .find(|n| n.operator == "Projection")
+            .unwrap()
+            .estimated_cost;
+
+        assert!(cost_pruned < cost_full);
     }
 }
