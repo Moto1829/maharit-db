@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod http_server;
 pub mod metrics;
 mod repl;
 pub mod tcp_server;

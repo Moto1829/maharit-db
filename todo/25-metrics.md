@@ -15,7 +15,7 @@
 
 ### Prometheus対応
 - [x] Prometheus形式でのメトリクス出力
-- [ ] `/metrics` HTTPエンドポイント
+- [x] `/metrics` HTTPエンドポイント
 - [ ] カスタムラベル
 
 ### OpenTelemetry対応（将来的）
@@ -23,8 +23,8 @@
 - [ ] 分散トレーシング
 
 ### ヘルスチェック
-- [ ] `/health` エンドポイント
-- [ ] Liveness / Readiness 分離
+- [x] `/health` エンドポイント
+- [x] Liveness / Readiness 分離
 - [ ] カスタムヘルスチェック
 
 ### ログ
