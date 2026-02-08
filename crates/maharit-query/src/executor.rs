@@ -234,6 +234,30 @@ impl<'a> Executor<'a> {
             Statement::ShowConstraints => self.execute_show_constraints(),
             Statement::CreateFulltextIndex(cfi) => self.execute_create_fulltext_index(cfi),
             Statement::DropFulltextIndex(dfi) => self.execute_drop_fulltext_index(dfi),
+            Statement::CreateUser(cu) => Ok(ResultSet::new(
+                vec!["result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String(format!("User '{}' created with role '{}'", cu.username, cu.role))],
+                }],
+            )),
+            Statement::DropUser(du) => Ok(ResultSet::new(
+                vec!["result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String(format!("User '{}' dropped", du.username))],
+                }],
+            )),
+            Statement::AlterUser(au) => Ok(ResultSet::new(
+                vec!["result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String(format!("User '{}' altered", au.username))],
+                }],
+            )),
+            Statement::ShowUsers => Ok(ResultSet::new(
+                vec!["result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String("SHOW USERS requires server context".to_string())],
+                }],
+            )),
             Statement::Explain(inner) => self.execute_explain(*inner),
             Statement::Profile(inner) => self.execute_profile(*inner),
         }

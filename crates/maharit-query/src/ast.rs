@@ -27,6 +27,14 @@ pub enum Statement {
     CreateFulltextIndex(CreateFulltextIndexStatement),
     /// DROP FULLTEXT INDEX
     DropFulltextIndex(DropFulltextIndexStatement),
+    /// CREATE USER
+    CreateUser(CreateUserStatement),
+    /// DROP USER
+    DropUser(DropUserStatement),
+    /// ALTER USER
+    AlterUser(AlterUserStatement),
+    /// SHOW USERS
+    ShowUsers,
     /// EXPLAIN文（実行計画の表示）
     Explain(Box<Statement>),
     /// PROFILE文（実行統計付き実行）
@@ -527,4 +535,33 @@ pub struct CreateFulltextIndexStatement {
 pub struct DropFulltextIndexStatement {
     /// インデックス名
     pub name: String,
+}
+
+/// CREATE USER文
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateUserStatement {
+    /// ユーザー名
+    pub username: String,
+    /// パスワード
+    pub password: String,
+    /// ロール
+    pub role: String,
+}
+
+/// DROP USER文
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropUserStatement {
+    /// ユーザー名
+    pub username: String,
+}
+
+/// ALTER USER文
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterUserStatement {
+    /// ユーザー名
+    pub username: String,
+    /// 新しいパスワード（省略可）
+    pub password: Option<String>,
+    /// 新しいロール（省略可）
+    pub role: Option<String>,
 }

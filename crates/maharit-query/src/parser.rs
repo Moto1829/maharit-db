@@ -58,6 +58,10 @@ impl Parser {
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
                     return self.parse_create_fulltext_index();
                 }
+                // Peek ahead to check for CREATE USER
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::User) {
+                    return self.parse_create_user();
+                }
                 self.parse_create()?
             }
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
@@ -68,12 +72,17 @@ impl Parser {
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
                     return self.parse_drop_fulltext_index();
                 }
+                // Peek ahead to check for DROP USER
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::User) {
+                    return self.parse_drop_user();
+                }
                 return self.parse_drop_constraint();
             }
-            Some(TokenKind::Show) => return self.parse_show_constraints(),
+            Some(TokenKind::Alter) => return self.parse_alter_user(),
+            Some(TokenKind::Show) => return self.parse_show(),
             Some(_) => {
                 return Err(
-                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, SHOW, EXPLAIN, or PROFILE"),
+                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, SHOW, ALTER, EXPLAIN, or PROFILE"),
                 )
             }
             None => return Err(ParseError::UnexpectedEof),
@@ -1015,21 +1024,31 @@ impl Parser {
         Ok(Statement::DropConstraint(DropConstraintStatement { name }))
     }
 
-    /// SHOW CONSTRAINTS
-    fn parse_show_constraints(&mut self) -> Result<Statement, ParseError> {
+    /// SHOW CONSTRAINTS / SHOW USERS
+    fn parse_show(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Show)?;
+
+        // Check for SHOW USERS (User is a keyword)
+        if self.check(TokenKind::User) {
+            // SHOW USERS - consume "USER" and expect "S" via ident
+            self.advance();
+            // Accept both "SHOW USER" and "SHOW USERS"
+            return Ok(Statement::ShowUsers);
+        }
 
         // Expect CONSTRAINTS (as an identifier since it's not a keyword)
         let ident = self.expect_ident()?;
-        if ident.to_uppercase() != "CONSTRAINTS" {
-            return Err(ParseError::UnexpectedToken {
-                expected: "CONSTRAINTS".to_string(),
+        if ident.to_uppercase() == "CONSTRAINTS" {
+            Ok(Statement::ShowConstraints)
+        } else if ident.to_uppercase() == "USERS" {
+            Ok(Statement::ShowUsers)
+        } else {
+            Err(ParseError::UnexpectedToken {
+                expected: "CONSTRAINTS or USERS".to_string(),
                 found: ident,
                 span: self.current_span(),
-            });
+            })
         }
-
-        Ok(Statement::ShowConstraints)
     }
 
     // ========== Fulltext Index ==========
@@ -1090,6 +1109,69 @@ impl Parser {
         let name = self.expect_ident()?;
 
         Ok(Statement::DropFulltextIndex(DropFulltextIndexStatement { name }))
+    }
+
+    // ========== User Management ==========
+
+    /// CREATE USER username SET PASSWORD 'pass' ROLE role
+    fn parse_create_user(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Create)?;
+        self.expect(TokenKind::User)?;
+        let username = self.expect_ident()?;
+        self.expect(TokenKind::Set)?;
+        self.expect(TokenKind::Password)?;
+        let password = self.expect_string()?;
+        self.expect(TokenKind::Role)?;
+        let role = self.expect_ident()?;
+
+        Ok(Statement::CreateUser(CreateUserStatement {
+            username,
+            password,
+            role,
+        }))
+    }
+
+    /// DROP USER username
+    fn parse_drop_user(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Drop)?;
+        self.expect(TokenKind::User)?;
+        let username = self.expect_ident()?;
+
+        Ok(Statement::DropUser(DropUserStatement { username }))
+    }
+
+    /// ALTER USER username SET PASSWORD 'pass' / SET ROLE role
+    fn parse_alter_user(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Alter)?;
+        self.expect(TokenKind::User)?;
+        let username = self.expect_ident()?;
+        self.expect(TokenKind::Set)?;
+
+        let mut password = None;
+        let mut role = None;
+
+        // Parse SET PASSWORD and/or SET ROLE
+        if self.check(TokenKind::Password) {
+            self.advance();
+            password = Some(self.expect_string()?);
+
+            // Check for additional SET ROLE
+            if self.check(TokenKind::Role) {
+                self.advance();
+                role = Some(self.expect_ident()?);
+            }
+        } else if self.check(TokenKind::Role) {
+            self.advance();
+            role = Some(self.expect_ident()?);
+        } else {
+            return Err(self.unexpected_token("PASSWORD or ROLE"));
+        }
+
+        Ok(Statement::AlterUser(AlterUserStatement {
+            username,
+            password,
+            role,
+        }))
     }
 
     fn current_span(&self) -> Span {
@@ -1549,6 +1631,19 @@ impl Parser {
                 }
             }
             _ => Err(self.unexpected_token("identifier")),
+        }
+    }
+
+    fn expect_string(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::String(_)) => {
+                if let TokenKind::String(s) = self.advance().unwrap().kind {
+                    Ok(s)
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => Err(self.unexpected_token("string literal")),
         }
     }
 

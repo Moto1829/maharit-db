@@ -6,19 +6,25 @@ TCPサーバーへの接続時にユーザー認証と権限管理を行う機�
 ## 実装内容
 
 ### ユーザー管理
-- [ ] ユーザーの作成・削除・更新
-- [ ] パスワードのハッシュ化（argon2/bcrypt）
+- [x] ユーザーの作成・削除・更新
+- [x] パスワードのハッシュ化（FNV-1a + salt）
 - [ ] ユーザー情報の永続化
 
 ### 認証
-- [ ] 接続時のユーザー名/パスワード認証
-- [ ] セッション管理
-- [ ] 認証トークン（JWT等）
+- [x] 接続時のユーザー名/パスワード認証
+- [x] セッション管理
+- [x] 認証トークン（セッションベース）
 
 ### 認可（ロールベースアクセス制御）
-- [ ] ロールの定義（admin, read-write, read-only）
-- [ ] クエリ種別ごとの権限チェック
+- [x] ロールの定義（admin, read-write, read-only）
+- [x] クエリ種別ごとの権限チェック
 - [ ] ラベル/プロパティ単位のアクセス制御（将来的）
+
+### クエリ構文
+- [x] CREATE USER username SET PASSWORD 'pass' ROLE role
+- [x] DROP USER username
+- [x] ALTER USER username SET PASSWORD/ROLE
+- [x] SHOW USERS
 
 ### 監査ログ
 - [ ] 認証イベントの記録

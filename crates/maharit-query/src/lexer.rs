@@ -83,6 +83,11 @@ pub enum TokenKind {
     Contains,
     Fulltext,
     Index,
+    // ユーザー管理用キーワード
+    User,
+    Password,
+    Role,
+    Alter,
 
     // 識別子とリテラル
     Ident(String),
@@ -178,6 +183,10 @@ impl fmt::Display for TokenKind {
             TokenKind::Contains => write!(f, "CONTAINS"),
             TokenKind::Fulltext => write!(f, "FULLTEXT"),
             TokenKind::Index => write!(f, "INDEX"),
+            TokenKind::User => write!(f, "USER"),
+            TokenKind::Password => write!(f, "PASSWORD"),
+            TokenKind::Role => write!(f, "ROLE"),
+            TokenKind::Alter => write!(f, "ALTER"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -488,6 +497,10 @@ impl<'a> Lexer<'a> {
             "CONTAINS" => TokenKind::Contains,
             "FULLTEXT" => TokenKind::Fulltext,
             "INDEX" => TokenKind::Index,
+            "USER" => TokenKind::User,
+            "PASSWORD" => TokenKind::Password,
+            "ROLE" => TokenKind::Role,
+            "ALTER" => TokenKind::Alter,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

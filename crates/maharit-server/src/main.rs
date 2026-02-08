@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod metrics;
 mod repl;
 pub mod tcp_server;
