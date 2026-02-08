@@ -21,9 +21,9 @@
 - [x] 復元の検証
 
 ### CLIコマンド
-- [ ] `maharit backup --output backup.tar.gz`
-- [ ] `maharit restore --input backup.tar.gz`
-- [ ] `maharit backup --list` - バックアップ一覧
+- [x] `maharit backup --output backup.tar.gz`
+- [x] `maharit restore --input backup.tar.gz`
+- [x] `maharit backup --list` - バックアップ一覧
 
 ### スケジュールバックアップ
 - [ ] 定期バックアップの設定
