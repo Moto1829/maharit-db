@@ -5,7 +5,7 @@ pub mod lexer;
 pub mod parser;
 pub mod planner;
 
-pub use cache::{CacheStats, QueryCache};
+pub use cache::{CacheStats, PlanCache, QueryCache};
 pub use executor::{ExecuteError, Executor, ResultSet, Row, Value};
 pub use lexer::{Lexer, LexerError, Span, Token, TokenKind};
 pub use parser::{ParseError, Parser};

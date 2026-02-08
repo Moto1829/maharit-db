@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::ast::Statement;
 use crate::parser::{ParseError, Parser};
+use crate::planner::{GraphStats, QueryPlan, build_plan_with_stats};
 
 /// A cached query entry with usage tracking.
 #[derive(Debug, Clone)]
@@ -144,6 +145,122 @@ impl QueryCache {
     }
 
     /// Evict the least recently used entry.
+    fn evict_lru(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+
+        let lru_key = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_accessed)
+            .map(|(key, _)| key.clone());
+
+        if let Some(key) = lru_key {
+            self.entries.remove(&key);
+        }
+    }
+}
+
+/// A cached plan entry with the graph stats snapshot it was built with.
+#[derive(Debug, Clone)]
+struct PlanCacheEntry {
+    plan: QueryPlan,
+    /// Node count when the plan was built (for staleness detection).
+    node_count: u64,
+    /// Edge count when the plan was built (for staleness detection).
+    edge_count: u64,
+    last_accessed: u64,
+}
+
+/// Cache for execution plans built from parsed statements.
+///
+/// Plans are keyed by normalized query string and invalidated when
+/// graph statistics change significantly (node/edge count differs).
+#[derive(Debug)]
+pub struct PlanCache {
+    entries: HashMap<String, PlanCacheEntry>,
+    capacity: usize,
+    clock: u64,
+    total_hits: u64,
+    total_misses: u64,
+}
+
+impl PlanCache {
+    /// Create a new plan cache with the given capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            capacity,
+            clock: 0,
+            total_hits: 0,
+            total_misses: 0,
+        }
+    }
+
+    /// Get a cached plan or build and cache one from the statement and stats.
+    pub fn get_or_build(
+        &mut self,
+        query: &str,
+        stmt: &Statement,
+        stats: &GraphStats,
+    ) -> QueryPlan {
+        let normalized = normalize_query(query);
+
+        if let Some(entry) = self.entries.get_mut(&normalized) {
+            // Check if the plan is still valid (stats haven't changed much)
+            if entry.node_count == stats.node_count && entry.edge_count == stats.edge_count {
+                self.clock += 1;
+                entry.last_accessed = self.clock;
+                self.total_hits += 1;
+                return entry.plan.clone();
+            }
+            // Stats changed - invalidate this entry
+            self.entries.remove(&normalized);
+        }
+
+        // Build a new plan
+        self.total_misses += 1;
+        let plan = build_plan_with_stats(stmt, stats);
+
+        if self.capacity > 0 {
+            if self.entries.len() >= self.capacity {
+                self.evict_lru();
+            }
+
+            self.clock += 1;
+            self.entries.insert(
+                normalized,
+                PlanCacheEntry {
+                    plan: plan.clone(),
+                    node_count: stats.node_count,
+                    edge_count: stats.edge_count,
+                    last_accessed: self.clock,
+                },
+            );
+        }
+
+        plan
+    }
+
+    /// Get cache statistics.
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            size: self.entries.len(),
+            capacity: self.capacity,
+            hits: self.total_hits,
+            misses: self.total_misses,
+        }
+    }
+
+    /// Clear all cached plans.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.total_hits = 0;
+        self.total_misses = 0;
+        self.clock = 0;
+    }
+
     fn evict_lru(&mut self) {
         if self.entries.is_empty() {
             return;
@@ -321,6 +438,107 @@ mod tests {
         assert!(!cache.contains("MATCH (n) RETURN n"));
         cache.get_or_parse("MATCH (n) RETURN n").unwrap();
         assert!(cache.contains("MATCH (n) RETURN n"));
+    }
+
+    // ===== PlanCache tests =====
+
+    #[test]
+    fn test_plan_cache_hit() {
+        let mut cache = PlanCache::new(10);
+        let stats = GraphStats::simple(100, 50);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let plan1 = cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+        let plan2 = cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+
+        assert_eq!(plan1.nodes.len(), plan2.nodes.len());
+
+        let cache_stats = cache.stats();
+        assert_eq!(cache_stats.hits, 1);
+        assert_eq!(cache_stats.misses, 1);
+    }
+
+    #[test]
+    fn test_plan_cache_invalidated_by_stats_change() {
+        let mut cache = PlanCache::new(10);
+        let stats1 = GraphStats::simple(100, 50);
+        let stats2 = GraphStats::simple(200, 100); // Different counts
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats1);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 0);
+
+        // Same query but different stats - should miss (plan invalidated)
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats2);
+        assert_eq!(cache.stats().misses, 2);
+        assert_eq!(cache.stats().hits, 0);
+    }
+
+    #[test]
+    fn test_plan_cache_same_stats_hits() {
+        let mut cache = PlanCache::new(10);
+        let stats = GraphStats::simple(100, 50);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 2);
+    }
+
+    #[test]
+    fn test_plan_cache_clear() {
+        let mut cache = PlanCache::new(10);
+        let stats = GraphStats::simple(100, 50);
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        cache.get_or_build("MATCH (n:Person) RETURN n", &stmt, &stats);
+        assert_eq!(cache.stats().size, 1);
+
+        cache.clear();
+        assert_eq!(cache.stats().size, 0);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().misses, 0);
+    }
+
+    #[test]
+    fn test_plan_cache_lru_eviction() {
+        let mut cache = PlanCache::new(2);
+        let stats = GraphStats::simple(100, 50);
+
+        let stmt_a = Parser::new("CREATE (a:A)").unwrap().parse().unwrap();
+        let stmt_b = Parser::new("CREATE (b:B)").unwrap().parse().unwrap();
+        let stmt_c = Parser::new("CREATE (c:C)").unwrap().parse().unwrap();
+
+        cache.get_or_build("CREATE (a:A)", &stmt_a, &stats);
+        cache.get_or_build("CREATE (b:B)", &stmt_b, &stats);
+
+        // Access a:A to make it more recent
+        cache.get_or_build("CREATE (a:A)", &stmt_a, &stats);
+
+        // Add c:C - should evict b:B
+        cache.get_or_build("CREATE (c:C)", &stmt_c, &stats);
+
+        assert_eq!(cache.stats().size, 2);
     }
 
     #[test]
