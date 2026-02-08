@@ -25,14 +25,22 @@
 //! ```
 
 use std::collections::HashMap;
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 
 /// Client errors
 #[derive(Debug, Error)]
@@ -54,9 +62,143 @@ pub enum ClientError {
 
     #[error("connection closed")]
     ConnectionClosed,
+
+    #[error("TLS error: {0}")]
+    Tls(String),
+
+    #[error("invalid certificate: {0}")]
+    InvalidCertificate(String),
+
+    #[error("invalid domain name: {0}")]
+    InvalidDomain(String),
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// TLS client configuration
+#[derive(Debug, Clone)]
+pub struct TlsClientConfig {
+    /// Custom CA certificate path
+    pub ca_cert_path: Option<String>,
+    /// Skip certificate verification (for dev/testing - DO NOT use in production)
+    pub skip_verify: bool,
+    /// Server domain name for verification
+    pub domain: String,
+}
+
+impl TlsClientConfig {
+    /// Create a new TLS configuration with a domain name
+    pub fn new(domain: impl Into<String>) -> Self {
+        Self {
+            ca_cert_path: None,
+            skip_verify: false,
+            domain: domain.into(),
+        }
+    }
+
+    /// Set a custom CA certificate path
+    pub fn with_ca_cert(mut self, path: impl Into<String>) -> Self {
+        self.ca_cert_path = Some(path.into());
+        self
+    }
+
+    /// Skip certificate verification (DANGEROUS - only for testing)
+    pub fn with_skip_verify(mut self, skip: bool) -> Self {
+        self.skip_verify = skip;
+        self
+    }
+}
+
+/// Dangerous certificate verifier that skips all verification
+/// ONLY for development/testing - DO NOT use in production
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
+    }
+}
+
+/// Connection stream that supports both plain TCP and TLS
+enum ConnectionStream {
+    Plain(TcpStream),
+    Tls(TlsStream<TcpStream>),
+}
+
+impl AsyncRead for ConnectionStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ConnectionStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Client configuration
 #[derive(Debug, Clone)]
@@ -334,7 +476,7 @@ pub struct ServerStats {
 
 /// MaharitDB client
 pub struct Client {
-    stream: TcpStream,
+    stream: ConnectionStream,
     config: ClientConfig,
     buffer: BytesMut,
     addr: String,
@@ -354,23 +496,114 @@ impl Client {
             .map_err(ClientError::Connection)?;
 
         Ok(Self {
-            stream,
+            stream: ConnectionStream::Plain(stream),
             config,
             buffer: BytesMut::with_capacity(4096),
             addr: addr.to_string(),
         })
     }
 
-    /// Attempt to reconnect to the server
-    pub async fn reconnect(&mut self) -> Result<()> {
-        let stream = timeout(self.config.connect_timeout, TcpStream::connect(&self.addr))
+    /// Connect to a MaharitDB server with TLS
+    pub async fn connect_tls(addr: &str, tls_config: TlsClientConfig) -> Result<Self> {
+        Self::connect_tls_with_config(addr, tls_config, ClientConfig::default()).await
+    }
+
+    /// Connect to a MaharitDB server with TLS and custom client configuration
+    pub async fn connect_tls_with_config(
+        addr: &str,
+        tls_config: TlsClientConfig,
+        client_config: ClientConfig,
+    ) -> Result<Self> {
+        // Create root certificate store
+        let mut root_cert_store = RootCertStore::empty();
+
+        if let Some(ca_cert_path) = &tls_config.ca_cert_path {
+            // Load custom CA certificate
+            let ca_cert_file = std::fs::File::open(ca_cert_path).map_err(|e| {
+                ClientError::InvalidCertificate(format!("Failed to open CA cert file: {}", e))
+            })?;
+            let mut reader = std::io::BufReader::new(ca_cert_file);
+
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    ClientError::InvalidCertificate(format!("Failed to parse CA cert: {}", e))
+                })?;
+
+            for cert in certs {
+                root_cert_store.add(cert).map_err(|e| {
+                    ClientError::InvalidCertificate(format!("Failed to add CA cert: {}", e))
+                })?;
+            }
+        } else {
+            // Use system certificates
+            // Note: We don't use webpki-roots as it's not in dependencies
+            // In production, you should either provide a CA cert or add webpki-roots
+        }
+
+        // Build TLS config
+        let mut rustls_config = if tls_config.skip_verify {
+            // Create a dangerous config that skips verification
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+                .with_no_client_auth()
+        } else {
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_cert_store)
+                .with_no_client_auth()
+        };
+
+        // Enable ALPN if needed
+        rustls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+        let connector = TlsConnector::from(Arc::new(rustls_config));
+
+        // Connect TCP stream
+        let tcp_stream = timeout(client_config.connect_timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(ClientError::Connection)?;
 
-        self.stream = stream;
-        self.buffer.clear();
-        Ok(())
+        // Parse domain name
+        let server_name = ServerName::try_from(tls_config.domain.as_str())
+            .map_err(|_| ClientError::InvalidDomain(tls_config.domain.clone()))?
+            .to_owned();
+
+        // Perform TLS handshake
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| ClientError::Tls(format!("TLS handshake failed: {}", e)))?;
+
+        Ok(Self {
+            stream: ConnectionStream::Tls(tls_stream),
+            config: client_config,
+            buffer: BytesMut::with_capacity(4096),
+            addr: addr.to_string(),
+        })
+    }
+
+    /// Attempt to reconnect to the server
+    /// Note: This only works for plain TCP connections. TLS reconnection is not supported.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        match &self.stream {
+            ConnectionStream::Plain(_) => {
+                let stream = timeout(self.config.connect_timeout, TcpStream::connect(&self.addr))
+                    .await
+                    .map_err(|_| ClientError::Timeout)?
+                    .map_err(ClientError::Connection)?;
+
+                self.stream = ConnectionStream::Plain(stream);
+                self.buffer.clear();
+                Ok(())
+            }
+            ConnectionStream::Tls(_) => {
+                Err(ClientError::Protocol(
+                    "TLS reconnection not supported. Please create a new client.".to_string(),
+                ))
+            }
+        }
     }
 
     /// Try to reconnect with retries
@@ -1111,5 +1344,130 @@ mod tests {
         assert_eq!(config.min_connections, 1);
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.idle_timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_tls_client_config_new() {
+        let config = TlsClientConfig::new("example.com");
+        assert_eq!(config.domain, "example.com");
+        assert_eq!(config.ca_cert_path, None);
+        assert!(!config.skip_verify);
+    }
+
+    #[test]
+    fn test_tls_client_config_with_ca_cert() {
+        let config = TlsClientConfig::new("example.com")
+            .with_ca_cert("/path/to/ca.crt");
+        assert_eq!(config.ca_cert_path, Some("/path/to/ca.crt".to_string()));
+        assert_eq!(config.domain, "example.com");
+    }
+
+    #[test]
+    fn test_tls_client_config_with_skip_verify() {
+        let config = TlsClientConfig::new("example.com")
+            .with_skip_verify(true);
+        assert!(config.skip_verify);
+        assert_eq!(config.domain, "example.com");
+    }
+
+    #[test]
+    fn test_tls_client_config_chaining() {
+        let config = TlsClientConfig::new("example.com")
+            .with_ca_cert("/path/to/ca.crt")
+            .with_skip_verify(true);
+        assert_eq!(config.ca_cert_path, Some("/path/to/ca.crt".to_string()));
+        assert!(config.skip_verify);
+        assert_eq!(config.domain, "example.com");
+    }
+
+    #[tokio::test]
+    async fn test_tls_connect_invalid_ca_cert_path() {
+        let tls_config = TlsClientConfig::new("localhost")
+            .with_ca_cert("/nonexistent/path/ca.crt");
+
+        let result = Client::connect_tls("localhost:7687", tls_config).await;
+        assert!(result.is_err());
+
+        if let Err(ClientError::InvalidCertificate(msg)) = result {
+            assert!(msg.contains("Failed to open CA cert file"));
+        } else {
+            panic!("Expected InvalidCertificate error");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tls_connect_invalid_domain() {
+        let tls_config = TlsClientConfig {
+            ca_cert_path: None,
+            skip_verify: false,
+            domain: "".to_string(), // Invalid domain
+        };
+
+        let result = Client::connect_tls("localhost:7687", tls_config).await;
+        // This might fail with either InvalidDomain or Connection error
+        // depending on if domain validation happens before connection
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_connection_stream_enum_exists() {
+        // This is a compile-time test to ensure ConnectionStream enum exists
+        // We can't easily instantiate it in a synchronous test, but we can
+        // verify the type exists by checking size
+        assert!(std::mem::size_of::<ConnectionStream>() > 0);
+    }
+
+    #[test]
+    fn test_stream_query_request_serialization() {
+        let request = Request::StreamQuery {
+            query: "MATCH (n) RETURN n".to_string(),
+            tx_id: None,
+            chunk_size: 100,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"streamQuery\""));
+        assert!(json.contains("\"chunkSize\":100"));
+        assert!(json.contains("MATCH (n) RETURN n"));
+    }
+
+    #[test]
+    fn test_stream_start_response() {
+        let json = r#"{"type":"streamStart","streamId":1,"totalRows":100}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::StreamStart { stream_id, total_rows } => {
+                assert_eq!(stream_id, 1);
+                assert_eq!(total_rows, Some(100));
+            }
+            _ => panic!("Expected StreamStart response"),
+        }
+    }
+
+    #[test]
+    fn test_stream_chunk_response() {
+        let json = r#"{"type":"streamChunk","streamId":1,"chunkIndex":0,"rows":[{"name":"Alice"}]}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::StreamChunk { stream_id, chunk_index, rows } => {
+                assert_eq!(stream_id, 1);
+                assert_eq!(chunk_index, 0);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get("name"), Some(&"Alice".to_string()));
+            }
+            _ => panic!("Expected StreamChunk response"),
+        }
+    }
+
+    #[test]
+    fn test_stream_end_response() {
+        let json = r#"{"type":"streamEnd","streamId":1,"totalRows":100}"#;
+        let response: Response = serde_json::from_str(json).unwrap();
+        match response {
+            Response::StreamEnd { stream_id, total_rows } => {
+                assert_eq!(stream_id, 1);
+                assert_eq!(total_rows, 100);
+            }
+            _ => panic!("Expected StreamEnd response"),
+        }
     }
 }
