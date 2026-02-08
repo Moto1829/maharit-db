@@ -671,26 +671,91 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                     }
                     Pattern::Path(pp) => {
                         let est_start = estimate_node_scan_with_stats(&pp.start, stats);
-                        nodes.push(PlanNode::new(
-                            "NodeByLabelScan",
-                            est_start,
-                            est_start / 10 + 1,
-                            "",
-                        ));
-                        for seg in &pp.segments {
-                            let est_expand = stats.edge_count.max(1);
-                            let edge_info = seg
+
+                        // Join order optimization: for single-segment paths, check if
+                        // starting from the end node would be cheaper (smaller label count)
+                        if pp.segments.len() == 1 {
+                            let end_node = &pp.segments[0].node;
+                            let est_end = estimate_node_scan_with_stats(end_node, stats);
+
+                            let start_label = pp
+                                .start
+                                .label
+                                .as_ref()
+                                .map(|l| format!(":{}", l))
+                                .unwrap_or_default();
+                            let end_label = end_node
+                                .label
+                                .as_ref()
+                                .map(|l| format!(":{}", l))
+                                .unwrap_or_default();
+                            let edge_info = pp.segments[0]
                                 .edge
                                 .edge_type
                                 .as_ref()
                                 .map(|t| format!(":{}", t))
                                 .unwrap_or_default();
+
+                            if est_end < est_start && end_node.label.is_some() {
+                                // Reverse: scan end node first, expand backward
+                                nodes.push(PlanNode::new(
+                                    "NodeByLabelScan",
+                                    est_end,
+                                    est_end / 10 + 1,
+                                    &format!("{} (reordered)", end_label),
+                                ));
+                                let expand_est = (est_end * stats.edge_count / stats.node_count.max(1)).max(1);
+                                nodes.push(PlanNode::new(
+                                    "ExpandReverse",
+                                    expand_est,
+                                    expand_est / 5 + 1,
+                                    &format!("{} (join reordered: {} < {})", edge_info, end_label, start_label),
+                                ));
+                            } else {
+                                // Normal order
+                                nodes.push(PlanNode::new(
+                                    "NodeByLabelScan",
+                                    est_start,
+                                    est_start / 10 + 1,
+                                    &start_label,
+                                ));
+                                let est_expand = stats.edge_count.max(1);
+                                nodes.push(PlanNode::new(
+                                    "Expand",
+                                    est_expand,
+                                    est_expand / 5 + 1,
+                                    &edge_info,
+                                ));
+                            }
+                        } else {
+                            // Multi-segment path: use original ordering
+                            let start_label = pp
+                                .start
+                                .label
+                                .as_ref()
+                                .map(|l| format!(":{}", l))
+                                .unwrap_or_default();
                             nodes.push(PlanNode::new(
-                                "Expand",
-                                est_expand,
-                                est_expand / 5 + 1,
-                                &edge_info,
+                                "NodeByLabelScan",
+                                est_start,
+                                est_start / 10 + 1,
+                                &start_label,
                             ));
+                            for seg in &pp.segments {
+                                let est_expand = stats.edge_count.max(1);
+                                let edge_info = seg
+                                    .edge
+                                    .edge_type
+                                    .as_ref()
+                                    .map(|t| format!(":{}", t))
+                                    .unwrap_or_default();
+                                nodes.push(PlanNode::new(
+                                    "Expand",
+                                    est_expand,
+                                    est_expand / 5 + 1,
+                                    &edge_info,
+                                ));
+                            }
                         }
                     }
                 }
@@ -1236,5 +1301,99 @@ mod tests {
         assert!(stats.has_index("Person", "name"));
         assert!(!stats.has_index("Person", "age"));
         assert!(!stats.has_index("Company", "name"));
+    }
+
+    // ===== Join order optimization tests =====
+
+    fn stats_with_labels(labels: &[(&str, u64)], edge_count: u64) -> GraphStats {
+        let mut label_counts = HashMap::new();
+        let mut total = 0u64;
+        for &(label, count) in labels {
+            label_counts.insert(label.to_string(), count);
+            total += count;
+        }
+        GraphStats {
+            node_count: total,
+            edge_count,
+            label_counts,
+            indexed_properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn test_join_reorder_smaller_end_node() {
+        // Person has 1000 nodes, Admin has 5 nodes
+        // (a:Person)-[:MANAGES]->(b:Admin) should start from Admin
+        let stats = stats_with_labels(&[("Person", 1000), ("Admin", 5)], 500);
+
+        let stmt = Parser::new("MATCH (a:Person)-[:MANAGES]->(b:Admin) RETURN a, b")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"ExpandReverse"));
+
+        // First scan should be Admin (smaller)
+        let scan = &plan.nodes[0];
+        assert_eq!(scan.operator, "NodeByLabelScan");
+        assert_eq!(scan.estimated_rows, 5);
+        assert!(scan.details.contains("reordered"));
+    }
+
+    #[test]
+    fn test_join_no_reorder_when_start_is_smaller() {
+        // Admin has 5, Person has 1000
+        // (a:Admin)-[:REPORTS_TO]->(b:Person) should keep original order
+        let stats = stats_with_labels(&[("Admin", 5), ("Person", 1000)], 500);
+
+        let stmt = Parser::new("MATCH (a:Admin)-[:REPORTS_TO]->(b:Person) RETURN a, b")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"Expand"));
+        assert!(!ops.contains(&"ExpandReverse"));
+
+        let scan = &plan.nodes[0];
+        assert_eq!(scan.estimated_rows, 5);
+    }
+
+    #[test]
+    fn test_join_reorder_shows_edge_info() {
+        let stats = stats_with_labels(&[("Person", 1000), ("Admin", 5)], 500);
+
+        let stmt = Parser::new("MATCH (a:Person)-[:MANAGES]->(b:Admin) RETURN a, b")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let expand = plan
+            .nodes
+            .iter()
+            .find(|n| n.operator == "ExpandReverse")
+            .unwrap();
+        assert!(expand.details.contains("MANAGES"));
+        assert!(expand.details.contains("reordered"));
+    }
+
+    #[test]
+    fn test_join_equal_labels_no_reorder() {
+        // Same count: keep original order
+        let stats = stats_with_labels(&[("Person", 100), ("Employee", 100)], 500);
+
+        let stmt = Parser::new("MATCH (a:Person)-[:WORKS_AS]->(b:Employee) RETURN a, b")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"Expand"));
+        assert!(!ops.contains(&"ExpandReverse"));
     }
 }
