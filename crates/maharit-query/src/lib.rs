@@ -9,4 +9,4 @@ pub use cache::{CacheStats, QueryCache};
 pub use executor::{ExecuteError, Executor, ResultSet, Row, Value};
 pub use lexer::{Lexer, LexerError, Span, Token, TokenKind};
 pub use parser::{ParseError, Parser};
-pub use planner::{QueryPlan, build_plan};
+pub use planner::{GraphStats, QueryPlan, build_plan, build_plan_with_stats};

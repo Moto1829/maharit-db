@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::ast::*;
+use maharit_core::Graph;
 
 /// クエリ実行計画のノード
 #[derive(Debug, Clone)]
@@ -113,6 +115,101 @@ impl QueryPlan {
 
         Ok(())
     }
+}
+
+/// Statistics about the graph for query cost estimation.
+#[derive(Debug, Clone)]
+pub struct GraphStats {
+    /// Total number of nodes.
+    pub node_count: u64,
+    /// Total number of edges.
+    pub edge_count: u64,
+    /// Number of nodes per label.
+    pub label_counts: HashMap<String, u64>,
+}
+
+impl GraphStats {
+    /// Collect statistics from a graph.
+    pub fn from_graph(graph: &Graph) -> Self {
+        let mut label_counts: HashMap<String, u64> = HashMap::new();
+        for node in graph.nodes() {
+            *label_counts.entry(node.label.clone()).or_insert(0) += 1;
+        }
+
+        Self {
+            node_count: graph.node_count() as u64,
+            edge_count: graph.edge_count() as u64,
+            label_counts,
+        }
+    }
+
+    /// Create stats with just total counts (no label distribution).
+    pub fn simple(node_count: u64, edge_count: u64) -> Self {
+        Self {
+            node_count,
+            edge_count,
+            label_counts: HashMap::new(),
+        }
+    }
+
+    /// Estimate the number of nodes with a given label.
+    pub fn estimate_label_count(&self, label: &str) -> u64 {
+        if let Some(&count) = self.label_counts.get(label) {
+            count
+        } else if self.label_counts.is_empty() {
+            // No label distribution available, use 10% heuristic
+            (self.node_count / 10).max(1)
+        } else {
+            // Label not found in stats, likely 0 but estimate 1
+            1
+        }
+    }
+}
+
+/// Build a query plan from a statement using graph statistics.
+pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan {
+    let nodes = match stmt {
+        Statement::Create(create) => plan_create(create),
+        Statement::Match(m) => plan_match_with_stats(m, stats),
+        Statement::Delete(d) => plan_delete_with_stats(d, stats),
+        Statement::Union(u) => plan_union_with_stats(u, stats),
+        Statement::MatchCreate(mc) => plan_match_create_with_stats(mc, stats),
+        Statement::MatchSet(ms) => plan_match_set_with_stats(ms, stats),
+        Statement::Merge(merge) => plan_merge_with_stats(merge, stats),
+        Statement::MatchRemove(mr) => plan_match_remove_with_stats(mr, stats),
+        Statement::Unwind(uw) => plan_unwind(uw),
+        Statement::CreateConstraint(_) => {
+            vec![PlanNode::new("CreateConstraint", 1, 1, "")]
+        }
+        Statement::DropConstraint(_) => {
+            vec![PlanNode::new("DropConstraint", 1, 1, "")]
+        }
+        Statement::ShowConstraints => {
+            vec![PlanNode::new("ShowConstraints", 1, 1, "")]
+        }
+        Statement::CreateFulltextIndex(_) => {
+            vec![PlanNode::new("CreateFulltextIndex", 1, 1, "")]
+        }
+        Statement::DropFulltextIndex(_) => {
+            vec![PlanNode::new("DropFulltextIndex", 1, 1, "")]
+        }
+        Statement::CreateUser(_) => {
+            vec![PlanNode::new("CreateUser", 1, 1, "")]
+        }
+        Statement::DropUser(_) => {
+            vec![PlanNode::new("DropUser", 1, 1, "")]
+        }
+        Statement::AlterUser(_) => {
+            vec![PlanNode::new("AlterUser", 1, 1, "")]
+        }
+        Statement::ShowUsers => {
+            vec![PlanNode::new("ShowUsers", 1, 1, "")]
+        }
+        Statement::Explain(inner) => return build_plan_with_stats(inner, stats),
+        Statement::Profile(inner) => return build_plan_with_stats(inner, stats),
+    };
+
+    QueryPlan { nodes }
 }
 
 /// Build a query plan from a statement (without executing)
@@ -351,6 +448,277 @@ fn estimate_node_scan(np: &NodePattern, node_count: u64) -> u64 {
     }
 }
 
+fn estimate_node_scan_with_stats(np: &NodePattern, stats: &GraphStats) -> u64 {
+    if let Some(ref label) = np.label {
+        stats.estimate_label_count(label)
+    } else {
+        stats.node_count.max(1)
+    }
+}
+
+/// Check if a WHERE clause contains only property comparisons (pushable filters).
+fn is_pushable_filter(expr: &Expression) -> bool {
+    match expr {
+        Expression::BinaryOp(left, op, right) => match op {
+            BinaryOp::Eq | BinaryOp::Neq | BinaryOp::Lt | BinaryOp::Gt
+            | BinaryOp::Lte | BinaryOp::Gte => {
+                is_simple_operand(left) && is_simple_operand(right)
+            }
+            BinaryOp::And => is_pushable_filter(left) && is_pushable_filter(right),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_simple_operand(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::Property(_, _)
+            | Expression::Literal(_)
+            | Expression::Variable(_)
+    )
+}
+
+fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+
+    for segment in &m.segments {
+        for clause in &segment.match_clauses {
+            for pattern in &clause.patterns {
+                match pattern {
+                    Pattern::Node(np) => {
+                        let est = estimate_node_scan_with_stats(np, stats);
+                        let label_info = np
+                            .label
+                            .as_ref()
+                            .map(|l| format!(":{}", l))
+                            .unwrap_or_default();
+
+                        // Filter pushdown: if WHERE is a simple property comparison,
+                        // show it as part of the scan node
+                        if let Some(ref where_expr) = segment.where_clause {
+                            if is_pushable_filter(where_expr) {
+                                let filtered = (est / 2).max(1);
+                                nodes.push(PlanNode::new(
+                                    "NodeByLabelScan+Filter",
+                                    filtered,
+                                    est / 10 + 1,
+                                    &format!("{} (filter pushed down)", label_info),
+                                ));
+                                continue;
+                            }
+                        }
+
+                        nodes.push(PlanNode::new(
+                            "NodeByLabelScan",
+                            est,
+                            est / 10 + 1,
+                            &label_info,
+                        ));
+                    }
+                    Pattern::Path(pp) => {
+                        let est_start = estimate_node_scan_with_stats(&pp.start, stats);
+                        nodes.push(PlanNode::new(
+                            "NodeByLabelScan",
+                            est_start,
+                            est_start / 10 + 1,
+                            "",
+                        ));
+                        for seg in &pp.segments {
+                            let est_expand = stats.edge_count.max(1);
+                            let edge_info = seg
+                                .edge
+                                .edge_type
+                                .as_ref()
+                                .map(|t| format!(":{}", t))
+                                .unwrap_or_default();
+                            nodes.push(PlanNode::new(
+                                "Expand",
+                                est_expand,
+                                est_expand / 5 + 1,
+                                &edge_info,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only add separate Filter if not already pushed down
+        if segment.where_clause.is_some() {
+            let already_pushed = nodes
+                .last()
+                .map(|n| n.operator == "NodeByLabelScan+Filter")
+                .unwrap_or(false);
+
+            if !already_pushed {
+                let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(stats.node_count);
+                let filtered = (prev_est / 2).max(1);
+                nodes.push(PlanNode::new("Filter", filtered, filtered / 10 + 1, ""));
+            }
+        }
+
+        if segment.with_clause.is_some() {
+            let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+            nodes.push(PlanNode::new(
+                "EagerAggregation",
+                prev_est,
+                prev_est / 5 + 1,
+                "",
+            ));
+        }
+    }
+
+    let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+    nodes.push(PlanNode::new(
+        "Projection",
+        final_est,
+        final_est / 10 + 1,
+        "",
+    ));
+
+    if let Some(ref ob) = m.return_clause.order_by {
+        nodes.push(PlanNode::new(
+            "Sort",
+            final_est,
+            final_est * 2 + 1,
+            &format!("{} key(s)", ob.items.len()),
+        ));
+    }
+    if m.return_clause.limit.is_some() || m.return_clause.skip.is_some() {
+        nodes.push(PlanNode::new("Limit", final_est, 1, ""));
+    }
+
+    nodes
+}
+
+fn plan_delete_with_stats(d: &DeleteStatement, stats: &GraphStats) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+    let est = stats.node_count;
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        est,
+        est / 10 + 1,
+        "",
+    ));
+    if d.where_clause.is_some() {
+        let filtered = est / 2;
+        nodes.push(PlanNode::new("Filter", filtered, filtered / 10 + 1, ""));
+    }
+    let target = d.delete_clause.variables.len() as u64;
+    nodes.push(PlanNode::new("Delete", target, target, ""));
+    nodes
+}
+
+fn plan_union_with_stats(u: &UnionStatement, stats: &GraphStats) -> Vec<PlanNode> {
+    let mut children = Vec::new();
+    for query in &u.queries {
+        let sub = plan_match_with_stats(query, stats);
+        for n in sub {
+            children.push(n);
+        }
+    }
+    let total_est: u64 = children.iter().map(|n| n.estimated_rows).sum();
+    let mut union_node = PlanNode::new("Union", total_est, total_est / 5 + 1, "");
+    union_node.children = children;
+    vec![union_node]
+}
+
+fn plan_match_create_with_stats(
+    mc: &MatchCreateStatement,
+    stats: &GraphStats,
+) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        stats.node_count,
+        stats.node_count / 10 + 1,
+        "",
+    ));
+    if mc.where_clause.is_some() {
+        nodes.push(PlanNode::new(
+            "Filter",
+            stats.node_count / 2,
+            stats.node_count / 20 + 1,
+            "",
+        ));
+    }
+    let create_count = mc.create_clause.patterns.len() as u64;
+    nodes.push(PlanNode::new("CreateNode", create_count, create_count, ""));
+    nodes
+}
+
+fn plan_match_set_with_stats(ms: &MatchSetStatement, stats: &GraphStats) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        stats.node_count,
+        stats.node_count / 10 + 1,
+        "",
+    ));
+    if ms.where_clause.is_some() {
+        nodes.push(PlanNode::new(
+            "Filter",
+            stats.node_count / 2,
+            stats.node_count / 20 + 1,
+            "",
+        ));
+    }
+    let set_count = ms.set_clause.items.len() as u64;
+    nodes.push(PlanNode::new("SetProperty", set_count, set_count, ""));
+    nodes
+}
+
+fn plan_merge_with_stats(merge: &MergeStatement, stats: &GraphStats) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+    if !merge.match_clauses.is_empty() {
+        nodes.push(PlanNode::new(
+            "NodeByLabelScan",
+            stats.node_count,
+            stats.node_count / 10 + 1,
+            "",
+        ));
+    }
+    let pattern_count = merge.patterns.len() as u64;
+    nodes.push(PlanNode::new(
+        "Merge",
+        pattern_count,
+        stats.node_count / 5 + stats.edge_count / 5 + 1,
+        "match-or-create",
+    ));
+    nodes
+}
+
+fn plan_match_remove_with_stats(
+    mr: &MatchRemoveStatement,
+    stats: &GraphStats,
+) -> Vec<PlanNode> {
+    let mut nodes = Vec::new();
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        stats.node_count,
+        stats.node_count / 10 + 1,
+        "",
+    ));
+    if mr.where_clause.is_some() {
+        nodes.push(PlanNode::new(
+            "Filter",
+            stats.node_count / 2,
+            stats.node_count / 20 + 1,
+            "",
+        ));
+    }
+    let remove_count = mr.remove_clause.items.len() as u64;
+    nodes.push(PlanNode::new(
+        "RemoveProperty",
+        remove_count,
+        remove_count,
+        "",
+    ));
+    nodes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +819,157 @@ mod tests {
             .parse()
             .unwrap();
         assert!(matches!(stmt, Statement::Profile(_)));
+    }
+
+    // ===== GraphStats tests =====
+
+    #[test]
+    fn test_graph_stats_from_graph() {
+        let mut graph = maharit_core::Graph::new();
+        graph.create_node("Person");
+        graph.create_node("Person");
+        graph.create_node("Person");
+        graph.create_node("Company");
+
+        let stats = GraphStats::from_graph(&graph);
+        assert_eq!(stats.node_count, 4);
+        assert_eq!(stats.edge_count, 0);
+        assert_eq!(stats.label_counts.get("Person"), Some(&3));
+        assert_eq!(stats.label_counts.get("Company"), Some(&1));
+    }
+
+    #[test]
+    fn test_graph_stats_estimate_label_count() {
+        let mut label_counts = HashMap::new();
+        label_counts.insert("Person".to_string(), 500);
+        label_counts.insert("Company".to_string(), 50);
+
+        let stats = GraphStats {
+            node_count: 550,
+            edge_count: 1000,
+            label_counts,
+        };
+
+        assert_eq!(stats.estimate_label_count("Person"), 500);
+        assert_eq!(stats.estimate_label_count("Company"), 50);
+        assert_eq!(stats.estimate_label_count("Unknown"), 1);
+    }
+
+    #[test]
+    fn test_graph_stats_simple_fallback() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        // No label distribution, should use 10% heuristic
+        assert_eq!(stats.estimate_label_count("Person"), 100);
+    }
+
+    #[test]
+    fn test_build_plan_with_stats_label_estimate() {
+        let mut label_counts = HashMap::new();
+        label_counts.insert("Person".to_string(), 500);
+        label_counts.insert("Company".to_string(), 50);
+
+        let stats = GraphStats {
+            node_count: 550,
+            edge_count: 1000,
+            label_counts,
+        };
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        // Should use actual label count (500) instead of 10% heuristic (55)
+        let scan = &plan.nodes[0];
+        assert_eq!(scan.operator, "NodeByLabelScan");
+        assert_eq!(scan.estimated_rows, 500);
+    }
+
+    #[test]
+    fn test_build_plan_with_stats_small_label() {
+        let mut label_counts = HashMap::new();
+        label_counts.insert("Person".to_string(), 500);
+        label_counts.insert("Admin".to_string(), 5);
+
+        let stats = GraphStats {
+            node_count: 505,
+            edge_count: 100,
+            label_counts,
+        };
+
+        let stmt = Parser::new("MATCH (n:Admin) RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let scan = &plan.nodes[0];
+        assert_eq!(scan.estimated_rows, 5);
+    }
+
+    // ===== Filter pushdown tests =====
+
+    #[test]
+    fn test_filter_pushdown_simple_comparison() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.age > 30 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        // Simple property comparison should be pushed down
+        assert!(ops.contains(&"NodeByLabelScan+Filter"));
+        assert!(ops.iter().filter(|&&o| o == "Filter").count() == 0);
+    }
+
+    #[test]
+    fn test_filter_pushdown_equality() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"NodeByLabelScan+Filter"));
+    }
+
+    #[test]
+    fn test_filter_pushdown_and_conditions() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt =
+            Parser::new("MATCH (n:Person) WHERE n.age > 20 AND n.age < 60 RETURN n")
+                .unwrap()
+                .parse()
+                .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(ops.contains(&"NodeByLabelScan+Filter"));
+    }
+
+    #[test]
+    fn test_no_filter_pushdown_for_path() {
+        let stats = GraphStats::simple(1000, 5000);
+
+        let stmt =
+            Parser::new("MATCH (a:Person)-[:KNOWS]->(b) WHERE b.age > 30 RETURN a, b")
+                .unwrap()
+                .parse()
+                .unwrap();
+        let plan = build_plan_with_stats(&stmt, &stats);
+
+        let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
+        // Path patterns should not get pushdown (filter applies after expand)
+        assert!(ops.contains(&"Filter"));
+        assert!(!ops.contains(&"NodeByLabelScan+Filter"));
     }
 }
