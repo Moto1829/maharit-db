@@ -2473,6 +2473,22 @@ impl<'a> Executor<'a> {
                     "CONTAINS requires string operands".to_string(),
                 )),
             },
+            BinaryOp::StartsWith => match (left, right) {
+                (Value::String(s), Value::String(prefix)) => {
+                    Ok(Value::Bool(s.to_lowercase().starts_with(&prefix.to_lowercase())))
+                }
+                _ => Err(ExecuteError::TypeError(
+                    "STARTS WITH requires string operands".to_string(),
+                )),
+            },
+            BinaryOp::EndsWith => match (left, right) {
+                (Value::String(s), Value::String(suffix)) => {
+                    Ok(Value::Bool(s.to_lowercase().ends_with(&suffix.to_lowercase())))
+                }
+                _ => Err(ExecuteError::TypeError(
+                    "ENDS WITH requires string operands".to_string(),
+                )),
+            },
         }
     }
 
@@ -2546,6 +2562,16 @@ impl<'a> Executor<'a> {
                 Value::Float(n) => Ok(Value::Float(-n)),
                 _ => Err(ExecuteError::TypeError(
                     "negation requires number".to_string(),
+                )),
+            },
+            UnaryOp::IsNormalized => match val {
+                Value::String(s) => {
+                    use unicode_normalization::UnicodeNormalization;
+                    let nfc: String = s.nfc().collect();
+                    Ok(Value::Bool(*s == nfc))
+                }
+                _ => Err(ExecuteError::TypeError(
+                    "IS NORMALIZED requires string operand".to_string(),
                 )),
             },
         }
@@ -4992,5 +5018,137 @@ mod tests {
         } else {
             panic!("expected DropFulltextIndex statement");
         }
+    }
+
+    #[test]
+    fn test_starts_with_operator() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name STARTS WITH "Ali" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_ends_with_operator() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name ENDS WITH "ice" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_starts_with_case_insensitive() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name STARTS WITH "ali" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_ends_with_case_insensitive() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.name ENDS WITH "ICE" RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_is_normalized() {
+        let mut graph = Graph::new();
+        // NFC normalized string (precomposed)
+        execute(
+            &mut graph,
+            "CREATE (n:Text {value: \"\u{00e9}\"})",
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Text) WHERE n.value IS NORMALIZED RETURN n.value"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_is_not_normalized() {
+        let mut graph = Graph::new();
+        // NFD string (decomposed: e + combining acute accent)
+        execute(
+            &mut graph,
+            "CREATE (n:Text {value: \"e\u{0301}\"})",
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Text) WHERE n.value IS NORMALIZED RETURN n.value"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_string_operators_with_non_string() {
+        // WHERE clause errors are treated as non-matching (unwrap_or(false)),
+        // so type mismatches result in 0 rows rather than errors.
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {age: 30})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age STARTS WITH "3" RETURN n"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 0);
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age ENDS WITH "0" RETURN n"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 0);
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age IS NORMALIZED RETURN n"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 0);
     }
 }

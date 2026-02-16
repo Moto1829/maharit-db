@@ -88,6 +88,10 @@ pub enum TokenKind {
     Password,
     Role,
     Alter,
+    // 文字列演算子用キーワード
+    Starts,
+    Ends,
+    Normalized,
 
     // 識別子とリテラル
     Ident(String),
@@ -187,6 +191,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Password => write!(f, "PASSWORD"),
             TokenKind::Role => write!(f, "ROLE"),
             TokenKind::Alter => write!(f, "ALTER"),
+            TokenKind::Starts => write!(f, "STARTS"),
+            TokenKind::Ends => write!(f, "ENDS"),
+            TokenKind::Normalized => write!(f, "NORMALIZED"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -501,6 +508,9 @@ impl<'a> Lexer<'a> {
             "PASSWORD" => TokenKind::Password,
             "ROLE" => TokenKind::Role,
             "ALTER" => TokenKind::Alter,
+            "STARTS" => TokenKind::Starts,
+            "ENDS" => TokenKind::Ends,
+            "NORMALIZED" => TokenKind::Normalized,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

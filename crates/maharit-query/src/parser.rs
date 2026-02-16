@@ -1441,6 +1441,34 @@ impl Parser {
             Some(TokenKind::Gte) => BinaryOp::Gte,
             Some(TokenKind::RegexMatch) => BinaryOp::Regex,
             Some(TokenKind::Contains) => BinaryOp::Contains,
+            Some(TokenKind::Starts) => {
+                self.advance(); // consume STARTS
+                self.expect(TokenKind::With)?; // expect WITH
+                let right = self.parse_additive()?;
+                return Ok(Expression::BinaryOp(
+                    Box::new(left),
+                    BinaryOp::StartsWith,
+                    Box::new(right),
+                ));
+            }
+            Some(TokenKind::Ends) => {
+                self.advance(); // consume ENDS
+                self.expect(TokenKind::With)?; // expect WITH
+                let right = self.parse_additive()?;
+                return Ok(Expression::BinaryOp(
+                    Box::new(left),
+                    BinaryOp::EndsWith,
+                    Box::new(right),
+                ));
+            }
+            Some(TokenKind::Is) => {
+                self.advance(); // consume IS
+                if self.check(TokenKind::Normalized) {
+                    self.advance(); // consume NORMALIZED
+                    return Ok(Expression::UnaryOp(UnaryOp::IsNormalized, Box::new(left)));
+                }
+                return Err(self.unexpected_token("NORMALIZED"));
+            }
             _ => return Ok(left),
         };
 

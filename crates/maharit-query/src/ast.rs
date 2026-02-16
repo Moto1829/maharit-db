@@ -363,6 +363,8 @@ pub enum BinaryOp {
     Div,
     Regex,
     Contains,
+    StartsWith,
+    EndsWith,
 }
 
 /// 単項演算子
@@ -370,6 +372,7 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Not,
     Neg,
+    IsNormalized,
 }
 
 /// リテラル値
