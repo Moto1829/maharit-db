@@ -1350,6 +1350,21 @@ impl<'a> Executor<'a> {
         }
     }
 
+    fn expression_to_display(expr: &Expression) -> String {
+        match expr {
+            Expression::Variable(v) => v.clone(),
+            Expression::Property(v, p) => format!("{}.{}", v, p),
+            Expression::Literal(lit) => match lit {
+                Literal::Null => "null".to_string(),
+                Literal::Bool(b) => b.to_string(),
+                Literal::Int(n) => n.to_string(),
+                Literal::Float(n) => n.to_string(),
+                Literal::String(s) => format!("\"{}\"", s),
+            },
+            _ => "expr".to_string(),
+        }
+    }
+
     fn function_to_name(&self, func: &ScalarFunction) -> String {
         match func {
             ScalarFunction::Nodes(_) => "nodes".to_string(),
@@ -1357,6 +1372,19 @@ impl<'a> Executor<'a> {
             ScalarFunction::Length(_) => "length".to_string(),
             ScalarFunction::ShortestPath { .. } => "shortestPath".to_string(),
             ScalarFunction::AllShortestPaths { .. } => "allShortestPaths".to_string(),
+            ScalarFunction::Trim(_) => "trim".to_string(),
+            ScalarFunction::LTrim(_) => "ltrim".to_string(),
+            ScalarFunction::RTrim(_) => "rtrim".to_string(),
+            ScalarFunction::ToLower(_) => "toLower".to_string(),
+            ScalarFunction::ToUpper(_) => "toUpper".to_string(),
+            ScalarFunction::Reverse(_) => "reverse".to_string(),
+            ScalarFunction::ToString(_) => "toString".to_string(),
+            ScalarFunction::Size(_) => "size".to_string(),
+            ScalarFunction::Left(..) => "left".to_string(),
+            ScalarFunction::Right(..) => "right".to_string(),
+            ScalarFunction::Substring(..) => "substring".to_string(),
+            ScalarFunction::Split(..) => "split".to_string(),
+            ScalarFunction::Replace(..) => "replace".to_string(),
         }
     }
 
@@ -1950,6 +1978,59 @@ impl<'a> Executor<'a> {
                 ScalarFunction::AllShortestPaths { start, end } => {
                     format!("allShortestPaths({}, {})", start, end)
                 }
+                ScalarFunction::Trim(e) => format!("trim({})", Self::expression_to_display(e)),
+                ScalarFunction::LTrim(e) => format!("ltrim({})", Self::expression_to_display(e)),
+                ScalarFunction::RTrim(e) => format!("rtrim({})", Self::expression_to_display(e)),
+                ScalarFunction::ToLower(e) => {
+                    format!("toLower({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::ToUpper(e) => {
+                    format!("toUpper({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::Reverse(e) => {
+                    format!("reverse({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::ToString(e) => {
+                    format!("toString({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::Size(e) => format!("size({})", Self::expression_to_display(e)),
+                ScalarFunction::Left(e1, e2) => format!(
+                    "left({}, {})",
+                    Self::expression_to_display(e1),
+                    Self::expression_to_display(e2)
+                ),
+                ScalarFunction::Right(e1, e2) => format!(
+                    "right({}, {})",
+                    Self::expression_to_display(e1),
+                    Self::expression_to_display(e2)
+                ),
+                ScalarFunction::Substring(e1, e2, e3) => {
+                    if let Some(e3) = e3 {
+                        format!(
+                            "substring({}, {}, {})",
+                            Self::expression_to_display(e1),
+                            Self::expression_to_display(e2),
+                            Self::expression_to_display(e3)
+                        )
+                    } else {
+                        format!(
+                            "substring({}, {})",
+                            Self::expression_to_display(e1),
+                            Self::expression_to_display(e2)
+                        )
+                    }
+                }
+                ScalarFunction::Split(e1, e2) => format!(
+                    "split({}, {})",
+                    Self::expression_to_display(e1),
+                    Self::expression_to_display(e2)
+                ),
+                ScalarFunction::Replace(e1, e2, e3) => format!(
+                    "replace({}, {}, {})",
+                    Self::expression_to_display(e1),
+                    Self::expression_to_display(e2),
+                    Self::expression_to_display(e3)
+                ),
             },
         }
     }
@@ -2146,6 +2227,164 @@ impl<'a> Executor<'a> {
                     .collect();
 
                 Ok(Value::List(path_values))
+            }
+            ScalarFunction::Trim(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("trim() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::LTrim(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("ltrim() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::RTrim(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("rtrim() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::ToLower(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("toLower() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::ToUpper(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("toUpper() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::Reverse(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("reverse() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::ToString(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s)),
+                    Value::Int(n) => Ok(Value::String(format!("{}", n))),
+                    Value::Float(n) => Ok(Value::String(format!("{}", n))),
+                    Value::Bool(b) => Ok(Value::String(if b { "true" } else { "false" }.to_string())),
+                    Value::Null => Ok(Value::String("null".to_string())),
+                    _ => Err(ExecuteError::TypeError("toString() unsupported type".to_string())),
+                }
+            }
+            ScalarFunction::Size(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("size() requires a string".to_string())),
+                }
+            }
+            ScalarFunction::Left(str_expr, len_expr) => {
+                let s_val = self.evaluate_expression(str_expr, bindings)?;
+                let len_val = self.evaluate_expression(len_expr, bindings)?;
+                match (&s_val, &len_val) {
+                    (Value::String(s), Value::Int(len)) => {
+                        let len = *len as usize;
+                        Ok(Value::String(s.chars().take(len).collect()))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("left() requires (string, int)".to_string())),
+                }
+            }
+            ScalarFunction::Right(str_expr, len_expr) => {
+                let s_val = self.evaluate_expression(str_expr, bindings)?;
+                let len_val = self.evaluate_expression(len_expr, bindings)?;
+                match (&s_val, &len_val) {
+                    (Value::String(s), Value::Int(len)) => {
+                        let len = *len as usize;
+                        let chars: Vec<char> = s.chars().collect();
+                        let start = chars.len().saturating_sub(len);
+                        Ok(Value::String(chars[start..].iter().collect()))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("right() requires (string, int)".to_string())),
+                }
+            }
+            ScalarFunction::Substring(str_expr, start_expr, len_expr) => {
+                let s_val = self.evaluate_expression(str_expr, bindings)?;
+                let start_val = self.evaluate_expression(start_expr, bindings)?;
+                let len_val = len_expr
+                    .as_ref()
+                    .map(|e| self.evaluate_expression(e, bindings))
+                    .transpose()?;
+                match (&s_val, &start_val) {
+                    (Value::String(s), Value::Int(start)) => {
+                        let start = *start as usize;
+                        let chars: Vec<char> = s.chars().collect();
+                        if start >= chars.len() {
+                            return Ok(Value::String(String::new()));
+                        }
+                        match len_val {
+                            Some(Value::Int(len)) => {
+                                let len = len as usize;
+                                Ok(Value::String(chars[start..].iter().take(len).collect()))
+                            }
+                            None => Ok(Value::String(chars[start..].iter().collect())),
+                            Some(Value::Null) => Ok(Value::Null),
+                            _ => Err(ExecuteError::TypeError(
+                                "substring() length must be an integer".to_string(),
+                            )),
+                        }
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "substring() requires (string, int)".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Split(str_expr, delim_expr) => {
+                let s_val = self.evaluate_expression(str_expr, bindings)?;
+                let d_val = self.evaluate_expression(delim_expr, bindings)?;
+                match (&s_val, &d_val) {
+                    (Value::String(s), Value::String(delim)) => {
+                        let parts: Vec<Value> = s
+                            .split(delim.as_str())
+                            .map(|p| Value::String(p.to_string()))
+                            .collect();
+                        Ok(Value::List(parts))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "split() requires (string, string)".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Replace(str_expr, search_expr, rep_expr) => {
+                let s_val = self.evaluate_expression(str_expr, bindings)?;
+                let search_val = self.evaluate_expression(search_expr, bindings)?;
+                let rep_val = self.evaluate_expression(rep_expr, bindings)?;
+                match (&s_val, &search_val, &rep_val) {
+                    (Value::String(s), Value::String(search), Value::String(rep)) => {
+                        Ok(Value::String(s.replace(search.as_str(), rep.as_str())))
+                    }
+                    (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) => {
+                        Ok(Value::Null)
+                    }
+                    _ => Err(ExecuteError::TypeError(
+                        "replace() requires (string, string, string)".to_string(),
+                    )),
+                }
             }
         }
     }
@@ -5150,5 +5389,194 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.rows.len(), 0);
+    }
+
+    // ========== String function tests ==========
+
+    #[test]
+    fn test_trim_functions() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "  hello  "})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN trim(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.columns, vec!["trim(n.val)"]);
+        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN ltrim(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hello  ".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN rtrim(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("  hello".to_string()));
+    }
+
+    #[test]
+    fn test_case_conversion() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "Hello World"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toLower(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hello world".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toUpper(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("HELLO WORLD".to_string()));
+    }
+
+    #[test]
+    fn test_reverse() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "abcde"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN reverse(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("edcba".to_string()));
+    }
+
+    #[test]
+    fn test_substring() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "hello world"})"#).unwrap();
+
+        // 2引数: start から末尾まで
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN substring(n.val, 6)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("world".to_string()));
+
+        // 3引数: start から len 文字
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN substring(n.val, 0, 5)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_left_right() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "hello world"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN left(n.val, 5)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN right(n.val, 5)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("world".to_string()));
+    }
+
+    #[test]
+    fn test_split() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "a,b,c"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN split(n.val, ",")"#,
+        )
+        .unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::List(vec![
+                Value::String("a".to_string()),
+                Value::String("b".to_string()),
+                Value::String("c".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_replace() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "hello world"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN replace(n.val, "world", "rust")"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hello rust".to_string()));
+    }
+
+    #[test]
+    fn test_to_string() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:T {i: 42, f: 3.14, b: true, s: "hi"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toString(n.i)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("42".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toString(n.f)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("3.14".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toString(n.b)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("true".to_string()));
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN toString(n.s)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::String("hi".to_string()));
+    }
+
+    #[test]
+    fn test_size() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:T {val: "hello"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) RETURN size(n.val)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
     }
 }

@@ -6,25 +6,25 @@ Cypherの組み込み文字列関数を実装する。
 ## 実装内容
 
 ### 基本文字列操作
-- [ ] trim(string): 前後の空白を除去
-- [ ] ltrim(string): 先頭の空白を除去
-- [ ] rtrim(string): 末尾の空白を除去
-- [ ] toLower(string): 小文字に変換
-- [ ] toUpper(string): 大文字に変換
-- [ ] reverse(string): 文字列を反転
+- [x] trim(string): 前後の空白を除去
+- [x] ltrim(string): 先頭の空白を除去
+- [x] rtrim(string): 末尾の空白を除去
+- [x] toLower(string): 小文字に変換
+- [x] toUpper(string): 大文字に変換
+- [x] reverse(string): 文字列を反転
 
 ### 部分文字列操作
-- [ ] substring(string, start, length?): 部分文字列の取得
-- [ ] left(string, length): 左からN文字取得
-- [ ] right(string, length): 右からN文字取得
-- [ ] split(string, delimiter): 区切り文字で分割（リスト返却）
+- [x] substring(string, start, length?): 部分文字列の取得
+- [x] left(string, length): 左からN文字取得
+- [x] right(string, length): 右からN文字取得
+- [x] split(string, delimiter): 区切り文字で分割（リスト返却）
 
 ### 変換・置換
-- [ ] replace(string, search, replace): 文字列置換
-- [ ] toString(value): 文字列への変換
+- [x] replace(string, search, replace): 文字列置換
+- [x] toString(value): 文字列への変換
 
 ### 文字列情報
-- [ ] size(string): 文字列の長さ
+- [x] size(string): 文字列の長さ
 
 ## クエリ例
 ```cypher

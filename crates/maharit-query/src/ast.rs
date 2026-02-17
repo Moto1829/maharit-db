@@ -310,6 +310,32 @@ pub enum ScalarFunction {
     ShortestPath { start: String, end: String },
     /// allShortestPaths(start, end) - 2ノード間の全最短パスを返す
     AllShortestPaths { start: String, end: String },
+    /// trim(s) - 前後の空白を除去
+    Trim(Box<Expression>),
+    /// ltrim(s) - 先頭の空白を除去
+    LTrim(Box<Expression>),
+    /// rtrim(s) - 末尾の空白を除去
+    RTrim(Box<Expression>),
+    /// toLower(s) - 小文字に変換
+    ToLower(Box<Expression>),
+    /// toUpper(s) - 大文字に変換
+    ToUpper(Box<Expression>),
+    /// reverse(s) - 文字列を反転
+    Reverse(Box<Expression>),
+    /// toString(v) - 文字列に変換
+    ToString(Box<Expression>),
+    /// size(s) - 文字列の長さ
+    Size(Box<Expression>),
+    /// left(s, len) - 左からlen文字
+    Left(Box<Expression>, Box<Expression>),
+    /// right(s, len) - 右からlen文字
+    Right(Box<Expression>, Box<Expression>),
+    /// substring(s, start, len?) - 部分文字列
+    Substring(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
+    /// split(s, delim) - 区切り文字で分割
+    Split(Box<Expression>, Box<Expression>),
+    /// replace(s, search, rep) - 文字列置換
+    Replace(Box<Expression>, Box<Expression>, Box<Expression>),
 }
 
 /// 式

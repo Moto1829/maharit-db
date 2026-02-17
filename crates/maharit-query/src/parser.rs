@@ -727,6 +727,70 @@ impl Parser {
                     end,
                 }));
             }
+            // 1引数の文字列関数
+            "trim" | "ltrim" | "rtrim" | "tolower" | "toupper" | "reverse" | "tostring"
+            | "size" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "trim" => ScalarFunction::Trim(Box::new(arg)),
+                    "ltrim" => ScalarFunction::LTrim(Box::new(arg)),
+                    "rtrim" => ScalarFunction::RTrim(Box::new(arg)),
+                    "tolower" => ScalarFunction::ToLower(Box::new(arg)),
+                    "toupper" => ScalarFunction::ToUpper(Box::new(arg)),
+                    "reverse" => ScalarFunction::Reverse(Box::new(arg)),
+                    "tostring" => ScalarFunction::ToString(Box::new(arg)),
+                    "size" => ScalarFunction::Size(Box::new(arg)),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 2引数の文字列関数
+            "left" | "right" | "split" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "left" => ScalarFunction::Left(Box::new(arg1), Box::new(arg2)),
+                    "right" => ScalarFunction::Right(Box::new(arg1), Box::new(arg2)),
+                    "split" => ScalarFunction::Split(Box::new(arg1), Box::new(arg2)),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 2-3引数: substring(s, start, len?)
+            "substring" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                let arg3 = if self.check(TokenKind::Comma) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Substring(
+                    Box::new(arg1),
+                    Box::new(arg2),
+                    arg3,
+                )));
+            }
+            // 3引数: replace(s, search, rep)
+            "replace" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg3 = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Replace(
+                    Box::new(arg1),
+                    Box::new(arg2),
+                    Box::new(arg3),
+                )));
+            }
             _ => {}
         }
 
@@ -786,7 +850,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });
