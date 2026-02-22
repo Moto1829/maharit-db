@@ -834,6 +834,66 @@ impl Parser {
                     arg2,
                 )));
             }
+            // Variable name pattern functions (node/edge metadata)
+            "id" | "elementid" | "type" | "startnode" | "endnode" | "labels" | "properties" | "keys" => {
+                let var = self.expect_ident()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "id" => ScalarFunction::Id(var),
+                    "elementid" => ScalarFunction::ElementId(var),
+                    "type" => ScalarFunction::Type(var),
+                    "startnode" => ScalarFunction::StartNode(var),
+                    "endnode" => ScalarFunction::EndNode(var),
+                    "labels" => ScalarFunction::Labels(var),
+                    "properties" => ScalarFunction::Properties(var),
+                    "keys" => ScalarFunction::Keys(var),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 1-argument expression: toBoolean, toFloat, toInteger
+            "toboolean" | "tofloat" | "tointeger" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "toboolean" => ScalarFunction::ToBoolean(Box::new(arg)),
+                    "tofloat" => ScalarFunction::ToFloat(Box::new(arg)),
+                    "tointeger" => ScalarFunction::ToInteger(Box::new(arg)),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 2-argument: nullIf(a, b)
+            "nullif" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::NullIf(
+                    Box::new(arg1),
+                    Box::new(arg2),
+                )));
+            }
+            // Variadic: coalesce(...)
+            "coalesce" => {
+                let mut args = vec![self.parse_expression()?];
+                while self.check(TokenKind::Comma) {
+                    self.advance();
+                    args.push(self.parse_expression()?);
+                }
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Coalesce(args)));
+            }
+            // 0-argument: timestamp(), randomUUID()
+            "timestamp" | "randomuuid" => {
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "timestamp" => ScalarFunction::Timestamp,
+                    "randomuuid" => ScalarFunction::RandomUUID,
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
             _ => {}
         }
 
@@ -893,7 +953,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi, id, elementId, type, startNode, endNode, labels, properties, keys, coalesce, nullIf, toBoolean, toFloat, toInteger, timestamp, randomUUID)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });

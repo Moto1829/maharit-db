@@ -360,6 +360,40 @@ pub enum ScalarFunction {
     E,
     /// pi() - 円周率
     Pi,
+    // ノード/エッジメタデータ（変数名パターン）
+    /// id(v) - ノード/エッジのID
+    Id(String),
+    /// elementId(v) - 文字列ID
+    ElementId(String),
+    /// type(r) - エッジタイプ
+    Type(String),
+    /// startNode(r) - エッジの始点
+    StartNode(String),
+    /// endNode(r) - エッジの終点
+    EndNode(String),
+    /// labels(n) - ノードラベルのリスト
+    Labels(String),
+    /// properties(v) - プロパティMap
+    Properties(String),
+    /// keys(v) - プロパティキーのリスト
+    Keys(String),
+    // NULL処理（式パターン）
+    /// coalesce(...) - 最初の非NULL値
+    Coalesce(Vec<Expression>),
+    /// nullIf(a, b) - 等しければNULL
+    NullIf(Box<Expression>, Box<Expression>),
+    // 型変換（1引数式パターン）
+    /// toBoolean(v) - ブール変換
+    ToBoolean(Box<Expression>),
+    /// toFloat(v) - Float変換
+    ToFloat(Box<Expression>),
+    /// toInteger(v) - Int変換
+    ToInteger(Box<Expression>),
+    // ユーティリティ（0引数）
+    /// timestamp() - Unixミリ秒
+    Timestamp,
+    /// randomUUID() - UUID v4
+    RandomUUID,
 }
 
 /// 式
