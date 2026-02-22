@@ -336,6 +336,30 @@ pub enum ScalarFunction {
     Split(Box<Expression>, Box<Expression>),
     /// replace(s, search, rep) - 文字列置換
     Replace(Box<Expression>, Box<Expression>, Box<Expression>),
+    /// abs(v) - 絶対値
+    Abs(Box<Expression>),
+    /// ceil(v) - 切り上げ
+    Ceil(Box<Expression>),
+    /// floor(v) - 切り捨て
+    Floor(Box<Expression>),
+    /// round(v) or round(v, precision) - 四捨五入
+    Round(Box<Expression>, Option<Box<Expression>>),
+    /// sign(v) - 符号
+    Sign(Box<Expression>),
+    /// rand() - 乱数
+    Rand,
+    /// isNaN(v) - NaN判定
+    IsNaN(Box<Expression>),
+    /// log(v) - 自然対数
+    Log(Box<Expression>),
+    /// log10(v) - 常用対数
+    Log10(Box<Expression>),
+    /// sqrt(v) - 平方根
+    Sqrt(Box<Expression>),
+    /// e() - ネイピア数
+    E,
+    /// pi() - 円周率
+    Pi,
 }
 
 /// 式

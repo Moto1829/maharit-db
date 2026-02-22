@@ -1385,6 +1385,18 @@ impl<'a> Executor<'a> {
             ScalarFunction::Substring(..) => "substring".to_string(),
             ScalarFunction::Split(..) => "split".to_string(),
             ScalarFunction::Replace(..) => "replace".to_string(),
+            ScalarFunction::Abs(_) => "abs".to_string(),
+            ScalarFunction::Ceil(_) => "ceil".to_string(),
+            ScalarFunction::Floor(_) => "floor".to_string(),
+            ScalarFunction::Round(..) => "round".to_string(),
+            ScalarFunction::Sign(_) => "sign".to_string(),
+            ScalarFunction::Rand => "rand".to_string(),
+            ScalarFunction::IsNaN(_) => "isNaN".to_string(),
+            ScalarFunction::Log(_) => "log".to_string(),
+            ScalarFunction::Log10(_) => "log10".to_string(),
+            ScalarFunction::Sqrt(_) => "sqrt".to_string(),
+            ScalarFunction::E => "e".to_string(),
+            ScalarFunction::Pi => "pi".to_string(),
         }
     }
 
@@ -2031,6 +2043,28 @@ impl<'a> Executor<'a> {
                     Self::expression_to_display(e2),
                     Self::expression_to_display(e3)
                 ),
+                ScalarFunction::Abs(e) => format!("abs({})", Self::expression_to_display(e)),
+                ScalarFunction::Ceil(e) => format!("ceil({})", Self::expression_to_display(e)),
+                ScalarFunction::Floor(e) => format!("floor({})", Self::expression_to_display(e)),
+                ScalarFunction::Round(e, p) => {
+                    if let Some(p) = p {
+                        format!(
+                            "round({}, {})",
+                            Self::expression_to_display(e),
+                            Self::expression_to_display(p)
+                        )
+                    } else {
+                        format!("round({})", Self::expression_to_display(e))
+                    }
+                }
+                ScalarFunction::Sign(e) => format!("sign({})", Self::expression_to_display(e)),
+                ScalarFunction::Rand => "rand()".to_string(),
+                ScalarFunction::IsNaN(e) => format!("isNaN({})", Self::expression_to_display(e)),
+                ScalarFunction::Log(e) => format!("log({})", Self::expression_to_display(e)),
+                ScalarFunction::Log10(e) => format!("log10({})", Self::expression_to_display(e)),
+                ScalarFunction::Sqrt(e) => format!("sqrt({})", Self::expression_to_display(e)),
+                ScalarFunction::E => "e()".to_string(),
+                ScalarFunction::Pi => "pi()".to_string(),
             },
         }
     }
@@ -2386,6 +2420,120 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
+            ScalarFunction::Abs(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Int(n.abs())),
+                    Value::Float(n) => Ok(Value::Float(n.abs())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("abs() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Ceil(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Int(n)),
+                    Value::Float(n) => Ok(Value::Int(n.ceil() as i64)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("ceil() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Floor(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Int(n)),
+                    Value::Float(n) => Ok(Value::Int(n.floor() as i64)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("floor() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Round(expr, precision_expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => {
+                        if precision_expr.is_some() {
+                            Ok(Value::Float(n as f64))
+                        } else {
+                            Ok(Value::Int(n))
+                        }
+                    }
+                    Value::Float(n) => {
+                        if let Some(p_expr) = precision_expr {
+                            let p_val = self.evaluate_expression(p_expr, bindings)?;
+                            match p_val {
+                                Value::Int(p) => {
+                                    let factor = 10f64.powi(p as i32);
+                                    Ok(Value::Float((n * factor).round() / factor))
+                                }
+                                Value::Null => Ok(Value::Null),
+                                _ => Err(ExecuteError::TypeError("round() precision must be an integer".to_string())),
+                            }
+                        } else {
+                            Ok(Value::Int(n.round() as i64))
+                        }
+                    }
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("round() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Sign(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Int(n.signum())),
+                    Value::Float(n) => Ok(Value::Int(n.signum() as i64)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("sign() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Rand => {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                use std::time::SystemTime;
+                let mut hasher = DefaultHasher::new();
+                SystemTime::now().hash(&mut hasher);
+                std::thread::current().id().hash(&mut hasher);
+                let hash = hasher.finish();
+                let result = (hash as f64) / (u64::MAX as f64);
+                Ok(Value::Float(result))
+            }
+            ScalarFunction::IsNaN(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Float(n) => Ok(Value::Bool(n.is_nan())),
+                    Value::Int(_) => Ok(Value::Bool(false)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("isNaN() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Log(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Float((n as f64).ln())),
+                    Value::Float(n) => Ok(Value::Float(n.ln())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("log() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Log10(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Float((n as f64).log10())),
+                    Value::Float(n) => Ok(Value::Float(n.log10())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("log10() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::Sqrt(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::Int(n) => Ok(Value::Float((n as f64).sqrt())),
+                    Value::Float(n) => Ok(Value::Float(n.sqrt())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError("sqrt() requires a numeric value".to_string())),
+                }
+            }
+            ScalarFunction::E => Ok(Value::Float(std::f64::consts::E)),
+            ScalarFunction::Pi => Ok(Value::Float(std::f64::consts::PI)),
         }
     }
 
@@ -5578,5 +5726,157 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
+    }
+
+    #[test]
+    fn test_abs() {
+        let mut graph = Graph::new();
+        // Test negative int and float
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        graph.get_node_mut(0).unwrap().properties.insert("i".to_string(), PropertyValue::Int(-5));
+        graph.get_node_mut(0).unwrap().properties.insert("f".to_string(), PropertyValue::Float(-3.14));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN abs(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN abs(n.f)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(3.14));
+
+        // Positive values stay the same
+        let mut graph2 = Graph::new();
+        execute(&mut graph2, "CREATE (n:T {i: 5, f: 3.14})").unwrap();
+        let result = execute(&mut graph2, "MATCH (n:T) RETURN abs(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
+    }
+
+    #[test]
+    fn test_ceil_floor() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {f: 3.2, i: 5})").unwrap();
+        graph.get_node_mut(0).unwrap().properties.insert("g".to_string(), PropertyValue::Float(-2.7));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN ceil(n.f)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(4));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN floor(n.f)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(3));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN ceil(n.g)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(-2));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN floor(n.g)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(-3));
+
+        // Int passthrough
+        let result = execute(&mut graph, "MATCH (n:T) RETURN ceil(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN floor(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
+    }
+
+    #[test]
+    fn test_round() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {f: 3.567, i: 5})").unwrap();
+
+        // 1 argument: round to integer
+        let result = execute(&mut graph, "MATCH (n:T) RETURN round(n.f)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(4));
+
+        // Int passthrough
+        let result = execute(&mut graph, "MATCH (n:T) RETURN round(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
+
+        // 2 arguments: round to precision
+        let result = execute(&mut graph, "MATCH (n:T) RETURN round(n.f, 2)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(3.57));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN round(n.f, 1)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(3.6));
+    }
+
+    #[test]
+    fn test_sign() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {pos: 5, zero: 0, fpos: 2.5})").unwrap();
+        graph.get_node_mut(0).unwrap().properties.insert("neg".to_string(), PropertyValue::Int(-3));
+        graph.get_node_mut(0).unwrap().properties.insert("fneg".to_string(), PropertyValue::Float(-1.5));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.pos)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.neg)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(-1));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.zero)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(0));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.fpos)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.fneg)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Int(-1));
+    }
+
+    #[test]
+    fn test_rand() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {val: 1})").unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN rand()").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Float(f) => {
+                assert!(*f >= 0.0 && *f < 1.0, "rand() should be in [0.0, 1.0), got {}", f);
+            }
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_isnan() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {f: 1.0, i: 5})").unwrap();
+
+        // Normal float is not NaN
+        let result = execute(&mut graph, "MATCH (n:T) RETURN isNaN(n.f)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // Int is never NaN
+        let result = execute(&mut graph, "MATCH (n:T) RETURN isNaN(n.i)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_log_log10_sqrt() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {val: 100, fval: 2.718281828459045})").unwrap();
+
+        // log(e) ≈ 1.0
+        let result = execute(&mut graph, "MATCH (n:T) RETURN log(n.fval)").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Float(f) => assert!((f - 1.0).abs() < 0.0001),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+
+        // log10(100) = 2.0
+        let result = execute(&mut graph, "MATCH (n:T) RETURN log10(n.val)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(2.0));
+
+        // sqrt(100) = 10.0
+        let result = execute(&mut graph, "MATCH (n:T) RETURN sqrt(n.val)").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(10.0));
+    }
+
+    #[test]
+    fn test_e_pi() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {val: 1})").unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN e()").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(std::f64::consts::E));
+
+        let result = execute(&mut graph, "MATCH (n:T) RETURN pi()").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Float(std::f64::consts::PI));
     }
 }

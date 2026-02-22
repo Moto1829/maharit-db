@@ -791,6 +791,49 @@ impl Parser {
                     Box::new(arg3),
                 )));
             }
+            // 0引数の数学関数
+            "rand" | "e" | "pi" => {
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "rand" => ScalarFunction::Rand,
+                    "e" => ScalarFunction::E,
+                    "pi" => ScalarFunction::Pi,
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 1引数の数学関数
+            "abs" | "ceil" | "floor" | "sign" | "isnan" | "log" | "log10" | "sqrt" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "abs" => ScalarFunction::Abs(Box::new(arg)),
+                    "ceil" => ScalarFunction::Ceil(Box::new(arg)),
+                    "floor" => ScalarFunction::Floor(Box::new(arg)),
+                    "sign" => ScalarFunction::Sign(Box::new(arg)),
+                    "isnan" => ScalarFunction::IsNaN(Box::new(arg)),
+                    "log" => ScalarFunction::Log(Box::new(arg)),
+                    "log10" => ScalarFunction::Log10(Box::new(arg)),
+                    "sqrt" => ScalarFunction::Sqrt(Box::new(arg)),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // 1-2引数: round(v, precision?)
+            "round" => {
+                let arg1 = self.parse_expression()?;
+                let arg2 = if self.check(TokenKind::Comma) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Round(
+                    Box::new(arg1),
+                    arg2,
+                )));
+            }
             _ => {}
         }
 
@@ -850,7 +893,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });
