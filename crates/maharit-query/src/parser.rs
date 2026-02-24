@@ -675,6 +675,22 @@ impl Parser {
             return Ok(ReturnItem::All);
         }
 
+        // Handle list expressions (comprehensions, literals) as RETURN items
+        if self.check(TokenKind::LBracket) {
+            let expr = self.parse_list_expression()?;
+            return Ok(ReturnItem::Expr(expr));
+        }
+
+        // Handle `last(expr)` specially since `last` is a keyword token
+        if self.check(TokenKind::Last) {
+            let func_name = "last".to_string();
+            self.advance();
+            if self.check(TokenKind::LParen) {
+                return self.parse_aggregate_function(&func_name);
+            }
+            return Err(self.unexpected_token("("));
+        }
+
         let var = self.expect_ident()?;
 
         // Check if it's a function call (identifier followed by parenthesis)
@@ -893,6 +909,61 @@ impl Parser {
                     _ => unreachable!(),
                 };
                 return Ok(ReturnItem::Function(scalar));
+            }
+            // リスト操作関数: 1引数
+            "head" | "tail" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let scalar = match func_name.to_lowercase().as_str() {
+                    "head" => ScalarFunction::Head(Box::new(arg)),
+                    "tail" => ScalarFunction::Tail(Box::new(arg)),
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Function(scalar));
+            }
+            // last はキーワードなので parse_return_item で事前処理済み
+            "last" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Last(Box::new(arg))));
+            }
+            // range(start, end) or range(start, end, step)
+            "range" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                let arg3 = if self.check(TokenKind::Comma) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Range(
+                    Box::new(arg1),
+                    Box::new(arg2),
+                    arg3,
+                )));
+            }
+            // reduce(acc = init, x IN list | body)
+            "reduce" => {
+                let acc_var = self.expect_ident()?;
+                self.expect(TokenKind::Eq)?;
+                let init = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::Comma)?;
+                let item_var = self.expect_ident()?;
+                self.expect(TokenKind::In)?;
+                let list = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::Pipe)?;
+                let body = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::Reduce {
+                    acc_var,
+                    init,
+                    item_var,
+                    list,
+                    body,
+                }));
             }
             _ => {}
         }
@@ -1628,6 +1699,15 @@ impl Parser {
                     Box::new(right),
                 ));
             }
+            Some(TokenKind::In) => {
+                self.advance();
+                let right = self.parse_additive()?;
+                return Ok(Expression::BinaryOp(
+                    Box::new(left),
+                    BinaryOp::In,
+                    Box::new(right),
+                ));
+            }
             Some(TokenKind::Is) => {
                 self.advance(); // consume IS
                 if self.check(TokenKind::Normalized) {
@@ -1694,7 +1774,31 @@ impl Parser {
             return Ok(Expression::UnaryOp(UnaryOp::Neg, Box::new(expr)));
         }
 
-        self.parse_primary()
+        self.parse_postfix()
+    }
+
+    fn parse_postfix(&mut self) -> Result<Expression, ParseError> {
+        let mut expr = self.parse_primary()?;
+        while self.check(TokenKind::LBracket) {
+            self.advance(); // consume [
+            let start = self.parse_expression()?;
+            if self.check(TokenKind::Dot) {
+                // List slice: list[start..end] - consume two Dot tokens
+                self.advance(); // first dot
+                self.advance(); // second dot
+                let end = self.parse_expression()?;
+                self.expect(TokenKind::RBracket)?;
+                expr = Expression::ListSlice(
+                    Box::new(expr),
+                    Box::new(start),
+                    Box::new(end),
+                );
+            } else {
+                self.expect(TokenKind::RBracket)?;
+                expr = Expression::IndexAccess(Box::new(expr), Box::new(start));
+            }
+        }
+        Ok(expr)
     }
 
     fn parse_primary(&mut self) -> Result<Expression, ParseError> {
@@ -1738,6 +1842,36 @@ impl Parser {
 
     fn parse_list_expression(&mut self) -> Result<Expression, ParseError> {
         self.expect(TokenKind::LBracket)?;
+
+        // Check for list comprehension: [x IN list WHERE pred | expr]
+        let is_comprehension = matches!(
+            (
+                self.tokens.get(self.pos).map(|t| &t.kind),
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            ),
+            (Some(TokenKind::Ident(_)), Some(TokenKind::In))
+        );
+
+        if is_comprehension {
+            let variable = self.expect_ident()?;
+            self.advance(); // consume IN
+            let list = Box::new(self.parse_expression()?);
+            let predicate = if self.check(TokenKind::Where) {
+                self.advance();
+                Some(Box::new(self.parse_expression()?))
+            } else {
+                None
+            };
+            self.expect(TokenKind::Pipe)?;
+            let result = Box::new(self.parse_expression()?);
+            self.expect(TokenKind::RBracket)?;
+            return Ok(Expression::ListComprehension {
+                variable,
+                list,
+                predicate,
+                result,
+            });
+        }
 
         let mut elements = Vec::new();
 

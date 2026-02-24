@@ -92,6 +92,8 @@ pub enum TokenKind {
     Starts,
     Ends,
     Normalized,
+    // リスト演算子用キーワード
+    In, // IN キーワード
 
     // 識別子とリテラル
     Ident(String),
@@ -194,6 +196,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Starts => write!(f, "STARTS"),
             TokenKind::Ends => write!(f, "ENDS"),
             TokenKind::Normalized => write!(f, "NORMALIZED"),
+            TokenKind::In => write!(f, "IN"),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -511,6 +514,7 @@ impl<'a> Lexer<'a> {
             "STARTS" => TokenKind::Starts,
             "ENDS" => TokenKind::Ends,
             "NORMALIZED" => TokenKind::Normalized,
+            "IN" => TokenKind::In,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

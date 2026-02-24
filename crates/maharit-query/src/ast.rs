@@ -278,6 +278,8 @@ pub enum ReturnItem {
     Aggregate(AggregateFunction),
     /// スカラー関数: RETURN nodes(r), length(r)
     Function(ScalarFunction),
+    /// 任意の式: RETURN [x IN list | expr], RETURN list[i], etc.
+    Expr(Expression),
 }
 
 /// 集計関数
@@ -394,6 +396,22 @@ pub enum ScalarFunction {
     Timestamp,
     /// randomUUID() - UUID v4
     RandomUUID,
+    /// head(list) - 最初の要素
+    Head(Box<Expression>),
+    /// last(list) - 最後の要素
+    Last(Box<Expression>),
+    /// tail(list) - 最初を除くリスト
+    Tail(Box<Expression>),
+    /// range(start, end) or range(start, end, step)
+    Range(Box<Expression>, Box<Expression>, Option<Box<Expression>>),
+    /// reduce(acc = init, x IN list | body)
+    Reduce {
+        acc_var: String,
+        init: Box<Expression>,
+        item_var: String,
+        list: Box<Expression>,
+        body: Box<Expression>,
+    },
 }
 
 /// 式
@@ -408,6 +426,17 @@ pub enum Expression {
     Case(CaseExpression),
     /// リスト式: [expr, expr, ...]
     List(Vec<Expression>),
+    /// list[index]
+    IndexAccess(Box<Expression>, Box<Expression>),
+    /// list[start..end]
+    ListSlice(Box<Expression>, Box<Expression>, Box<Expression>),
+    /// [x IN list WHERE pred | expr]
+    ListComprehension {
+        variable: String,
+        list: Box<Expression>,
+        predicate: Option<Box<Expression>>,
+        result: Box<Expression>,
+    },
 }
 
 /// CASE式
@@ -449,6 +478,8 @@ pub enum BinaryOp {
     Contains,
     StartsWith,
     EndsWith,
+    /// value IN list
+    In,
 }
 
 /// 単項演算子

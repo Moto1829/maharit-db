@@ -837,7 +837,7 @@ fn analyze_projection(return_clause: &ReturnClause) -> String {
             ReturnItem::Property(var, prop) => {
                 properties.push(format!("{}.{}", var, prop));
             }
-            ReturnItem::Aggregate(_) | ReturnItem::Function(_) => {
+            ReturnItem::Aggregate(_) | ReturnItem::Function(_) | ReturnItem::Expr(_) => {
                 // Aggregates need full data, no pruning possible
                 has_variable = true;
             }

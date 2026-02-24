@@ -1287,6 +1287,7 @@ impl<'a> Executor<'a> {
                         ReturnItem::Aggregate(agg) => self.aggregate_to_name(agg),
                         ReturnItem::Function(func) => self.function_to_name(func),
                         ReturnItem::All => "*".to_string(),
+                        ReturnItem::Expr(e) => Self::expression_to_display(e),
                     }
                 };
 
@@ -1412,6 +1413,11 @@ impl<'a> Executor<'a> {
             ScalarFunction::ToInteger(_) => "toInteger".to_string(),
             ScalarFunction::Timestamp => "timestamp".to_string(),
             ScalarFunction::RandomUUID => "randomUUID".to_string(),
+            ScalarFunction::Head(_) => "head".to_string(),
+            ScalarFunction::Last(_) => "last".to_string(),
+            ScalarFunction::Tail(_) => "tail".to_string(),
+            ScalarFunction::Range(..) => "range".to_string(),
+            ScalarFunction::Reduce { .. } => "reduce".to_string(),
         }
     }
 
@@ -1977,6 +1983,7 @@ impl<'a> Executor<'a> {
             ReturnItem::Variable(v) => v.clone(),
             ReturnItem::Property(v, p) => format!("{}.{}", v, p),
             ReturnItem::All => "*".to_string(),
+            ReturnItem::Expr(e) => Self::expression_to_display(e),
             ReturnItem::Aggregate(agg) => match agg {
                 AggregateFunction::Count(_) => "COUNT(*)".to_string(),
                 AggregateFunction::Sum(inner) => {
@@ -2099,6 +2106,26 @@ impl<'a> Executor<'a> {
                 ScalarFunction::ToInteger(e) => format!("toInteger({})", Self::expression_to_display(e)),
                 ScalarFunction::Timestamp => "timestamp()".to_string(),
                 ScalarFunction::RandomUUID => "randomUUID()".to_string(),
+                ScalarFunction::Head(e) => format!("head({})", Self::expression_to_display(e)),
+                ScalarFunction::Last(e) => format!("last({})", Self::expression_to_display(e)),
+                ScalarFunction::Tail(e) => format!("tail({})", Self::expression_to_display(e)),
+                ScalarFunction::Range(e1, e2, e3) => {
+                    if let Some(e3) = e3 {
+                        format!(
+                            "range({}, {}, {})",
+                            Self::expression_to_display(e1),
+                            Self::expression_to_display(e2),
+                            Self::expression_to_display(e3)
+                        )
+                    } else {
+                        format!(
+                            "range({}, {})",
+                            Self::expression_to_display(e1),
+                            Self::expression_to_display(e2)
+                        )
+                    }
+                }
+                ScalarFunction::Reduce { .. } => "reduce(...)".to_string(),
             },
         }
     }
@@ -2180,6 +2207,9 @@ impl<'a> Executor<'a> {
             }
             ReturnItem::Function(func) => {
                 self.evaluate_scalar_function(func, bindings)
+            }
+            ReturnItem::Expr(expr) => {
+                self.evaluate_expression(expr, bindings)
             }
         }
     }
@@ -2340,8 +2370,11 @@ impl<'a> Executor<'a> {
                 let val = self.evaluate_expression(expr, bindings)?;
                 match val {
                     Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                    Value::List(items) => Ok(Value::List(items.into_iter().rev().collect())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("reverse() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "reverse() requires a string or list".to_string(),
+                    )),
                 }
             }
             ScalarFunction::ToString(expr) => {
@@ -2359,8 +2392,11 @@ impl<'a> Executor<'a> {
                 let val = self.evaluate_expression(expr, bindings)?;
                 match val {
                     Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    Value::List(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("size() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "size() requires a string or list".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Left(str_expr, len_expr) => {
@@ -2867,6 +2903,114 @@ impl<'a> Executor<'a> {
                 );
                 Ok(Value::String(uuid))
             }
+            ScalarFunction::Head(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::List(items) => Ok(items.into_iter().next().unwrap_or(Value::Null)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "head() requires a list".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Last(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::List(items) => Ok(items.into_iter().last().unwrap_or(Value::Null)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "last() requires a list".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Tail(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::List(items) => {
+                        if items.is_empty() {
+                            Ok(Value::List(vec![]))
+                        } else {
+                            Ok(Value::List(items.into_iter().skip(1).collect()))
+                        }
+                    }
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "tail() requires a list".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Range(start_expr, end_expr, step_expr) => {
+                let start_val = self.evaluate_expression(start_expr, bindings)?;
+                let end_val = self.evaluate_expression(end_expr, bindings)?;
+                let step_val = step_expr
+                    .as_ref()
+                    .map(|e| self.evaluate_expression(e, bindings))
+                    .transpose()?;
+                match (start_val, end_val) {
+                    (Value::Int(start), Value::Int(end)) => {
+                        let step = match step_val {
+                            Some(Value::Int(s)) => s,
+                            None => 1,
+                            Some(Value::Null) => return Ok(Value::Null),
+                            _ => {
+                                return Err(ExecuteError::TypeError(
+                                    "range() step must be an integer".to_string(),
+                                ))
+                            }
+                        };
+                        if step == 0 {
+                            return Err(ExecuteError::TypeError(
+                                "range() step cannot be zero".to_string(),
+                            ));
+                        }
+                        let mut result = Vec::new();
+                        let mut i = start;
+                        if step > 0 {
+                            while i <= end {
+                                result.push(Value::Int(i));
+                                i += step;
+                            }
+                        } else {
+                            while i >= end {
+                                result.push(Value::Int(i));
+                                i += step;
+                            }
+                        }
+                        Ok(Value::List(result))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "range() requires integer arguments".to_string(),
+                    )),
+                }
+            }
+            ScalarFunction::Reduce {
+                acc_var,
+                init,
+                item_var,
+                list,
+                body,
+            } => {
+                let list_val = self.evaluate_expression(list, bindings)?;
+                let init_val = self.evaluate_expression(init, bindings)?;
+                let items = match list_val {
+                    Value::List(items) => items,
+                    Value::Null => return Ok(Value::Null),
+                    _ => {
+                        return Err(ExecuteError::TypeError(
+                            "reduce() requires a list".to_string(),
+                        ))
+                    }
+                };
+                let mut acc = init_val;
+                for item in items {
+                    let mut local_bindings = bindings.clone();
+                    local_bindings.insert(acc_var.clone(), BindingValue::Scalar(acc));
+                    local_bindings.insert(item_var.clone(), BindingValue::Scalar(item));
+                    acc = self.evaluate_expression(body, &local_bindings)?;
+                }
+                Ok(acc)
+            }
         }
     }
 
@@ -3106,6 +3250,74 @@ impl<'a> Executor<'a> {
                     .collect::<Result<_, _>>()?;
                 Ok(Value::List(values))
             }
+            Expression::IndexAccess(list_expr, index_expr) => {
+                let list_val = self.evaluate_expression(list_expr, bindings)?;
+                let idx_val = self.evaluate_expression(index_expr, bindings)?;
+                match (list_val, idx_val) {
+                    (Value::List(items), Value::Int(i)) => {
+                        let idx = if i < 0 {
+                            items.len() as i64 + i
+                        } else {
+                            i
+                        };
+                        if idx >= 0 {
+                            Ok(items.get(idx as usize).cloned().unwrap_or(Value::Null))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::ListSlice(list_expr, start_expr, end_expr) => {
+                let list_val = self.evaluate_expression(list_expr, bindings)?;
+                let start_val = self.evaluate_expression(start_expr, bindings)?;
+                let end_val = self.evaluate_expression(end_expr, bindings)?;
+                match (list_val, start_val, end_val) {
+                    (Value::List(items), Value::Int(s), Value::Int(e)) => {
+                        let len = items.len() as i64;
+                        let s = if s < 0 { (len + s).max(0) } else { s.min(len) } as usize;
+                        let e = if e < 0 { (len + e).max(0) } else { e.min(len) } as usize;
+                        Ok(Value::List(items[s.min(e)..e.max(s)].to_vec()))
+                    }
+                    (Value::Null, _, _) => Ok(Value::Null),
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::ListComprehension {
+                variable,
+                list,
+                predicate,
+                result,
+            } => {
+                let list_val = self.evaluate_expression(list, bindings)?;
+                let items = match list_val {
+                    Value::List(items) => items,
+                    Value::Null => return Ok(Value::Null),
+                    _ => {
+                        return Err(ExecuteError::TypeError(
+                            "list comprehension requires a list".to_string(),
+                        ))
+                    }
+                };
+                let mut output = Vec::new();
+                for item in items {
+                    let mut local_bindings = bindings.clone();
+                    local_bindings.insert(variable.clone(), BindingValue::Scalar(item));
+                    // Apply predicate filter
+                    if let Some(pred) = predicate {
+                        let pred_val = self.evaluate_expression(pred, &local_bindings)?;
+                        if !matches!(pred_val, Value::Bool(true)) {
+                            continue;
+                        }
+                    }
+                    // Evaluate result expression
+                    let result_val = self.evaluate_expression(result, &local_bindings)?;
+                    output.push(result_val);
+                }
+                Ok(Value::List(output))
+            }
         }
     }
 
@@ -3167,7 +3379,14 @@ impl<'a> Executor<'a> {
                 (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
                 _ => Err(ExecuteError::TypeError("OR requires booleans".to_string())),
             },
-            BinaryOp::Add => self.arithmetic_op(left, right, |a, b| a + b, |a, b| a + b),
+            BinaryOp::Add => {
+                if let (Value::List(a), Value::List(b)) = (left, right) {
+                    let mut result = a.clone();
+                    result.extend(b.iter().cloned());
+                    return Ok(Value::List(result));
+                }
+                self.arithmetic_op(left, right, |a, b| a + b, |a, b| a + b)
+            }
             BinaryOp::Sub => self.arithmetic_op(left, right, |a, b| a - b, |a, b| a - b),
             BinaryOp::Mul => self.arithmetic_op(left, right, |a, b| a * b, |a, b| a * b),
             BinaryOp::Div => self.arithmetic_op(left, right, |a, b| a / b, |a, b| a / b),
@@ -3208,6 +3427,11 @@ impl<'a> Executor<'a> {
                 _ => Err(ExecuteError::TypeError(
                     "ENDS WITH requires string operands".to_string(),
                 )),
+            },
+            BinaryOp::In => match right {
+                Value::List(items) => Ok(Value::Bool(items.iter().any(|item| self.values_equal(left, item)))),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Bool(false)),
             },
         }
     }
@@ -6473,5 +6697,167 @@ mod tests {
             }
             other => panic!("expected String UUID, got {:?}", other),
         }
+    }
+
+    // ========== Task 41: List Operations ==========
+
+    #[test]
+    fn test_in_operator() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Item {val: 2})"#,
+        )
+        .unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.val IN [1, 2, 3] RETURN n.val",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2));
+
+        let result2 = execute(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.val IN [5, 6, 7] RETURN n.val",
+        )
+        .unwrap();
+        assert_eq!(result2.row_count(), 0);
+    }
+
+    #[test]
+    fn test_in_operator_null() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T {x: 1})").unwrap();
+        let r = execute(&mut graph, "MATCH (n:T) WHERE 1 IN [1, 2] RETURN n.x").unwrap();
+        assert_eq!(r.row_count(), 1);
+    }
+
+    #[test]
+    fn test_list_concatenation() {
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            "UNWIND [1, 2] + [3, 4] AS x RETURN x",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 4);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[3].columns[0], Value::Int(4));
+    }
+
+    #[test]
+    fn test_in_operator_multiple_nodes() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (a:Item {val: 200})").unwrap();
+        execute(&mut graph, "CREATE (b:Item {val: 300})").unwrap();
+        execute(&mut graph, "CREATE (c:Item {val: 999})").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.val IN [200, 300] RETURN n.val",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_size_list() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN size([1, 2, 3])",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_reverse_list() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN reverse([1, 2, 3])",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)])
+        );
+    }
+
+    #[test]
+    fn test_head_last_tail() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let r1 = execute(&mut graph, "MATCH (n:T) RETURN head([1, 2, 3])").unwrap();
+        assert_eq!(r1.rows[0].columns[0], Value::Int(1));
+        let r2 = execute(&mut graph, "MATCH (n:T) RETURN last([1, 2, 3])").unwrap();
+        assert_eq!(r2.rows[0].columns[0], Value::Int(3));
+        let r3 = execute(&mut graph, "MATCH (n:T) RETURN tail([1, 2, 3])").unwrap();
+        assert_eq!(
+            r3.rows[0].columns[0],
+            Value::List(vec![Value::Int(2), Value::Int(3)])
+        );
+    }
+
+    #[test]
+    fn test_range() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let r1 = execute(&mut graph, "MATCH (n:T) RETURN range(1, 5)").unwrap();
+        assert_eq!(
+            r1.rows[0].columns[0],
+            Value::List(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+                Value::Int(5)
+            ])
+        );
+        let r2 = execute(&mut graph, "MATCH (n:T) RETURN range(1, 9, 2)").unwrap();
+        assert_eq!(
+            r2.rows[0].columns[0],
+            Value::List(vec![
+                Value::Int(1),
+                Value::Int(3),
+                Value::Int(5),
+                Value::Int(7),
+                Value::Int(9)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_reduce() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN reduce(acc = 0, x IN [1, 2, 3, 4, 5] | acc + x)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(15));
+    }
+
+    #[test]
+    fn test_list_comprehension() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 2 | x * 2]",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::List(vec![Value::Int(6), Value::Int(8), Value::Int(10)])
+        );
     }
 }
