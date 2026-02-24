@@ -965,10 +965,55 @@ impl Parser {
                     body,
                 }));
             }
+            // percentileCont(expr, percentile)
+            "percentilecont" => {
+                let expr = self.parse_return_item()?;
+                self.expect(TokenKind::Comma)?;
+                let percentile_expr = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Aggregate(AggregateFunction::PercentileCont(
+                    Box::new(expr),
+                    Box::new(ReturnItem::Expr(percentile_expr)),
+                )));
+            }
+            // percentileDisc(expr, percentile)
+            "percentiledisc" => {
+                let expr = self.parse_return_item()?;
+                self.expect(TokenKind::Comma)?;
+                let percentile_expr = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Aggregate(AggregateFunction::PercentileDisc(
+                    Box::new(expr),
+                    Box::new(ReturnItem::Expr(percentile_expr)),
+                )));
+            }
+            // stDev(expr)
+            "stdev" => {
+                let inner = self.parse_return_item()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Aggregate(AggregateFunction::StDev(Box::new(
+                    inner,
+                ))));
+            }
+            // stDevP(expr)
+            "stdevp" => {
+                let inner = self.parse_return_item()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Aggregate(AggregateFunction::StDevP(Box::new(
+                    inner,
+                ))));
+            }
             _ => {}
         }
 
-        // Aggregate functions
+        // Aggregate functions - check for DISTINCT modifier
+        let is_distinct = if self.check(TokenKind::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let inner = if self.check(TokenKind::Star) {
             self.advance();
             None // COUNT(*)
@@ -981,14 +1026,29 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
 
         let aggregate = match func_name.to_uppercase().as_str() {
-            "COUNT" => AggregateFunction::Count(inner),
+            "COUNT" => {
+                if is_distinct {
+                    let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "expression".to_string(),
+                        found: ")".to_string(),
+                        span: self.current_span(),
+                    })?;
+                    AggregateFunction::CountDistinct(inner)
+                } else {
+                    AggregateFunction::Count(inner)
+                }
+            }
             "SUM" => {
                 let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
                     expected: "expression".to_string(),
                     found: ")".to_string(),
                     span: self.current_span(),
                 })?;
-                AggregateFunction::Sum(inner)
+                if is_distinct {
+                    AggregateFunction::SumDistinct(inner)
+                } else {
+                    AggregateFunction::Sum(inner)
+                }
             }
             "AVG" => {
                 let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
@@ -996,7 +1056,11 @@ impl Parser {
                     found: ")".to_string(),
                     span: self.current_span(),
                 })?;
-                AggregateFunction::Avg(inner)
+                if is_distinct {
+                    AggregateFunction::AvgDistinct(inner)
+                } else {
+                    AggregateFunction::Avg(inner)
+                }
             }
             "MIN" => {
                 let inner = inner.ok_or_else(|| ParseError::UnexpectedToken {
@@ -1020,11 +1084,15 @@ impl Parser {
                     found: ")".to_string(),
                     span: self.current_span(),
                 })?;
-                AggregateFunction::Collect(inner)
+                if is_distinct {
+                    AggregateFunction::CollectDistinct(inner)
+                } else {
+                    AggregateFunction::Collect(inner)
+                }
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi, id, elementId, type, startNode, endNode, labels, properties, keys, coalesce, nullIf, toBoolean, toFloat, toInteger, timestamp, randomUUID)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, percentileCont, percentileDisc, stDev, stDevP, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi, id, elementId, type, startNode, endNode, labels, properties, keys, coalesce, nullIf, toBoolean, toFloat, toInteger, timestamp, randomUUID)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });

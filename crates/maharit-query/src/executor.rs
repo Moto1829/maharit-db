@@ -1348,6 +1348,14 @@ impl<'a> Executor<'a> {
             AggregateFunction::Min(_) => "min".to_string(),
             AggregateFunction::Max(_) => "max".to_string(),
             AggregateFunction::Collect(_) => "collect".to_string(),
+            AggregateFunction::PercentileCont(..) => "percentileCont".to_string(),
+            AggregateFunction::PercentileDisc(..) => "percentileDisc".to_string(),
+            AggregateFunction::StDev(_) => "stDev".to_string(),
+            AggregateFunction::StDevP(_) => "stDevP".to_string(),
+            AggregateFunction::CountDistinct(_) => "count".to_string(),
+            AggregateFunction::SumDistinct(_) => "sum".to_string(),
+            AggregateFunction::AvgDistinct(_) => "avg".to_string(),
+            AggregateFunction::CollectDistinct(_) => "collect".to_string(),
         }
     }
 
@@ -2000,6 +2008,34 @@ impl<'a> Executor<'a> {
                 }
                 AggregateFunction::Collect(inner) => {
                     format!("COLLECT({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::PercentileCont(e, p) => format!(
+                    "percentileCont({}, {})",
+                    self.return_item_to_column_name(e),
+                    self.return_item_to_column_name(p)
+                ),
+                AggregateFunction::PercentileDisc(e, p) => format!(
+                    "percentileDisc({}, {})",
+                    self.return_item_to_column_name(e),
+                    self.return_item_to_column_name(p)
+                ),
+                AggregateFunction::StDev(inner) => {
+                    format!("stDev({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::StDevP(inner) => {
+                    format!("stDevP({})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::CountDistinct(inner) => {
+                    format!("COUNT(DISTINCT {})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::SumDistinct(inner) => {
+                    format!("SUM(DISTINCT {})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::AvgDistinct(inner) => {
+                    format!("AVG(DISTINCT {})", self.return_item_to_column_name(inner))
+                }
+                AggregateFunction::CollectDistinct(inner) => {
+                    format!("COLLECT(DISTINCT {})", self.return_item_to_column_name(inner))
                 }
             },
             ReturnItem::Function(func) => match func {
@@ -3180,6 +3216,214 @@ impl<'a> Executor<'a> {
                         })
                         .collect();
                     Ok(Value::String(format!("[{}]", collected.join(", "))))
+                }
+                AggregateFunction::PercentileCont(inner, percentile_item) => {
+                    let mut values: Vec<f64> = Vec::new();
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => values.push(n as f64),
+                            Value::Float(n) => values.push(n),
+                            _ => {}
+                        }
+                    }
+                    if values.is_empty() {
+                        return Ok(Value::Null);
+                    }
+                    let p = match self.evaluate_return_item(
+                        percentile_item,
+                        bindings_list.first().unwrap_or(&Bindings::new()),
+                    )? {
+                        Value::Float(f) => f,
+                        Value::Int(n) => n as f64,
+                        _ => {
+                            return Err(ExecuteError::TypeError(
+                                "percentileCont() percentile must be a number between 0 and 1"
+                                    .to_string(),
+                            ))
+                        }
+                    };
+                    if p < 0.0 || p > 1.0 {
+                        return Err(ExecuteError::TypeError(
+                            "percentileCont() percentile must be between 0 and 1".to_string(),
+                        ));
+                    }
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let idx = p * (values.len() - 1) as f64;
+                    let lower = idx.floor() as usize;
+                    let upper = idx.ceil() as usize;
+                    if lower == upper || upper >= values.len() {
+                        Ok(Value::Float(values[lower]))
+                    } else {
+                        let frac = idx - lower as f64;
+                        Ok(Value::Float(
+                            values[lower] + (values[upper] - values[lower]) * frac,
+                        ))
+                    }
+                }
+                AggregateFunction::PercentileDisc(inner, percentile_item) => {
+                    let mut values: Vec<f64> = Vec::new();
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => values.push(n as f64),
+                            Value::Float(n) => values.push(n),
+                            _ => {}
+                        }
+                    }
+                    if values.is_empty() {
+                        return Ok(Value::Null);
+                    }
+                    let p = match self.evaluate_return_item(
+                        percentile_item,
+                        bindings_list.first().unwrap_or(&Bindings::new()),
+                    )? {
+                        Value::Float(f) => f,
+                        Value::Int(n) => n as f64,
+                        _ => {
+                            return Err(ExecuteError::TypeError(
+                                "percentileDisc() percentile must be a number between 0 and 1"
+                                    .to_string(),
+                            ))
+                        }
+                    };
+                    if p < 0.0 || p > 1.0 {
+                        return Err(ExecuteError::TypeError(
+                            "percentileDisc() percentile must be between 0 and 1".to_string(),
+                        ));
+                    }
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let idx = if p == 0.0 {
+                        0
+                    } else {
+                        ((p * values.len() as f64).ceil() as usize)
+                            .saturating_sub(1)
+                            .min(values.len() - 1)
+                    };
+                    let val = values[idx];
+                    if val.fract() == 0.0 && val.abs() < i64::MAX as f64 {
+                        Ok(Value::Int(val as i64))
+                    } else {
+                        Ok(Value::Float(val))
+                    }
+                }
+                AggregateFunction::StDev(inner) => {
+                    let mut values: Vec<f64> = Vec::new();
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => values.push(n as f64),
+                            Value::Float(n) => values.push(n),
+                            _ => {}
+                        }
+                    }
+                    let n = values.len();
+                    if n < 2 {
+                        return Ok(Value::Float(0.0));
+                    }
+                    let mean = values.iter().sum::<f64>() / n as f64;
+                    let variance = values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>()
+                        / (n - 1) as f64;
+                    Ok(Value::Float(variance.sqrt()))
+                }
+                AggregateFunction::StDevP(inner) => {
+                    let mut values: Vec<f64> = Vec::new();
+                    for bindings in bindings_list {
+                        match self.evaluate_return_item(inner, bindings)? {
+                            Value::Int(n) => values.push(n as f64),
+                            Value::Float(n) => values.push(n),
+                            _ => {}
+                        }
+                    }
+                    let n = values.len();
+                    if n == 0 {
+                        return Ok(Value::Float(0.0));
+                    }
+                    let mean = values.iter().sum::<f64>() / n as f64;
+                    let variance =
+                        values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+                    Ok(Value::Float(variance.sqrt()))
+                }
+                AggregateFunction::CountDistinct(inner) => {
+                    let mut seen = std::collections::HashSet::<String>::new();
+                    let mut count = 0i64;
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        let key = format!("{}", val);
+                        if seen.insert(key) {
+                            count += 1;
+                        }
+                    }
+                    Ok(Value::Int(count))
+                }
+                AggregateFunction::SumDistinct(inner) => {
+                    let mut seen = std::collections::HashSet::<String>::new();
+                    let mut sum = 0.0f64;
+                    let mut has_float = false;
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        let key = format!("{}", val);
+                        if seen.insert(key) {
+                            match val {
+                                Value::Int(n) => sum += n as f64,
+                                Value::Float(n) => {
+                                    sum += n;
+                                    has_float = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if has_float {
+                        Ok(Value::Float(sum))
+                    } else {
+                        Ok(Value::Int(sum as i64))
+                    }
+                }
+                AggregateFunction::AvgDistinct(inner) => {
+                    let mut seen = std::collections::HashSet::<String>::new();
+                    let mut sum = 0.0f64;
+                    let mut count = 0usize;
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        let key = format!("{}", val);
+                        if seen.insert(key) {
+                            match val {
+                                Value::Int(n) => {
+                                    sum += n as f64;
+                                    count += 1;
+                                }
+                                Value::Float(n) => {
+                                    sum += n;
+                                    count += 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if count == 0 {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(Value::Float(sum / count as f64))
+                    }
+                }
+                AggregateFunction::CollectDistinct(inner) => {
+                    let mut seen = std::collections::HashSet::<String>::new();
+                    let mut result = Vec::new();
+                    for bindings in bindings_list {
+                        let val = self.evaluate_return_item(inner, bindings)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        let key = format!("{}", val);
+                        if seen.insert(key) {
+                            result.push(val);
+                        }
+                    }
+                    Ok(Value::List(result))
                 }
             },
             // Non-aggregate items in an aggregated query just use the first binding
@@ -6859,5 +7103,156 @@ mod tests {
             result.rows[0].columns[0],
             Value::List(vec![Value::Int(6), Value::Int(8), Value::Int(10)])
         );
+    }
+
+    // ========== Task 42: Extended Aggregation Functions ==========
+
+    #[test]
+    fn test_percentile_cont() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {age: 10})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {age: 20})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {age: 40})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {age: 50})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN percentileCont(n.age, 0.5)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Median of [10,20,30,40,50] with linear interpolation = 30.0
+        assert_eq!(result.rows[0].columns[0], Value::Float(30.0));
+    }
+
+    #[test]
+    fn test_percentile_disc() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person2 {age: 10})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person2 {age: 20})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person2 {age: 30})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person2 {age: 40})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person2 {age: 50})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person2) RETURN percentileDisc(n.age, 0.5)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Discrete median: ceil(0.5 * 5) - 1 = ceil(2.5) - 1 = 3 - 1 = 2 → value at index 2 = 30
+        assert_eq!(result.rows[0].columns[0], Value::Int(30));
+    }
+
+    #[test]
+    fn test_stdev() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Score {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 5})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 5})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 7})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score {v: 9})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Score) RETURN stDev(n.v)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sample std dev of [2,4,4,4,5,5,7,9] = sqrt(32/7) ≈ 2.138
+        if let Value::Float(v) = result.rows[0].columns[0] {
+            assert!((v - 2.138).abs() < 0.01, "expected ~2.138, got {}", v);
+        } else {
+            panic!("expected Float, got {:?}", result.rows[0].columns[0]);
+        }
+    }
+
+    #[test]
+    fn test_stdevp() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 4})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 5})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 5})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 7})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Score2 {v: 9})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Score2) RETURN stDevP(n.v)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Population std dev of [2,4,4,4,5,5,7,9] = sqrt(32/8) = 2.0
+        if let Value::Float(v) = result.rows[0].columns[0] {
+            assert!((v - 2.0).abs() < 0.01, "expected ~2.0, got {}", v);
+        } else {
+            panic!("expected Float, got {:?}", result.rows[0].columns[0]);
+        }
+    }
+
+    #[test]
+    fn test_count_distinct() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:City {name: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:City {name: "Osaka"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:City {name: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:City {name: "Kyoto"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:City {name: "Osaka"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:City) RETURN COUNT(DISTINCT n.name)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_sum_distinct() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Val {v: 1})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val {v: 3})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Val) RETURN SUM(DISTINCT n.v)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sum of distinct values: 1 + 2 + 3 = 6
+        assert_eq!(result.rows[0].columns[0], Value::Int(6));
+    }
+
+    #[test]
+    fn test_avg_distinct() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Val2 {v: 1})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val2 {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val2 {v: 2})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Val2 {v: 3})"#).unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Val2) RETURN AVG(DISTINCT n.v)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Avg of distinct values: (1+2+3)/3 = 2.0
+        assert_eq!(result.rows[0].columns[0], Value::Float(2.0));
+    }
+
+    #[test]
+    fn test_collect_distinct() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Tag {name: "rust"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Tag {name: "python"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Tag {name: "rust"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Tag) RETURN COLLECT(DISTINCT n.name)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Should be a list with 2 distinct values
+        if let Value::List(items) = &result.rows[0].columns[0] {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected List, got {:?}", result.rows[0].columns[0]);
+        }
     }
 }

@@ -297,6 +297,22 @@ pub enum AggregateFunction {
     Max(Box<ReturnItem>),
     /// COLLECT(expr)
     Collect(Box<ReturnItem>),
+    /// percentileCont(expr, percentile) - 連続パーセンタイル（補間あり）
+    PercentileCont(Box<ReturnItem>, Box<ReturnItem>),
+    /// percentileDisc(expr, percentile) - 離散パーセンタイル（最近値）
+    PercentileDisc(Box<ReturnItem>, Box<ReturnItem>),
+    /// stDev(expr) - 標本標準偏差
+    StDev(Box<ReturnItem>),
+    /// stDevP(expr) - 母標準偏差
+    StDevP(Box<ReturnItem>),
+    /// COUNT(DISTINCT expr) - 重複排除カウント
+    CountDistinct(Box<ReturnItem>),
+    /// SUM(DISTINCT expr) - 重複排除合計
+    SumDistinct(Box<ReturnItem>),
+    /// AVG(DISTINCT expr) - 重複排除平均
+    AvgDistinct(Box<ReturnItem>),
+    /// COLLECT(DISTINCT expr) - 重複排除コレクト
+    CollectDistinct(Box<ReturnItem>),
 }
 
 /// スカラー関数（パス操作用）
