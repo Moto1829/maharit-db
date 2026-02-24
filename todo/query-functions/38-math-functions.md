@@ -1,47 +1,64 @@
-# 数学関数
+# Task 38: Math Functions
 
-## 概要
-Cypherの組み込み数学関数を実装する。
+## Status
+✅ COMPLETED
 
-## 実装内容
+## Summary
+Added 13 mathematical functions to the maharit-db Cypher-like query language:
+- `abs(v)` - absolute value
+- `ceil(v)` - ceiling (round up)
+- `floor(v)` - floor (round down)
+- `round(v)` or `round(v, precision)` - rounding with optional precision
+- `sign(v)` - sign (-1, 0, or 1)
+- `rand()` - random number [0.0, 1.0)
+- `isNaN(v)` - check if value is NaN
+- `log(v)` - natural logarithm
+- `log10(v)` - base-10 logarithm
+- `sqrt(v)` - square root
+- `e()` - Euler's number
+- `pi()` - Pi constant
 
-### 基本数学関数
-- [ ] abs(value): 絶対値
-- [ ] ceil(value): 切り上げ
-- [ ] floor(value): 切り捨て
-- [ ] round(value): 四捨五入
-- [ ] round(value, precision): 指定桁数で四捨五入
-- [ ] sign(value): 符号（-1, 0, 1）
+## Files Modified
+All in `/Users/suzukishimei/Git/maharit-db/crates/maharit-query/src/`:
 
-### ユーティリティ
-- [ ] rand(): 0以上1未満のランダム数
-- [ ] isNaN(value): NaNチェック
+1. **ast.rs** - Added 13 new variants to `ScalarFunction` enum (lines 339-351)
+2. **parser.rs** - Extended `parse_aggregate_function()` with 3 new match arms (lines 795-834), updated error message (line 886)
+3. **executor.rs** - Extended 3 functions:
+   - `function_to_name()` - Added 13 match arms (lines 1389-1401)
+   - `return_item_to_column_name()` - Added 13 match arms (lines 2034-2057)
+   - `evaluate_scalar_function()` - Added 13 match arms implementing the math logic (lines 2390-2499)
+   - Added 8 new comprehensive tests (lines 5584-5725)
 
-### 対数・指数（将来的）
-- [ ] log(value): 自然対数
-- [ ] log10(value): 常用対数
-- [ ] sqrt(value): 平方根
-- [ ] e(): ネイピア数
-- [ ] pi(): 円周率
+## Implementation Details
 
-## クエリ例
-```cypher
--- 絶対値
-MATCH (n:Product) RETURN abs(n.price - 100) AS diff
+### Zero-argument functions
+- `rand()` - Uses `DefaultHasher` with `SystemTime` and thread ID for entropy
+- `e()` - Returns `std::f64::consts::E`
+- `pi()` - Returns `std::f64::consts::PI`
 
--- 四捨五入
-MATCH (n:Product) RETURN round(n.price, 2) AS rounded_price
+### One-argument functions
+All handle `Int`, `Float`, and `Null` appropriately:
+- `abs()` - Returns absolute value, preserving type
+- `ceil()` - Returns `Int`, passes through `Int` unchanged
+- `floor()` - Returns `Int`, passes through `Int` unchanged
+- `sign()` - Returns `Int` (-1, 0, or 1)
+- `isNaN()` - Returns `Bool` (always false for `Int`)
+- `log()` - Returns `Float` (natural logarithm)
+- `log10()` - Returns `Float` (base-10 logarithm)
+- `sqrt()` - Returns `Float` (square root)
 
--- 切り上げ・切り捨て
-MATCH (n:Product) RETURN ceil(n.rating) AS ceil_rating, floor(n.rating) AS floor_rating
+### Two-argument function
+- `round(v)` - Rounds to nearest integer, returns `Int`
+- `round(v, precision)` - Rounds to `precision` decimal places, returns `Float`
 
--- ランダム
-MATCH (n:Person) RETURN n.name, rand() AS random_score ORDER BY random_score
-```
+## Test Results
+- All 8 new tests pass
+- Total maharit-query tests: 281 (up from 273)
+- All existing tests still pass
+- No new clippy warnings introduced
 
-## 依存
-- `03-query-parser.md` が完了していること
-- `04-query-executor.md` が完了していること
-
-## 対象クレート
-`maharit-query`
+## Notes
+- Uses `PropertyValue` from `maharit-core` for setting graph properties in tests
+- Follows the same pattern as Task 37 (string functions)
+- All match arms are exhaustive to satisfy Rust compiler
+- No external dependencies needed (uses std only)
