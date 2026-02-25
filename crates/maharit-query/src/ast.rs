@@ -70,11 +70,55 @@ pub struct MatchClause {
     pub optional: bool,
 }
 
+/// サブクエリのパターン部（EXISTSとCOUNTに使用）
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubqueryPattern {
+    /// パターンリスト
+    pub patterns: Vec<Pattern>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+}
+
+/// COLLECTサブクエリ本体
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectSubqueryBody {
+    /// パターンリスト
+    pub patterns: Vec<Pattern>,
+    /// WHERE句
+    pub where_clause: Option<Expression>,
+    /// RETURN対象の単一項目
+    pub return_item: ReturnItem,
+}
+
+/// CALLサブクエリ
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallSubquery {
+    /// WITH句でインポートする変数（省略可）
+    pub with_import: Option<Vec<String>>,
+    /// 内部MATCHパターン
+    pub match_clause: MatchClause,
+    /// 内部WHERE句
+    pub where_clause: Option<Expression>,
+    /// 内部RETURN項目（エイリアスあり）
+    pub return_items: Vec<CallReturnItem>,
+}
+
+/// CALLサブクエリのRETURN項目（エイリアスあり）
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallReturnItem {
+    /// 式
+    pub expression: ReturnItem,
+    /// エイリアス（AS name）
+    pub alias: Option<String>,
+}
+
 /// MATCH文（MATCH + OPTIONAL MATCH + WHERE + WITH/RETURN）
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchStatement {
     /// クエリセグメントのリスト（WITH句で区切られる）
     pub segments: Vec<QuerySegment>,
+    /// CALLサブクエリ（省略可）
+    pub call_clause: Option<CallSubquery>,
     /// 最終的なRETURN句
     pub return_clause: ReturnClause,
 }
@@ -455,6 +499,12 @@ pub enum Expression {
     },
     /// パラメータ参照: $name
     Parameter(String),
+    /// EXISTS { MATCH pattern } - パターン存在チェック
+    ExistsSubquery(Box<SubqueryPattern>),
+    /// COUNT { MATCH pattern } - パターンカウント
+    CountSubquery(Box<SubqueryPattern>),
+    /// COLLECT { MATCH ... RETURN expr } - サブクエリ結果リスト
+    CollectSubquery(Box<CollectSubqueryBody>),
 }
 
 /// CASE式

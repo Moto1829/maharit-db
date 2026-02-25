@@ -338,12 +338,20 @@ impl Parser {
             }
         }
 
+        // Check for CALL subquery before RETURN
+        let call_clause = if self.check(TokenKind::Call) {
+            Some(self.parse_call_subquery()?)
+        } else {
+            None
+        };
+
         // Parse final RETURN clause
         self.expect(TokenKind::Return)?;
         let return_clause = self.parse_return_clause()?;
 
         Ok(Statement::Match(MatchStatement {
             segments,
+            call_clause,
             return_clause,
         }))
     }
@@ -692,6 +700,31 @@ impl Parser {
         }
 
         let var = self.expect_ident()?;
+
+        // Check for subquery forms: EXISTS/COUNT/COLLECT followed by '{'
+        if self.check(TokenKind::LBrace) {
+            match var.to_uppercase().as_str() {
+                "EXISTS" => {
+                    self.advance(); // consume '{'
+                    let subquery = self.parse_subquery_pattern()?;
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(ReturnItem::Expr(Expression::ExistsSubquery(Box::new(subquery))));
+                }
+                "COUNT" => {
+                    self.advance(); // consume '{'
+                    let subquery = self.parse_subquery_pattern()?;
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(ReturnItem::Expr(Expression::CountSubquery(Box::new(subquery))));
+                }
+                "COLLECT" => {
+                    self.advance(); // consume '{'
+                    let body = self.parse_collect_subquery_body()?;
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(ReturnItem::Expr(Expression::CollectSubquery(Box::new(body))));
+                }
+                _ => {}
+            }
+        }
 
         // Check if it's a function call (identifier followed by parenthesis)
         if self.check(TokenKind::LParen) {
@@ -1510,6 +1543,111 @@ impl Parser {
         }))
     }
 
+    // ========== Subqueries ==========
+
+    /// CALL { [WITH var, ...] MATCH pattern [WHERE expr] RETURN item [AS alias], ... }
+    fn parse_call_subquery(&mut self) -> Result<CallSubquery, ParseError> {
+        self.expect(TokenKind::Call)?;
+        self.expect(TokenKind::LBrace)?;
+
+        // Optional WITH import: WITH var1, var2, ...
+        let with_import = if self.check(TokenKind::With) {
+            self.advance();
+            let mut vars = Vec::new();
+            vars.push(self.expect_ident()?);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                vars.push(self.expect_ident()?);
+            }
+            Some(vars)
+        } else {
+            None
+        };
+
+        // Inner MATCH
+        self.expect(TokenKind::Match)?;
+        let match_clause = self.parse_match_clause(false)?;
+
+        // Inner WHERE
+        let where_clause = if self.check(TokenKind::Where) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        // Inner RETURN with optional AS aliases
+        self.expect(TokenKind::Return)?;
+        let mut return_items = Vec::new();
+        return_items.push(self.parse_call_return_item()?);
+        while self.check(TokenKind::Comma) {
+            self.advance();
+            return_items.push(self.parse_call_return_item()?);
+        }
+
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(CallSubquery {
+            with_import,
+            match_clause,
+            where_clause,
+            return_items,
+        })
+    }
+
+    fn parse_call_return_item(&mut self) -> Result<CallReturnItem, ParseError> {
+        let expression = self.parse_return_item()?;
+        let alias = if self.check(TokenKind::As) {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(CallReturnItem { expression, alias })
+    }
+
+    /// Parse subquery pattern body for EXISTS/COUNT: MATCH pattern [WHERE expr]
+    fn parse_subquery_pattern(&mut self) -> Result<SubqueryPattern, ParseError> {
+        self.expect(TokenKind::Match)?;
+        let match_clause = self.parse_match_clause(false)?;
+        let patterns = match_clause.patterns;
+
+        let where_clause = if self.check(TokenKind::Where) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        Ok(SubqueryPattern {
+            patterns,
+            where_clause,
+        })
+    }
+
+    /// Parse collect subquery body: MATCH pattern [WHERE expr] RETURN item
+    fn parse_collect_subquery_body(&mut self) -> Result<CollectSubqueryBody, ParseError> {
+        self.expect(TokenKind::Match)?;
+        let match_clause = self.parse_match_clause(false)?;
+        let patterns = match_clause.patterns;
+
+        let where_clause = if self.check(TokenKind::Where) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Return)?;
+        let return_item = self.parse_return_item()?;
+
+        Ok(CollectSubqueryBody {
+            patterns,
+            where_clause,
+            return_item,
+        })
+    }
+
     fn current_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -1884,6 +2022,30 @@ impl Parser {
             Some(TokenKind::Case) => self.parse_case_expression(),
             Some(TokenKind::Ident(_)) => {
                 let var = self.expect_ident()?;
+                // Check for EXISTS/COUNT/COLLECT subqueries (identifier followed by '{')
+                if self.check(TokenKind::LBrace) {
+                    match var.to_uppercase().as_str() {
+                        "EXISTS" => {
+                            self.advance(); // consume '{'
+                            let subquery = self.parse_subquery_pattern()?;
+                            self.expect(TokenKind::RBrace)?;
+                            return Ok(Expression::ExistsSubquery(Box::new(subquery)));
+                        }
+                        "COUNT" => {
+                            self.advance(); // consume '{'
+                            let subquery = self.parse_subquery_pattern()?;
+                            self.expect(TokenKind::RBrace)?;
+                            return Ok(Expression::CountSubquery(Box::new(subquery)));
+                        }
+                        "COLLECT" => {
+                            self.advance(); // consume '{'
+                            let body = self.parse_collect_subquery_body()?;
+                            self.expect(TokenKind::RBrace)?;
+                            return Ok(Expression::CollectSubquery(Box::new(body)));
+                        }
+                        _ => {}
+                    }
+                }
                 if self.check(TokenKind::Dot) {
                     self.advance();
                     let prop = self.expect_ident()?;
@@ -3147,5 +3309,165 @@ mod tests {
     fn test_parse_unwind_keyword() {
         let stmt = parse("UNWIND [1] AS x RETURN x");
         assert!(stmt.is_ok());
+    }
+
+    // ========== Subquery parser tests ==========
+
+    #[test]
+    fn test_parse_exists_subquery_in_where() {
+        let stmt = parse(
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse EXISTS subquery: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_exists_subquery_with_where_clause() {
+        let stmt = parse(
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(f:Person) WHERE f.name = "Bob" } RETURN p.name"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse EXISTS subquery with WHERE: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_count_subquery_in_where() {
+        let stmt = parse(
+            r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 5 RETURN p.name"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse COUNT subquery in WHERE: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_count_subquery_in_return() {
+        let stmt = parse(
+            r#"MATCH (p:Person) RETURN COUNT { MATCH (p)-[:KNOWS]->() }"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse COUNT subquery in RETURN: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_collect_subquery_in_return() {
+        let stmt = parse(
+            r#"MATCH (p:Person) RETURN COLLECT { MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name }"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse COLLECT subquery: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_call_subquery_with_with() {
+        let stmt = parse(
+            r#"MATCH (p:Person)
+               CALL {
+                 WITH p
+                 MATCH (p)-[:KNOWS]->(f:Person)
+                 RETURN COUNT(f) AS friend_count
+               }
+               RETURN p.name, friend_count"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse CALL subquery with WITH: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_call_subquery_without_with() {
+        let stmt = parse(
+            r#"MATCH (p:Person)
+               CALL {
+                 MATCH (q:Person)
+                 RETURN COUNT(q) AS total
+               }
+               RETURN p.name, total"#,
+        );
+        assert!(stmt.is_ok(), "Failed to parse CALL subquery without WITH: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_call_subquery_ast_structure() {
+        let stmt = parse(
+            r#"MATCH (p:Person)
+               CALL {
+                 WITH p
+                 MATCH (p)-[:KNOWS]->(f:Person)
+                 RETURN COUNT(f) AS friend_count
+               }
+               RETURN p.name, friend_count"#,
+        )
+        .unwrap();
+
+        match stmt {
+            Statement::Match(m) => {
+                assert!(m.call_clause.is_some(), "Expected call_clause to be Some");
+                let call = m.call_clause.unwrap();
+                assert_eq!(call.with_import, Some(vec!["p".to_string()]));
+            }
+            _ => panic!("Expected Match statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exists_subquery_ast_structure() {
+        let stmt = parse(
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name"#,
+        )
+        .unwrap();
+
+        match stmt {
+            Statement::Match(m) => {
+                let segment = &m.segments[0];
+                let where_expr = segment.where_clause.as_ref().expect("Expected WHERE clause");
+                assert!(
+                    matches!(where_expr, Expression::ExistsSubquery(_)),
+                    "Expected ExistsSubquery expression, got {:?}",
+                    where_expr
+                );
+            }
+            _ => panic!("Expected Match statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_count_subquery_ast_structure() {
+        let stmt = parse(
+            r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 0 RETURN p.name"#,
+        )
+        .unwrap();
+
+        match stmt {
+            Statement::Match(m) => {
+                let segment = &m.segments[0];
+                let where_expr = segment.where_clause.as_ref().expect("Expected WHERE clause");
+                // The WHERE clause is: COUNT{...} > 0, which is a BinaryOp
+                assert!(
+                    matches!(where_expr, Expression::BinaryOp(_, _, _)),
+                    "Expected BinaryOp containing CountSubquery"
+                );
+                if let Expression::BinaryOp(left, op, _right) = where_expr {
+                    assert!(matches!(op, BinaryOp::Gt));
+                    assert!(
+                        matches!(left.as_ref(), Expression::CountSubquery(_)),
+                        "Expected CountSubquery on left of BinaryOp"
+                    );
+                }
+            }
+            _ => panic!("Expected Match statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_collect_subquery_ast_structure() {
+        let stmt = parse(
+            r#"MATCH (p:Person) RETURN COLLECT { MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name }"#,
+        )
+        .unwrap();
+
+        match stmt {
+            Statement::Match(m) => {
+                assert_eq!(m.return_clause.items.len(), 1);
+                match &m.return_clause.items[0] {
+                    ReturnItem::Expr(Expression::CollectSubquery(_)) => {}
+                    other => panic!("Expected CollectSubquery return item, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Match statement"),
+        }
     }
 }

@@ -1284,8 +1284,100 @@ impl<'a> Executor<'a> {
             all_bindings = self.execute_query_segment(segment, all_bindings)?;
         }
 
+        // Execute CALL subquery if present
+        if let Some(ref call) = m.call_clause {
+            all_bindings = self.execute_call_subquery(call, all_bindings)?;
+        }
+
         // Build result set
         self.build_result_set(&m.return_clause, &all_bindings)
+    }
+
+    fn execute_call_subquery(
+        &self,
+        call: &CallSubquery,
+        outer_bindings: Vec<Bindings>,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        let mut result = Vec::new();
+
+        for outer in outer_bindings {
+            // Build inner starting bindings from WITH imports
+            let inner_start = if let Some(ref imports) = call.with_import {
+                let mut inner = Bindings::new();
+                for var in imports {
+                    if let Some(val) = outer.get(var) {
+                        inner.insert(var.clone(), val.clone());
+                    }
+                }
+                inner
+            } else {
+                // Without WITH, inner subquery has no access to outer bindings
+                Bindings::new()
+            };
+
+            // Execute inner MATCH
+            let mut inner_bindings = vec![inner_start];
+            inner_bindings = self.execute_match_clause(&call.match_clause, inner_bindings)?;
+
+            // Apply inner WHERE
+            if let Some(ref where_expr) = call.where_clause {
+                inner_bindings = inner_bindings
+                    .into_iter()
+                    .filter(|b| {
+                        self.evaluate_expression(where_expr, b)
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+            }
+
+            // Evaluate each return item for all inner bindings
+            // We build a temporary ReturnClause to use build_result_set for aggregation support
+            let temp_return_clause = ReturnClause {
+                distinct: false,
+                items: call
+                    .return_items
+                    .iter()
+                    .map(|ri| ri.expression.clone())
+                    .collect(),
+                order_by: None,
+                skip: None,
+                limit: None,
+            };
+            let inner_result = self.build_result_set(&temp_return_clause, &inner_bindings)?;
+
+            // Compute effective column names (alias takes priority over generated name)
+            let col_names: Vec<String> = call
+                .return_items
+                .iter()
+                .enumerate()
+                .map(|(i, ri)| {
+                    ri.alias.clone().unwrap_or_else(|| {
+                        inner_result
+                            .columns
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| format!("col{}", i))
+                    })
+                })
+                .collect();
+
+            if inner_result.rows.is_empty() {
+                // No inner results - skip this outer row (inner join semantics)
+                continue;
+            }
+
+            // Merge: for each inner row, combine outer binding + inner row columns as scalars
+            for inner_row in &inner_result.rows {
+                let mut merged = outer.clone();
+                for (col_name, col_val) in col_names.iter().zip(inner_row.columns.iter()) {
+                    merged.insert(col_name.clone(), BindingValue::Scalar(col_val.clone()));
+                }
+                result.push(merged);
+            }
+        }
+
+        Ok(result)
     }
 
     fn execute_query_segment(
@@ -3634,6 +3726,68 @@ impl<'a> Executor<'a> {
                     .get(name)
                     .cloned()
                     .ok_or_else(|| ExecuteError::UndefinedVariable(format!("${}", name)))
+            }
+            Expression::ExistsSubquery(subquery) => {
+                // Evaluate patterns starting from current bindings
+                let mut matches = vec![bindings.clone()];
+                for pattern in &subquery.patterns {
+                    matches = self.match_pattern(pattern, matches)?;
+                }
+                // Apply WHERE filter
+                if let Some(ref where_expr) = subquery.where_clause {
+                    matches = matches
+                        .into_iter()
+                        .filter(|b| {
+                            self.evaluate_expression(where_expr, b)
+                                .map(|v| matches!(v, Value::Bool(true)))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                }
+                Ok(Value::Bool(!matches.is_empty()))
+            }
+            Expression::CountSubquery(subquery) => {
+                // Evaluate patterns starting from current bindings
+                let mut matches = vec![bindings.clone()];
+                for pattern in &subquery.patterns {
+                    matches = self.match_pattern(pattern, matches)?;
+                }
+                // Apply WHERE filter
+                if let Some(ref where_expr) = subquery.where_clause {
+                    matches = matches
+                        .into_iter()
+                        .filter(|b| {
+                            self.evaluate_expression(where_expr, b)
+                                .map(|v| matches!(v, Value::Bool(true)))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                }
+                Ok(Value::Int(matches.len() as i64))
+            }
+            Expression::CollectSubquery(body) => {
+                // Evaluate patterns starting from current bindings
+                let mut matches = vec![bindings.clone()];
+                for pattern in &body.patterns {
+                    matches = self.match_pattern(pattern, matches)?;
+                }
+                // Apply WHERE filter
+                if let Some(ref where_expr) = body.where_clause {
+                    matches = matches
+                        .into_iter()
+                        .filter(|b| {
+                            self.evaluate_expression(where_expr, b)
+                                .map(|v| matches!(v, Value::Bool(true)))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                }
+                // Evaluate return item for each match
+                let values: Vec<Value> = matches
+                    .iter()
+                    .map(|b| self.evaluate_return_item(&body.return_item, b))
+                    .collect::<Result<_, _>>()?;
+                Ok(Value::List(values))
             }
         }
     }
@@ -7448,5 +7602,279 @@ mod tests {
         // because evaluate_expression returns Err which is treated as non-match
         // Just verify it doesn't panic
         let _ = result;
+    }
+
+    // ========== Subquery tests ==========
+
+    #[test]
+    fn test_exists_subquery_true() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // Alice KNOWS Bob, so EXISTS should be true for Alice
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person {name: "Alice"}) WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_exists_subquery_false() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"}), (b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // No KNOWS edges, EXISTS should filter out all results
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 0);
+    }
+
+    #[test]
+    fn test_exists_subquery_filters_correctly() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (c:Person {name: "Charlie"})"#,
+        )
+        .unwrap();
+
+        // Only Alice has KNOWS relationship
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_count_subquery_basic() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice"})-[:KNOWS]->(:Person {name: "Carol"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Dave"})"#,
+        )
+        .unwrap();
+
+        // People with more than 0 KNOWS connections (Alice instances have 1 each)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 0 RETURN p.name"#,
+        )
+        .unwrap();
+
+        // Alice (x2) should match, Dave should not
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_count_subquery_returns_integer() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (c:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(c)"#,
+        )
+        .unwrap();
+
+        // Return the count as a value
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person {name: "Alice"}) RETURN COUNT { MATCH (p)-[:KNOWS]->() }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        // COUNT returns an integer value
+        assert!(matches!(result.rows[0].columns[0], Value::Int(_)));
+    }
+
+    #[test]
+    fn test_collect_subquery_basic() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (c:Person {name: "Bob"})
+               CREATE (a)-[:KNOWS]->(:Person {name: "Carol"})"#,
+        )
+        .unwrap();
+
+        // COLLECT subquery returns a list of friend names
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person {name: "Alice"})
+               RETURN COLLECT { MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert!(matches!(result.rows[0].columns[0], Value::List(_)));
+    }
+
+    #[test]
+    fn test_collect_subquery_empty() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        // COLLECT on empty pattern match returns empty list
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person {name: "Alice"})
+               RETURN COLLECT { MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_call_subquery_basic() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // CALL subquery with WITH import: get friend count for each person
+        // COUNT aggregation always produces a result row (even with 0 matches),
+        // so both Alice and Bob appear in results
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person)
+               CALL {
+                 WITH p
+                 MATCH (p)-[:KNOWS]->(f:Person)
+                 RETURN COUNT(f) AS friend_count
+               }
+               RETURN p.name, friend_count"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.columns.len(), 2);
+        // Both Person nodes appear since COUNT always returns a row
+        assert_eq!(result.row_count(), 2);
+        // Verify friend_count values exist
+        for row in &result.rows {
+            assert!(matches!(row.columns[1], Value::Int(_)));
+        }
+    }
+
+    #[test]
+    fn test_call_subquery_without_with() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice"}), (:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // CALL subquery without WITH: inner query is independent
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person)
+               CALL {
+                 MATCH (q:Person)
+                 RETURN COUNT(q) AS total
+               }
+               RETURN p.name, total"#,
+        )
+        .unwrap();
+
+        // Each outer person row gets combined with inner result
+        assert!(result.row_count() >= 1);
+    }
+
+    #[test]
+    fn test_exists_subquery_with_where() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice", city: "Tokyo"})-[:KNOWS]->(b:Person {name: "Bob", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (c:Person {name: "Charlie", city: "Osaka"})-[:KNOWS]->(d:Person {name: "Dave", city: "Osaka"})"#,
+        )
+        .unwrap();
+
+        // EXISTS with WHERE inside subquery
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(f:Person) WHERE f.city = "Tokyo" } RETURN p.name"#,
+        )
+        .unwrap();
+
+        // Only Alice knows someone in Tokyo
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_count_subquery_return_value() {
+        let mut graph = Graph::new();
+        // Person with no friends
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (p:Person) RETURN p.name, COUNT { MATCH (p)-[:KNOWS]->() }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[1], Value::Int(0));
     }
 }

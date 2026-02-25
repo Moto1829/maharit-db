@@ -353,6 +353,11 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
         }
     }
 
+    if m.call_clause.is_some() {
+        let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+        nodes.push(PlanNode::new("CallSubquery", prev_est, prev_est / 5 + 1, ""));
+    }
+
     let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
     nodes.push(PlanNode::new("Projection", final_est, final_est / 10 + 1, ""));
 

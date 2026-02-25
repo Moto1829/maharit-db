@@ -94,6 +94,8 @@ pub enum TokenKind {
     Normalized,
     // リスト演算子用キーワード
     In, // IN キーワード
+    // サブクエリ用キーワード
+    Call,
     // パラメータ参照
     /// パラメータ参照: $identifier
     Parameter(String),
@@ -200,6 +202,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Ends => write!(f, "ENDS"),
             TokenKind::Normalized => write!(f, "NORMALIZED"),
             TokenKind::In => write!(f, "IN"),
+            TokenKind::Call => write!(f, "CALL"),
             TokenKind::Parameter(name) => write!(f, "${}", name),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
@@ -536,6 +539,7 @@ impl<'a> Lexer<'a> {
             "ENDS" => TokenKind::Ends,
             "NORMALIZED" => TokenKind::Normalized,
             "IN" => TokenKind::In,
+            "CALL" => TokenKind::Call,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }
