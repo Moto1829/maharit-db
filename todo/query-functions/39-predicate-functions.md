@@ -6,14 +6,14 @@
 ## 実装内容
 
 ### リスト述語関数
-- [ ] all(variable IN list WHERE predicate): 全要素が条件を満たすか
-- [ ] any(variable IN list WHERE predicate): いずれかの要素が条件を満たすか
-- [ ] none(variable IN list WHERE predicate): 全要素が条件を満たさないか
-- [ ] single(variable IN list WHERE predicate): ちょうど1つの要素が条件を満たすか
+- [x] all(variable IN list WHERE predicate): 全要素が条件を満たすか
+- [x] any(variable IN list WHERE predicate): いずれかの要素が条件を満たすか
+- [x] none(variable IN list WHERE predicate): 全要素が条件を満たさないか
+- [x] single(variable IN list WHERE predicate): ちょうど1つの要素が条件を満たすか
 
 ### 存在チェック
-- [ ] exists(property): プロパティが存在するか
-- [ ] isEmpty(list/string/map): 空かどうか
+- [x] exists(property): プロパティが存在するか
+- [x] isEmpty(list/string/map): 空かどうか
 
 ## クエリ例
 ```cypher

@@ -3982,6 +3982,55 @@ impl<'a> Executor<'a> {
                     .collect::<Result<_, _>>()?;
                 Ok(Value::List(values))
             }
+            Expression::ListPredicate {
+                kind,
+                variable,
+                list,
+                predicate,
+            } => {
+                let list_val = self.evaluate_expression(list, bindings)?;
+                let items = match list_val {
+                    Value::List(items) => items,
+                    Value::Null => return Ok(Value::Null),
+                    _ => {
+                        return Err(ExecuteError::TypeError(
+                            "list predicate requires a list".to_string(),
+                        ))
+                    }
+                };
+                let mut count = 0usize;
+                for item in &items {
+                    let mut local_bindings = bindings.clone();
+                    local_bindings
+                        .insert(variable.clone(), BindingValue::Scalar(item.clone()));
+                    let pred_val = self.evaluate_expression(predicate, &local_bindings)?;
+                    if matches!(pred_val, Value::Bool(true)) {
+                        count += 1;
+                    }
+                }
+                let result = match kind {
+                    ListPredicateKind::All => count == items.len(),
+                    ListPredicateKind::Any => count > 0,
+                    ListPredicateKind::None => count == 0,
+                    ListPredicateKind::Single => count == 1,
+                };
+                Ok(Value::Bool(result))
+            }
+            Expression::Exists(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                Ok(Value::Bool(!matches!(val, Value::Null)))
+            }
+            Expression::IsEmpty(expr) => {
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::List(items) => Ok(Value::Bool(items.is_empty())),
+                    Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(ExecuteError::TypeError(
+                        "isEmpty() requires a list or string".to_string(),
+                    )),
+                }
+            }
         }
     }
 
@@ -8215,5 +8264,225 @@ mod tests {
 
         let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
         assert_eq!(result.row_count(), 0);
+    }
+
+    // ---- Task 39: Predicate Functions ----
+
+    #[test]
+    fn test_predicate_all() {
+        let mut graph = Graph::new();
+        // Create a sentinel node to drive MATCH
+        execute(&mut graph, "CREATE (:T)").unwrap();
+
+        // all(x IN [1,2,3] WHERE x > 0) → true (all positive)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN all(x IN [1, 2, 3] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // all(x IN [1,2,3] WHERE x > 1) → false (1 does not satisfy)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN all(x IN [1, 2, 3] WHERE x > 1)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // all() on empty list → true (vacuously true)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN all(x IN [] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+    }
+
+    #[test]
+    fn test_predicate_any() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:T)").unwrap();
+
+        // any(x IN [1,2,3] WHERE x > 2) → true (3 satisfies)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN any(x IN [1, 2, 3] WHERE x > 2)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // any(x IN [1,2,3] WHERE x > 5) → false (none satisfy)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN any(x IN [1, 2, 3] WHERE x > 5)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // any() on empty list → false
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN any(x IN [] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_predicate_none() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:T)").unwrap();
+
+        // none(x IN [1,2,3] WHERE x > 5) → true (no element satisfies)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN none(x IN [1, 2, 3] WHERE x > 5)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // none(x IN [1,2,3] WHERE x > 0) → false (all satisfy)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN none(x IN [1, 2, 3] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // none() on empty list → true
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN none(x IN [] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+    }
+
+    #[test]
+    fn test_predicate_single() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:T)").unwrap();
+
+        // single(x IN [1,2,3] WHERE x = 2) → true (exactly one)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN single(x IN [1, 2, 3] WHERE x = 2)",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // single(x IN [1,2,3] WHERE x > 0) → false (all satisfy, not exactly one)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN single(x IN [1, 2, 3] WHERE x > 0)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // single() on empty list → false
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN single(x IN [] WHERE x = 1)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // single(x IN [1,2,3] WHERE x > 5) → false (zero satisfy)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN single(x IN [1, 2, 3] WHERE x > 5)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_exists_function() {
+        let mut graph = Graph::new();
+        // Create a node with email property
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice", email: "alice@example.com"})"#,
+        )
+        .unwrap();
+        // Create a node without email property
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // nodes with email should be found by exists(n.email)
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) WHERE exists(n.email) RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+
+        // exists() in RETURN context: Alice has email → true
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) RETURN exists(n.email)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // Bob has no email → false
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Bob"}) RETURN exists(n.email)"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_is_empty_function() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:T)").unwrap();
+
+        // isEmpty on empty list → true
+        let result = execute(&mut graph, "MATCH (n:T) RETURN isEmpty([])").unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // isEmpty on non-empty list → false
+        let result = execute(&mut graph, "MATCH (n:T) RETURN isEmpty([1, 2, 3])").unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+
+        // isEmpty on empty string → true
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN isEmpty("")"#).unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(true));
+
+        // isEmpty on non-empty string → false
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN isEmpty("hello")"#).unwrap();
+        assert_eq!(result.rows[0].columns[0], Value::Bool(false));
+    }
+
+    #[test]
+    fn test_predicate_in_where_clause() {
+        let mut graph = Graph::new();
+        // Use list predicate in a WHERE clause with MATCH
+        execute(&mut graph, r#"CREATE (:Item {val: 5})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Item {val: 15})"#).unwrap();
+
+        // Find items where val equals any number in [4, 5, 6]
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Item) WHERE any(x IN [4, 5, 6] WHERE x = n.val) RETURN n.val",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
     }
 }

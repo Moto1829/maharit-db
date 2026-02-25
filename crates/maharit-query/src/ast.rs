@@ -478,6 +478,15 @@ pub enum ScalarFunction {
     },
 }
 
+/// リスト述語関数の種類
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListPredicateKind {
+    All,
+    Any,
+    None,
+    Single,
+}
+
 /// 式
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
@@ -509,6 +518,17 @@ pub enum Expression {
     CountSubquery(Box<SubqueryPattern>),
     /// COLLECT { MATCH ... RETURN expr } - サブクエリ結果リスト
     CollectSubquery(Box<CollectSubqueryBody>),
+    /// all/any/none/single(variable IN list WHERE predicate)
+    ListPredicate {
+        kind: ListPredicateKind,
+        variable: String,
+        list: Box<Expression>,
+        predicate: Box<Expression>,
+    },
+    /// exists(expr) - プロパティの存在チェック
+    Exists(Box<Expression>),
+    /// isEmpty(expr) - 空チェック (list/string)
+    IsEmpty(Box<Expression>),
 }
 
 /// CASE式

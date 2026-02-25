@@ -709,6 +709,27 @@ impl Parser {
             return Err(self.unexpected_token("("));
         }
 
+        // Handle `all(var IN list WHERE pred)` since `all` is a keyword token
+        if self.check(TokenKind::All) {
+            self.advance(); // consume ALL
+            if self.check(TokenKind::LParen) {
+                self.advance(); // consume '('
+                let variable = self.expect_ident()?;
+                self.expect(TokenKind::In)?;
+                let list = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::Where)?;
+                let predicate = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Expr(Expression::ListPredicate {
+                    kind: ListPredicateKind::All,
+                    variable,
+                    list,
+                    predicate,
+                }));
+            }
+            return Err(self.unexpected_token("("));
+        }
+
         let var = self.expect_ident()?;
 
         // Check for subquery forms: EXISTS/COUNT/COLLECT followed by '{'
@@ -752,6 +773,42 @@ impl Parser {
 
     fn parse_aggregate_function(&mut self, func_name: &str) -> Result<ReturnItem, ParseError> {
         self.expect(TokenKind::LParen)?;
+
+        // Check for predicate functions first (special syntax: variable IN list WHERE predicate)
+        match func_name.to_lowercase().as_str() {
+            "all" | "any" | "none" | "single" => {
+                let variable = self.expect_ident()?;
+                self.expect(TokenKind::In)?;
+                let list = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::Where)?;
+                let predicate = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::RParen)?;
+                let kind = match func_name.to_lowercase().as_str() {
+                    "all" => ListPredicateKind::All,
+                    "any" => ListPredicateKind::Any,
+                    "none" => ListPredicateKind::None,
+                    "single" => ListPredicateKind::Single,
+                    _ => unreachable!(),
+                };
+                return Ok(ReturnItem::Expr(Expression::ListPredicate {
+                    kind,
+                    variable,
+                    list,
+                    predicate,
+                }));
+            }
+            "exists" => {
+                let expr = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Expr(Expression::Exists(expr)));
+            }
+            "isempty" => {
+                let expr = Box::new(self.parse_expression()?);
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Expr(Expression::IsEmpty(expr)));
+            }
+            _ => {}
+        }
 
         // Check for scalar functions first (they take a simple variable name)
         match func_name.to_lowercase().as_str() {
@@ -2102,8 +2159,68 @@ impl Parser {
                 self.parse_list_expression()
             }
             Some(TokenKind::Case) => self.parse_case_expression(),
+            Some(TokenKind::All) => {
+                // `all` is a keyword token, handle as list predicate function
+                self.advance(); // consume ALL
+                if self.check(TokenKind::LParen) {
+                    self.advance(); // consume '('
+                    let variable = self.expect_ident()?;
+                    self.expect(TokenKind::In)?;
+                    let list = Box::new(self.parse_expression()?);
+                    self.expect(TokenKind::Where)?;
+                    let predicate = Box::new(self.parse_expression()?);
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expression::ListPredicate {
+                        kind: ListPredicateKind::All,
+                        variable,
+                        list,
+                        predicate,
+                    });
+                }
+                Err(self.unexpected_token("("))
+            }
             Some(TokenKind::Ident(_)) => {
                 let var = self.expect_ident()?;
+                // Check for predicate/scalar functions (identifier followed by '(')
+                if self.check(TokenKind::LParen) {
+                    match var.to_lowercase().as_str() {
+                        "all" | "any" | "none" | "single" => {
+                            self.advance(); // consume '('
+                            let variable = self.expect_ident()?;
+                            self.expect(TokenKind::In)?;
+                            let list = Box::new(self.parse_expression()?);
+                            self.expect(TokenKind::Where)?;
+                            let predicate = Box::new(self.parse_expression()?);
+                            self.expect(TokenKind::RParen)?;
+                            let kind = match var.to_lowercase().as_str() {
+                                "all" => ListPredicateKind::All,
+                                "any" => ListPredicateKind::Any,
+                                "none" => ListPredicateKind::None,
+                                "single" => ListPredicateKind::Single,
+                                _ => unreachable!(),
+                            };
+                            return Ok(Expression::ListPredicate {
+                                kind,
+                                variable,
+                                list,
+                                predicate,
+                            });
+                        }
+                        "exists" => {
+                            self.advance(); // consume '('
+                            let expr = Box::new(self.parse_expression()?);
+                            self.expect(TokenKind::RParen)?;
+                            return Ok(Expression::Exists(expr));
+                        }
+                        "isempty" => {
+                            self.advance(); // consume '('
+                            let expr = Box::new(self.parse_expression()?);
+                            self.expect(TokenKind::RParen)?;
+                            return Ok(Expression::IsEmpty(expr));
+                        }
+                        _ => {} // fall through to subquery/property/variable handling
+                    }
+                }
                 // Check for EXISTS/COUNT/COLLECT subqueries (identifier followed by '{')
                 if self.check(TokenKind::LBrace) {
                     match var.to_uppercase().as_str() {
