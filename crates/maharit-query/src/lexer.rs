@@ -75,6 +75,7 @@ pub enum TokenKind {
     Show,
     Drop,
     For,
+    Foreach,
     Is,
     // クエリオプティマイザ用キーワード
     Explain,
@@ -188,6 +189,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Show => write!(f, "SHOW"),
             TokenKind::Drop => write!(f, "DROP"),
             TokenKind::For => write!(f, "FOR"),
+            TokenKind::Foreach => write!(f, "FOREACH"),
             TokenKind::Is => write!(f, "IS"),
             TokenKind::Explain => write!(f, "EXPLAIN"),
             TokenKind::Profile => write!(f, "PROFILE"),
@@ -525,6 +527,7 @@ impl<'a> Lexer<'a> {
             "SHOW" => TokenKind::Show,
             "DROP" => TokenKind::Drop,
             "FOR" => TokenKind::For,
+            "FOREACH" => TokenKind::Foreach,
             "IS" => TokenKind::Is,
             "EXPLAIN" => TokenKind::Explain,
             "PROFILE" => TokenKind::Profile,

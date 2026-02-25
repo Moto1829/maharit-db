@@ -243,6 +243,8 @@ impl<'a> Executor<'a> {
             Statement::Merge(merge) => self.execute_merge(merge),
             Statement::MatchRemove(mr) => self.execute_match_remove(mr),
             Statement::Unwind(uw) => self.execute_unwind(uw),
+            Statement::Foreach(f) => self.execute_foreach_stmt_ref(&f, &Bindings::new()),
+            Statement::MatchForeach(mf) => self.execute_match_foreach(mf),
             Statement::CreateConstraint(cc) => self.execute_create_constraint(cc),
             Statement::DropConstraint(dc) => self.execute_drop_constraint(dc),
             Statement::ShowConstraints => self.execute_show_constraints(),
@@ -1070,6 +1072,197 @@ impl<'a> Executor<'a> {
                 }],
             ))
         }
+    }
+
+    // ========== FOREACH ==========
+
+    fn execute_foreach_stmt_ref(
+        &mut self,
+        stmt: &ForeachStatement,
+        outer_bindings: &Bindings,
+    ) -> Result<ResultSet, ExecuteError> {
+        let list_val = self.evaluate_expression(&stmt.list, outer_bindings)?;
+
+        let items = match list_val {
+            Value::List(items) => items,
+            _ => {
+                return Err(ExecuteError::TypeError(
+                    "FOREACH requires a list expression".to_string(),
+                ));
+            }
+        };
+
+        for item in &items {
+            let mut bindings = outer_bindings.clone();
+            bindings.insert(stmt.variable.clone(), BindingValue::Scalar(item.clone()));
+
+            for clause in &stmt.clauses {
+                self.execute_foreach_clause(clause, &bindings)?;
+            }
+        }
+
+        Ok(ResultSet::new(
+            vec!["foreach_result".to_string()],
+            vec![Row {
+                columns: vec![Value::String("ok".to_string())],
+            }],
+        ))
+    }
+
+    fn execute_foreach_clause(
+        &mut self,
+        clause: &ForeachClause,
+        bindings: &Bindings,
+    ) -> Result<(), ExecuteError> {
+        match clause {
+            ForeachClause::Create(create) => {
+                self.execute_create_with_bindings(create, bindings)?;
+                Ok(())
+            }
+            ForeachClause::Set(set) => {
+                self.apply_set_clause(set, &[bindings.clone()])?;
+                Ok(())
+            }
+            ForeachClause::Remove(remove) => {
+                self.apply_remove_clause(remove, bindings)?;
+                Ok(())
+            }
+            ForeachClause::Delete(delete) => {
+                self.apply_delete_clause(delete, bindings)?;
+                Ok(())
+            }
+            ForeachClause::Merge(patterns) => {
+                let mut b = bindings.clone();
+                let mut match_result = vec![b.clone()];
+                for pattern in patterns {
+                    match_result = self.match_pattern(pattern, match_result)?;
+                }
+                if match_result.is_empty() {
+                    for pattern in patterns {
+                        self.create_pattern(pattern, &mut b)?;
+                    }
+                }
+                Ok(())
+            }
+            ForeachClause::Foreach(inner) => {
+                self.execute_foreach_stmt_ref(inner, bindings)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_remove_clause(
+        &mut self,
+        remove: &RemoveClause,
+        bindings: &Bindings,
+    ) -> Result<(), ExecuteError> {
+        for item in &remove.items {
+            match item {
+                RemoveItem::Property(var, prop) => {
+                    let binding_value = bindings
+                        .get(var)
+                        .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
+
+                    match binding_value {
+                        BindingValue::Node(node_id) => {
+                            if let Some(node) = self.graph.get_node(*node_id) {
+                                self.constraints.validate_property_remove(node, prop)?;
+                            }
+                            if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                node.remove_property(prop);
+                            }
+                        }
+                        BindingValue::Edge(edge_id) => {
+                            if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                edge.remove_property(prop);
+                            }
+                        }
+                        _ => {
+                            return Err(ExecuteError::TypeError(
+                                "REMOVE requires node or edge binding".to_string(),
+                            ));
+                        }
+                    }
+                }
+                RemoveItem::Label(var, _label) => {
+                    if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
+                        if let Some(node) = self.graph.get_node_mut(node_id) {
+                            node.label = String::new();
+                        }
+                    } else {
+                        return Err(ExecuteError::UndefinedVariable(var.clone()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_delete_clause(
+        &mut self,
+        delete: &DeleteClause,
+        bindings: &Bindings,
+    ) -> Result<(), ExecuteError> {
+        let mut nodes_to_delete = Vec::new();
+        let mut edges_to_delete = Vec::new();
+
+        for var in &delete.variables {
+            if let Some(binding_value) = bindings.get(var) {
+                match binding_value {
+                    BindingValue::Node(id) => {
+                        if !nodes_to_delete.contains(id) {
+                            nodes_to_delete.push(*id);
+                        }
+                    }
+                    BindingValue::Edge(id) => {
+                        if !edges_to_delete.contains(id) {
+                            edges_to_delete.push(*id);
+                        }
+                    }
+                    BindingValue::Path { .. } | BindingValue::Scalar(_) => {}
+                }
+            }
+        }
+
+        for edge_id in edges_to_delete {
+            self.graph.delete_edge(edge_id);
+        }
+
+        for node_id in nodes_to_delete {
+            if delete.detach {
+                self.graph.delete_node(node_id);
+            } else {
+                let has_edges = !self.graph.get_outgoing_edges(node_id).is_empty()
+                    || !self.graph.get_incoming_edges(node_id).is_empty();
+                if !has_edges {
+                    self.graph.delete_node(node_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn execute_match_foreach(
+        &mut self,
+        mf: MatchForeachStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
+
+        for segment in &mf.segments {
+            all_bindings = self.execute_query_segment(segment, all_bindings)?;
+        }
+
+        for bindings in &all_bindings {
+            self.execute_foreach_stmt_ref(&mf.foreach_clause, bindings)?;
+        }
+
+        Ok(ResultSet::new(
+            vec!["foreach_result".to_string()],
+            vec![Row {
+                columns: vec![Value::String("ok".to_string())],
+            }],
+        ))
     }
 
     // ========== CONSTRAINT DDL ==========
@@ -7876,5 +8069,151 @@ mod tests {
 
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[1], Value::Int(0));
+    }
+
+    // ========== FOREACH Tests ==========
+
+    #[test]
+    fn test_foreach_create_nodes() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"FOREACH (name IN ['Alice', 'Bob', 'Charlie'] | CREATE (:Person {name: name}))"#,
+        )
+        .unwrap();
+
+        // Verify 3 nodes were created
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.row_count(), 3);
+    }
+
+    #[test]
+    fn test_foreach_set_property() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (:Item {val: 1})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Item {val: 2})"#).unwrap();
+
+        // Match all items and for each, set a flag using MATCH+FOREACH
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Item) FOREACH (x IN [1] | SET n.processed = true)"#,
+        )
+        .unwrap();
+        assert_eq!(result.columns[0], "foreach_result");
+
+        // Verify both items have the flag set
+        let check = execute(
+            &mut graph,
+            r#"MATCH (n:Item) WHERE n.processed = true RETURN n"#,
+        )
+        .unwrap();
+        assert_eq!(check.row_count(), 2);
+    }
+
+    #[test]
+    fn test_foreach_nested_create() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"FOREACH (city IN ['Tokyo', 'Osaka'] |
+              FOREACH (name IN ['Alice', 'Bob'] |
+                CREATE (:Person {name: name, city: city})
+              )
+            )"#,
+        )
+        .unwrap();
+
+        // Expect 2 cities * 2 names = 4 persons
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.row_count(), 4);
+    }
+
+    #[test]
+    fn test_foreach_delete_nodes() {
+        let mut graph = Graph::new();
+        // Create some nodes with no edges so DELETE works
+        execute(&mut graph, r#"CREATE (:Temp)"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Temp)"#).unwrap();
+
+        let count_before = execute(&mut graph, "MATCH (n:Temp) RETURN n").unwrap();
+        assert_eq!(count_before.row_count(), 2);
+
+        // FOREACH DELETE using MATCH+FOREACH
+        execute(
+            &mut graph,
+            r#"MATCH (n:Temp) FOREACH (x IN [1] | DETACH DELETE n)"#,
+        )
+        .unwrap();
+
+        let count_after = execute(&mut graph, "MATCH (n:Temp) RETURN n").unwrap();
+        assert_eq!(count_after.row_count(), 0);
+    }
+
+    #[test]
+    fn test_match_foreach_set() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (:Node {active: true})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Node {active: true})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Node) FOREACH (x IN [1] | SET n.visited = true)"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Node) WHERE n.visited = true RETURN n"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_foreach_merge() {
+        let mut graph = Graph::new();
+
+        // FOREACH with MERGE - should create if not exists
+        execute(
+            &mut graph,
+            r#"FOREACH (name IN ['Alice', 'Alice', 'Bob'] | MERGE (:Person {name: name}))"#,
+        )
+        .unwrap();
+
+        // Alice should only exist once (MERGE deduplication)
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_foreach_multiple_clauses() {
+        let mut graph = Graph::new();
+
+        // FOREACH with multiple update clauses
+        execute(
+            &mut graph,
+            r#"FOREACH (x IN [1] | CREATE (:A) CREATE (:B))"#,
+        )
+        .unwrap();
+
+        let a = execute(&mut graph, "MATCH (n:A) RETURN n").unwrap();
+        let b = execute(&mut graph, "MATCH (n:B) RETURN n").unwrap();
+        assert_eq!(a.row_count(), 1);
+        assert_eq!(b.row_count(), 1);
+    }
+
+    #[test]
+    fn test_foreach_empty_list() {
+        let mut graph = Graph::new();
+
+        // FOREACH with empty list should create no nodes
+        execute(
+            &mut graph,
+            r#"FOREACH (name IN [] | CREATE (:Person {name: name}))"#,
+        )
+        .unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(result.row_count(), 0);
     }
 }

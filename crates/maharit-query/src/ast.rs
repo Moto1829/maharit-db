@@ -17,6 +17,10 @@ pub enum Statement {
     MatchRemove(MatchRemoveStatement),
     /// UNWIND句
     Unwind(UnwindStatement),
+    /// FOREACH句
+    Foreach(ForeachStatement),
+    /// MATCH + FOREACH 複合クエリ
+    MatchForeach(MatchForeachStatement),
     /// CREATE CONSTRAINT
     CreateConstraint(CreateConstraintStatement),
     /// DROP CONSTRAINT
@@ -635,6 +639,43 @@ pub enum RemoveItem {
     Property(String, String),
     /// ラベル削除: REMOVE n:Label
     Label(String, String),
+}
+
+/// FOREACH内の更新操作
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForeachClause {
+    /// CREATE
+    Create(CreateClause),
+    /// SET
+    Set(SetClause),
+    /// REMOVE
+    Remove(RemoveClause),
+    /// DELETE
+    Delete(DeleteClause),
+    /// MERGE
+    Merge(Vec<Pattern>),
+    /// ネストしたFOREACH
+    Foreach(Box<ForeachStatement>),
+}
+
+/// FOREACH文
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeachStatement {
+    /// イテレーション変数
+    pub variable: String,
+    /// リスト式
+    pub list: Expression,
+    /// 更新操作リスト
+    pub clauses: Vec<ForeachClause>,
+}
+
+/// MATCH + FOREACH 複合文
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchForeachStatement {
+    /// MATCHセグメント
+    pub segments: Vec<QuerySegment>,
+    /// FOREACH句
+    pub foreach_clause: ForeachStatement,
 }
 
 /// UNWIND文

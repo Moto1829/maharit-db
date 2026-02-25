@@ -67,6 +67,7 @@ impl Parser {
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
             Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
             Some(TokenKind::Unwind) => return self.parse_unwind(),
+            Some(TokenKind::Foreach) => return self.parse_foreach(),
             Some(TokenKind::Drop) => {
                 // Peek ahead to check for DROP FULLTEXT INDEX vs DROP CONSTRAINT
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
@@ -82,7 +83,7 @@ impl Parser {
             Some(TokenKind::Show) => return self.parse_show(),
             Some(_) => {
                 return Err(
-                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, DROP, SHOW, ALTER, EXPLAIN, or PROFILE"),
+                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, EXPLAIN, or PROFILE"),
                 )
             }
             None => return Err(ParseError::UnexpectedEof),
@@ -336,6 +337,15 @@ impl Parser {
             } else {
                 break;
             }
+        }
+
+        // Check for MATCH + FOREACH before RETURN
+        if self.check(TokenKind::Foreach) {
+            let foreach_stmt = self.parse_foreach_statement()?;
+            return Ok(Statement::MatchForeach(MatchForeachStatement {
+                segments,
+                foreach_clause: foreach_stmt,
+            }));
         }
 
         // Check for CALL subquery before RETURN
@@ -1277,6 +1287,78 @@ impl Parser {
             set_clause,
             return_clause,
         }))
+    }
+
+    // ========== FOREACH ==========
+
+    fn parse_foreach(&mut self) -> Result<Statement, ParseError> {
+        let stmt = self.parse_foreach_statement()?;
+        Ok(Statement::Foreach(stmt))
+    }
+
+    fn parse_foreach_statement(&mut self) -> Result<ForeachStatement, ParseError> {
+        self.expect(TokenKind::Foreach)?;
+        self.expect(TokenKind::LParen)?;
+
+        let variable = self.expect_ident()?;
+        self.expect(TokenKind::In)?;
+        let list = self.parse_expression()?;
+        self.expect(TokenKind::Pipe)?;
+
+        let clauses = self.parse_foreach_clauses()?;
+
+        self.expect(TokenKind::RParen)?;
+        Ok(ForeachStatement {
+            variable,
+            list,
+            clauses,
+        })
+    }
+
+    fn parse_foreach_clauses(&mut self) -> Result<Vec<ForeachClause>, ParseError> {
+        let mut clauses = Vec::new();
+
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::Create) => {
+                    let create = self.parse_create_clause()?;
+                    clauses.push(ForeachClause::Create(create));
+                }
+                Some(TokenKind::Set) => {
+                    let set = self.parse_set_clause()?;
+                    clauses.push(ForeachClause::Set(set));
+                }
+                Some(TokenKind::Remove) => {
+                    let remove = self.parse_remove_clause()?;
+                    clauses.push(ForeachClause::Remove(remove));
+                }
+                Some(TokenKind::Delete) | Some(TokenKind::Detach) => {
+                    let delete = self.parse_delete_clause()?;
+                    clauses.push(ForeachClause::Delete(delete));
+                }
+                Some(TokenKind::Merge) => {
+                    self.advance(); // consume MERGE
+                    let mut patterns = Vec::new();
+                    patterns.push(self.parse_pattern()?);
+                    while self.check(TokenKind::Comma) {
+                        self.advance();
+                        patterns.push(self.parse_pattern()?);
+                    }
+                    clauses.push(ForeachClause::Merge(patterns));
+                }
+                Some(TokenKind::Foreach) => {
+                    let inner = self.parse_foreach_statement()?;
+                    clauses.push(ForeachClause::Foreach(Box::new(inner)));
+                }
+                _ => break,
+            }
+        }
+
+        if clauses.is_empty() {
+            return Err(self.unexpected_token("CREATE, SET, REMOVE, DELETE, MERGE, or FOREACH"));
+        }
+
+        Ok(clauses)
     }
 
     // ========== CONSTRAINT DDL ==========
@@ -3468,6 +3550,144 @@ mod tests {
                 }
             }
             _ => panic!("Expected Match statement"),
+        }
+    }
+
+    // ========== FOREACH Tests ==========
+
+    #[test]
+    fn test_foreach_create() {
+        let stmt = parse(r#"FOREACH (name IN ['Alice', 'Bob'] | CREATE (:Person {name: name}))"#)
+            .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "name");
+                assert_eq!(f.clauses.len(), 1);
+                assert!(matches!(f.clauses[0], ForeachClause::Create(_)));
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_set() {
+        let stmt = parse(
+            r#"FOREACH (n IN [1, 2, 3] | SET n.visited = true)"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "n");
+                assert_eq!(f.clauses.len(), 1);
+                assert!(matches!(f.clauses[0], ForeachClause::Set(_)));
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_remove() {
+        let stmt = parse(
+            r#"FOREACH (n IN [1] | REMOVE n.prop)"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "n");
+                assert_eq!(f.clauses.len(), 1);
+                assert!(matches!(f.clauses[0], ForeachClause::Remove(_)));
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_delete() {
+        let stmt = parse(
+            r#"FOREACH (n IN [1] | DELETE n)"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "n");
+                assert_eq!(f.clauses.len(), 1);
+                assert!(matches!(f.clauses[0], ForeachClause::Delete(_)));
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_merge() {
+        let stmt = parse(
+            r#"FOREACH (name IN ['Alice'] | MERGE (:Person {name: name}))"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "name");
+                assert_eq!(f.clauses.len(), 1);
+                assert!(matches!(f.clauses[0], ForeachClause::Merge(_)));
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_nested() {
+        let stmt = parse(
+            r#"FOREACH (city IN ['Tokyo'] | FOREACH (name IN ['Alice'] | CREATE (:Person {name: name})))"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(outer) => {
+                assert_eq!(outer.variable, "city");
+                assert_eq!(outer.clauses.len(), 1);
+                match &outer.clauses[0] {
+                    ForeachClause::Foreach(inner) => {
+                        assert_eq!(inner.variable, "name");
+                        assert_eq!(inner.clauses.len(), 1);
+                        assert!(matches!(inner.clauses[0], ForeachClause::Create(_)));
+                    }
+                    _ => panic!("Expected nested Foreach"),
+                }
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_foreach_with_literal_list() {
+        let stmt = parse(
+            r#"FOREACH (x IN [1, 2, 3] | CREATE (:Item {value: x}))"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::Foreach(f) => {
+                assert_eq!(f.variable, "x");
+                match &f.list {
+                    Expression::List(items) => assert_eq!(items.len(), 3),
+                    _ => panic!("Expected list expression"),
+                }
+            }
+            _ => panic!("Expected Foreach statement"),
+        }
+    }
+
+    #[test]
+    fn test_match_foreach_parse() {
+        let stmt = parse(
+            r#"MATCH (n:Person) FOREACH (x IN [1] | SET n.updated = true)"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::MatchForeach(mf) => {
+                assert_eq!(mf.segments.len(), 1);
+                assert_eq!(mf.foreach_clause.variable, "x");
+                assert_eq!(mf.foreach_clause.clauses.len(), 1);
+                assert!(matches!(mf.foreach_clause.clauses[0], ForeachClause::Set(_)));
+            }
+            _ => panic!("Expected MatchForeach statement"),
         }
     }
 }

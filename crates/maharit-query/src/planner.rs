@@ -202,6 +202,16 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         Statement::Merge(merge) => plan_merge_with_stats(merge, stats),
         Statement::MatchRemove(mr) => plan_match_remove_with_stats(mr, stats),
         Statement::Unwind(uw) => plan_unwind(uw),
+        Statement::Foreach(_) => {
+            vec![PlanNode::new("Foreach", 1, 1, "iterate list")]
+        }
+        Statement::MatchForeach(mf) => {
+            let seg_count = mf.segments.len() as u64;
+            vec![
+                PlanNode::new("NodeByLabelScan", seg_count.max(1), seg_count.max(1) / 10 + 1, ""),
+                PlanNode::new("Foreach", 1, 1, "iterate list"),
+            ]
+        }
         Statement::CreateConstraint(_) => {
             vec![PlanNode::new("CreateConstraint", 1, 1, "")]
         }
@@ -248,6 +258,16 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         Statement::Merge(merge) => plan_merge(merge, node_count, edge_count),
         Statement::MatchRemove(mr) => plan_match_remove(mr, node_count, edge_count),
         Statement::Unwind(uw) => plan_unwind(uw),
+        Statement::Foreach(_) => {
+            vec![PlanNode::new("Foreach", 1, 1, "iterate list")]
+        }
+        Statement::MatchForeach(mf) => {
+            let seg_count = mf.segments.len() as u64;
+            vec![
+                PlanNode::new("NodeByLabelScan", seg_count.max(1), seg_count.max(1) / 10 + 1, ""),
+                PlanNode::new("Foreach", 1, 1, "iterate list"),
+            ]
+        }
         Statement::CreateConstraint(_) => {
             vec![PlanNode::new("CreateConstraint", 1, 1, "")]
         }
