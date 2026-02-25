@@ -158,7 +158,7 @@ pub enum Pattern {
 pub struct NodePattern {
     pub variable: Option<String>,
     pub label: Option<String>,
-    pub properties: HashMap<String, Literal>,
+    pub properties: HashMap<String, Expression>,
 }
 
 /// パスパターン: (a)-[r:TYPE]->(b)
@@ -180,7 +180,7 @@ pub struct PathSegment {
 pub struct EdgePattern {
     pub variable: Option<String>,
     pub edge_type: Option<String>,
-    pub properties: HashMap<String, Literal>,
+    pub properties: HashMap<String, Expression>,
     pub direction: EdgeDirection,
     /// Variable-length path: *min..max (None means exactly 1 hop)
     pub length_range: Option<LengthRange>,
@@ -453,6 +453,8 @@ pub enum Expression {
         predicate: Option<Box<Expression>>,
         result: Box<Expression>,
     },
+    /// パラメータ参照: $name
+    Parameter(String),
 }
 
 /// CASE式

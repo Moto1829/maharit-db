@@ -1681,7 +1681,7 @@ impl Parser {
         Ok(LengthRange { min, max })
     }
 
-    fn parse_properties(&mut self) -> Result<HashMap<String, Literal>, ParseError> {
+    fn parse_properties(&mut self) -> Result<HashMap<String, Expression>, ParseError> {
         self.expect(TokenKind::LBrace)?;
 
         let mut props = HashMap::new();
@@ -1690,7 +1690,7 @@ impl Parser {
             loop {
                 let key = self.expect_ident()?;
                 self.expect(TokenKind::Colon)?;
-                let value = self.parse_literal()?;
+                let value = self.parse_expression()?;
                 props.insert(key, value);
 
                 if !self.check(TokenKind::Comma) {
@@ -1902,6 +1902,13 @@ impl Parser {
             ) => {
                 let lit = self.parse_literal()?;
                 Ok(Expression::Literal(lit))
+            }
+            Some(TokenKind::Parameter(_)) => {
+                if let TokenKind::Parameter(name) = self.advance().unwrap().kind {
+                    Ok(Expression::Parameter(name))
+                } else {
+                    unreachable!()
+                }
             }
             Some(_) => Err(self.unexpected_token("expression")),
             None => Err(ParseError::UnexpectedEof),
@@ -2137,9 +2144,12 @@ mod tests {
                 assert_eq!(node.label, Some("Person".to_string()));
                 assert_eq!(
                     node.properties.get("name"),
-                    Some(&Literal::String("Alice".to_string()))
+                    Some(&Expression::Literal(Literal::String("Alice".to_string())))
                 );
-                assert_eq!(node.properties.get("age"), Some(&Literal::Int(30)));
+                assert_eq!(
+                    node.properties.get("age"),
+                    Some(&Expression::Literal(Literal::Int(30)))
+                );
             } else {
                 panic!("expected node pattern");
             }

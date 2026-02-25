@@ -94,6 +94,9 @@ pub enum TokenKind {
     Normalized,
     // リスト演算子用キーワード
     In, // IN キーワード
+    // パラメータ参照
+    /// パラメータ参照: $identifier
+    Parameter(String),
 
     // 識別子とリテラル
     Ident(String),
@@ -197,6 +200,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Ends => write!(f, "ENDS"),
             TokenKind::Normalized => write!(f, "NORMALIZED"),
             TokenKind::In => write!(f, "IN"),
+            TokenKind::Parameter(name) => write!(f, "${}", name),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
             TokenKind::Float(n) => write!(f, "{}", n),
@@ -410,6 +414,23 @@ impl<'a> Lexer<'a> {
             '|' => {
                 self.advance();
                 TokenKind::Pipe
+            }
+            '$' => {
+                self.advance(); // consume '$'
+                // Read identifier characters
+                let start = self.pos;
+                while let Some(ch) = self.peek() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if self.pos == start {
+                    return Err(LexerError::UnexpectedChar('$', line, column));
+                }
+                let name = self.input[start..self.pos].to_string();
+                TokenKind::Parameter(name)
             }
             _ => {
                 return Err(LexerError::UnexpectedChar(ch, line, column));
