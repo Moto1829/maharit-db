@@ -81,9 +81,20 @@ impl Parser {
             }
             Some(TokenKind::Alter) => return self.parse_alter_user(),
             Some(TokenKind::Show) => return self.parse_show(),
+            Some(TokenKind::Call) => {
+                // If followed by identifier (not '{'), it's a top-level procedure call
+                let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                if matches!(next, Some(TokenKind::Ident(_))) {
+                    return self.parse_procedure_call();
+                }
+                // Otherwise fall through to error (CALL { } must appear inside MATCH)
+                return Err(self.unexpected_token(
+                    "procedure name after CALL",
+                ));
+            }
             Some(_) => {
                 return Err(self.unexpected_token(
-                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, EXPLAIN, or PROFILE",
+                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, CALL, EXPLAIN, or PROFILE",
                 ));
             }
             None => return Err(ParseError::UnexpectedEof),
@@ -1895,6 +1906,87 @@ impl Parser {
             None
         };
         Ok(CallReturnItem { expression, alias })
+    }
+
+    /// Parse a top-level procedure call:
+    ///   CALL proc.name.part(arg1, arg2) YIELD col1, col2 [RETURN ...]
+    ///
+    /// The procedure name is a dot-separated sequence of identifiers.
+    fn parse_procedure_call(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Call)?;
+
+        // Parse dotted procedure name: ident ('.' ident)*
+        let mut parts = Vec::new();
+        parts.push(self.expect_ident()?);
+        while self.check(TokenKind::Dot) {
+            self.advance();
+            // The next part might be a keyword used as identifier (e.g. "index", "search")
+            let part = self.expect_ident_or_keyword()?;
+            parts.push(part);
+        }
+        let procedure = parts.join(".");
+
+        // Parse argument list: '(' [expr, ...] ')'
+        self.expect(TokenKind::LParen)?;
+        let mut arguments = Vec::new();
+        if !self.check(TokenKind::RParen) {
+            arguments.push(self.parse_expression()?);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                arguments.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+
+        // Optional YIELD clause
+        let yield_columns = if self.check(TokenKind::Yield) {
+            self.advance();
+            let mut cols = Vec::new();
+            cols.push(self.expect_ident()?);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                cols.push(self.expect_ident()?);
+            }
+            cols
+        } else {
+            Vec::new()
+        };
+
+        // Optional RETURN clause (for filtering/projection after YIELD)
+        let return_clause = if self.check(TokenKind::Return) {
+            self.advance();
+            Some(self.parse_return_clause()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::ProcedureCall(ProcedureCallStatement {
+            procedure,
+            arguments,
+            yield_columns,
+            return_clause,
+        }))
+    }
+
+    /// Expect an identifier or a keyword that can serve as an identifier in dotted names.
+    fn expect_ident_or_keyword(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::Ident(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            // Allow keywords commonly used as identifiers in procedure names
+            Some(TokenKind::Index) => {
+                self.advance();
+                Ok("index".to_string())
+            }
+            Some(TokenKind::Fulltext) => {
+                self.advance();
+                Ok("fulltext".to_string())
+            }
+            _ => self.expect_ident(),
+        }
     }
 
     /// Parse subquery pattern body for EXISTS/COUNT: MATCH pattern [WHERE expr]

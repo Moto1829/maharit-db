@@ -97,6 +97,8 @@ pub enum TokenKind {
     In, // IN キーワード
     // サブクエリ用キーワード
     Call,
+    /// YIELD キーワード（プロシージャコール用）
+    Yield,
     // パラメータ参照
     /// パラメータ参照: $identifier
     Parameter(String),
@@ -206,6 +208,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Normalized => write!(f, "NORMALIZED"),
             TokenKind::In => write!(f, "IN"),
             TokenKind::Call => write!(f, "CALL"),
+            TokenKind::Yield => write!(f, "YIELD"),
             TokenKind::Parameter(name) => write!(f, "${}", name),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
@@ -550,6 +553,7 @@ impl<'a> Lexer<'a> {
             "NORMALIZED" => TokenKind::Normalized,
             "IN" => TokenKind::In,
             "CALL" => TokenKind::Call,
+            "YIELD" => TokenKind::Yield,
             _ => TokenKind::Ident(ident.to_string()),
         }
     }

@@ -43,6 +43,69 @@ impl Tokenizer {
     }
 }
 
+/// Compute the Levenshtein (edit) distance between two strings.
+///
+/// Uses dynamic programming with O(min(a.len(), b.len())) space.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    // Use the shorter string as the column dimension to minimize memory usage
+    if m < n {
+        return levenshtein_distance(b, a);
+    }
+
+    // prev[j] = edit distance between a[0..i-1] and b[0..j]
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
+/// Parse a fuzzy query like `term~` or `term~2` into (term, max_distance).
+///
+/// Returns `None` if the query does not have a `~` suffix.
+fn parse_fuzzy_query(query: &str) -> Option<(&str, usize)> {
+    let query = query.trim();
+    let tilde_pos = query.rfind('~')?;
+    let term = &query[..tilde_pos];
+    let suffix = &query[tilde_pos + 1..];
+    let max_distance = if suffix.is_empty() {
+        2
+    } else {
+        suffix.parse::<usize>().ok()?
+    };
+    Some((term, max_distance))
+}
+
+/// Detect if a query string is a phrase search (surrounded by `"` or `'`).
+///
+/// Returns the inner phrase text without the surrounding quotes, or `None`.
+fn parse_phrase_query(query: &str) -> Option<&str> {
+    let query = query.trim();
+    if query.len() >= 2 {
+        let first = query.as_bytes()[0];
+        let last = query.as_bytes()[query.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return Some(&query[1..query.len() - 1]);
+        }
+    }
+    None
+}
+
 /// Document identifier combining node ID and property name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DocumentId {
@@ -182,6 +245,73 @@ impl InvertedIndex {
             .map(|postings| postings.iter().map(|tp| tp.doc_id.clone()).collect())
             .unwrap_or_else(HashSet::new)
     }
+
+    /// Get positions of a token in a specific document.
+    fn positions_in_doc(&self, token: &str, doc_id: &DocumentId) -> Option<&[usize]> {
+        self.index
+            .get(token)
+            .and_then(|postings| postings.iter().find(|tp| tp.doc_id == *doc_id))
+            .map(|tp| tp.positions.as_slice())
+    }
+
+    /// Check whether a sequence of tokens appears as a consecutive phrase in the document.
+    ///
+    /// For each starting position of the first token, checks whether every subsequent
+    /// token appears at exactly offset+1, offset+2, … positions.
+    fn is_phrase_in_doc(&self, tokens: &[String], doc_id: &DocumentId) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+        if tokens.len() == 1 {
+            return !self.documents_with_token(&tokens[0]).is_empty()
+                && self.documents_with_token(&tokens[0]).contains(doc_id);
+        }
+
+        let first_positions = match self.positions_in_doc(&tokens[0], doc_id) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        'outer: for &start_pos in first_positions {
+            for (offset, token) in tokens.iter().enumerate().skip(1) {
+                let expected_pos = start_pos + offset;
+                match self.positions_in_doc(token, doc_id) {
+                    Some(positions) if positions.contains(&expected_pos) => {}
+                    _ => continue 'outer,
+                }
+            }
+            // All tokens matched consecutively
+            return true;
+        }
+
+        false
+    }
+
+    /// Collect all document IDs that match any token within the given edit distance.
+    fn documents_with_fuzzy_token(
+        &self,
+        term: &str,
+        max_distance: usize,
+    ) -> HashSet<DocumentId> {
+        let mut result = HashSet::new();
+        for (index_token, postings) in &self.index {
+            if levenshtein_distance(term, index_token) <= max_distance {
+                for tp in postings {
+                    result.insert(tp.doc_id.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Collect all tokens within the given edit distance of `term`.
+    fn fuzzy_matching_tokens(&self, term: &str, max_distance: usize) -> Vec<String> {
+        self.index
+            .keys()
+            .filter(|k| levenshtein_distance(term, k) <= max_distance)
+            .cloned()
+            .collect()
+    }
 }
 
 /// A full-text search index for a specific label and set of properties.
@@ -271,16 +401,35 @@ impl FulltextIndex {
     }
 
     /// Search the index and return ranked results.
+    ///
+    /// The query format is:
+    /// - Plain keywords: `graph database` — BM25 scored OR-style keyword search
+    /// - Phrase search: `"graph database"` — tokens must appear consecutively
+    /// - Fuzzy search: `databse~` or `databse~1` — match within edit distance N (default 2)
     pub fn search(&self, query: &str) -> Vec<SearchResult> {
-        let query_tokens = Tokenizer::tokenize(query);
+        // Phrase search: "..."
+        if let Some(phrase) = parse_phrase_query(query) {
+            return self.search_phrase(phrase);
+        }
 
+        // Fuzzy search: term~ or term~N
+        if let Some((term, max_distance)) = parse_fuzzy_query(query) {
+            return self.search_fuzzy(term, max_distance);
+        }
+
+        // Standard BM25 keyword search
+        let query_tokens = Tokenizer::tokenize(query);
         if query_tokens.is_empty() {
             return Vec::new();
         }
+        self.search_keywords(&query_tokens)
+    }
 
+    /// Perform BM25-scored keyword search for the given pre-tokenized query.
+    fn search_keywords(&self, query_tokens: &[String]) -> Vec<SearchResult> {
         // Find all documents containing at least one query token
         let mut candidate_docs = HashSet::new();
-        for token in &query_tokens {
+        for token in query_tokens {
             candidate_docs.extend(self.inverted_index.documents_with_token(token));
         }
 
@@ -288,7 +437,7 @@ impl FulltextIndex {
         let results: Vec<SearchResult> = candidate_docs
             .iter()
             .map(|doc_id| {
-                let score = self.calculate_bm25(doc_id, &query_tokens);
+                let score = self.calculate_bm25(doc_id, query_tokens);
                 SearchResult::new(doc_id.node_id, score)
             })
             .collect();
@@ -314,10 +463,136 @@ impl FulltextIndex {
         final_results
     }
 
-    /// Check if documents contain all query terms (AND semantics).
-    pub fn contains(&self, query: &str) -> HashSet<NodeId> {
-        let query_tokens = Tokenizer::tokenize(query);
+    /// Perform phrase search: all tokens must appear consecutively in the correct order.
+    ///
+    /// Uses BM25 scoring on the phrase tokens for ranking among matches.
+    fn search_phrase(&self, phrase: &str) -> Vec<SearchResult> {
+        let phrase_tokens = Tokenizer::tokenize(phrase);
+        if phrase_tokens.is_empty() {
+            return Vec::new();
+        }
 
+        // Candidate documents must contain all tokens (AND filter)
+        let mut candidate_docs = self
+            .inverted_index
+            .documents_with_token(&phrase_tokens[0]);
+        for token in phrase_tokens.iter().skip(1) {
+            let with_token = self.inverted_index.documents_with_token(token);
+            candidate_docs.retain(|d| with_token.contains(d));
+        }
+
+        // Filter to only documents where tokens appear consecutively
+        let phrase_docs: Vec<&DocumentId> = candidate_docs
+            .iter()
+            .filter(|doc_id| self.inverted_index.is_phrase_in_doc(&phrase_tokens, doc_id))
+            .collect();
+
+        if phrase_docs.is_empty() {
+            return Vec::new();
+        }
+
+        // Score using BM25 on phrase tokens
+        let mut node_scores: HashMap<NodeId, f64> = HashMap::new();
+        for doc_id in phrase_docs {
+            let score = self.calculate_bm25(doc_id, &phrase_tokens);
+            *node_scores.entry(doc_id.node_id).or_insert(0.0) += score;
+        }
+
+        let mut results: Vec<SearchResult> = node_scores
+            .into_iter()
+            .map(|(node_id, score)| SearchResult::new(node_id, score))
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results
+    }
+
+    /// Perform fuzzy search: return documents containing a token within `max_distance`
+    /// edit distance from the query term. Uses BM25 scoring on matched tokens.
+    fn search_fuzzy(&self, term: &str, max_distance: usize) -> Vec<SearchResult> {
+        let term_lower = term.to_lowercase();
+        let matched_tokens = self
+            .inverted_index
+            .fuzzy_matching_tokens(&term_lower, max_distance);
+
+        if matched_tokens.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect candidates from all matching tokens
+        let mut candidate_docs: HashSet<DocumentId> = HashSet::new();
+        for token in &matched_tokens {
+            candidate_docs.extend(self.inverted_index.documents_with_token(token));
+        }
+
+        // Score using BM25 on all matched tokens
+        let mut node_scores: HashMap<NodeId, f64> = HashMap::new();
+        for doc_id in &candidate_docs {
+            let score = self.calculate_bm25(doc_id, &matched_tokens);
+            *node_scores.entry(doc_id.node_id).or_insert(0.0) += score;
+        }
+
+        let mut results: Vec<SearchResult> = node_scores
+            .into_iter()
+            .map(|(node_id, score)| SearchResult::new(node_id, score))
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results
+    }
+
+    /// Check if documents contain all query terms (AND semantics).
+    ///
+    /// The query format is:
+    /// - Plain keywords: AND semantics (all tokens must appear)
+    /// - Phrase search: `"graph database"` — tokens must appear consecutively
+    /// - Fuzzy search: `databse~` or `databse~1` — match within edit distance N (default 2)
+    pub fn contains(&self, query: &str) -> HashSet<NodeId> {
+        // Phrase search: "..."
+        if let Some(phrase) = parse_phrase_query(query) {
+            let phrase_tokens = Tokenizer::tokenize(phrase);
+            if phrase_tokens.is_empty() {
+                return HashSet::new();
+            }
+            // Candidate docs must contain all tokens
+            let mut candidate_docs = self
+                .inverted_index
+                .documents_with_token(&phrase_tokens[0]);
+            for token in phrase_tokens.iter().skip(1) {
+                let with_token = self.inverted_index.documents_with_token(token);
+                candidate_docs.retain(|d| with_token.contains(d));
+            }
+            // Filter by consecutive positioning
+            return candidate_docs
+                .iter()
+                .filter(|doc_id| {
+                    self.inverted_index.is_phrase_in_doc(&phrase_tokens, doc_id)
+                })
+                .map(|doc_id| doc_id.node_id)
+                .collect();
+        }
+
+        // Fuzzy search: term~ or term~N
+        if let Some((term, max_distance)) = parse_fuzzy_query(query) {
+            let term_lower = term.to_lowercase();
+            return self
+                .inverted_index
+                .documents_with_fuzzy_token(&term_lower, max_distance)
+                .iter()
+                .map(|doc_id| doc_id.node_id)
+                .collect();
+        }
+
+        // Standard AND keyword search
+        let query_tokens = Tokenizer::tokenize(query);
         if query_tokens.is_empty() {
             return HashSet::new();
         }
@@ -683,5 +958,247 @@ mod tests {
 
         let results = manager.search("idx1", "Alice").unwrap();
         assert!(results.is_empty());
+    }
+
+    // ========== Levenshtein distance tests ==========
+
+    #[test]
+    fn test_levenshtein_equal_strings() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_one_substitution() {
+        // "kitten" -> "sitten": 1 substitution (k->s)
+        assert_eq!(levenshtein_distance("kitten", "sitten"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_multiple_edits() {
+        // "kitten" -> "sitting": 3 edits
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn test_levenshtein_empty_strings() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn test_levenshtein_database_typo() {
+        // "databse" differs from "database" by one deletion (missing 'a') — distance 1
+        assert_eq!(levenshtein_distance("database", "databse"), 1);
+    }
+
+    // ========== Phrase search tests ==========
+
+    #[test]
+    fn test_phrase_search_matches_adjacent_words() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "graph database systems are powerful");
+        index.add_document(2, "body", "database graph systems exist");
+        index.add_document(3, "body", "relational database management");
+
+        // Phrase search: "graph database" must match only doc 1
+        let results = index.search(r#""graph database""#);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
+    }
+
+    #[test]
+    fn test_phrase_search_order_matters() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "graph database");
+        index.add_document(2, "body", "database graph");
+
+        // "graph database" matches only doc 1 (order matters)
+        let results = index.search(r#""graph database""#);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
+
+        // "database graph" matches only doc 2
+        let results2 = index.search(r#""database graph""#);
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results2[0].node_id, 2);
+    }
+
+    #[test]
+    fn test_phrase_search_no_match_non_adjacent() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        // "graph" and "database" exist but are not adjacent
+        index.add_document(1, "body", "graph systems and database management");
+
+        let results = index.search(r#""graph database""#);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_phrase_search_single_word() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "hello world");
+
+        let results = index.search(r#""hello""#);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_phrase_contains_matches_consecutive() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "graph database is fast");
+        index.add_document(2, "body", "database systems for graph processing");
+
+        let matches = index.contains(r#""graph database""#);
+        assert_eq!(matches.len(), 1);
+        assert!(matches.contains(&1));
+    }
+
+    #[test]
+    fn test_phrase_contains_no_match_wrong_order() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "database graph");
+
+        // Phrase "graph database" does not match "database graph"
+        let matches = index.contains(r#""graph database""#);
+        assert!(matches.is_empty());
+    }
+
+    // ========== Fuzzy search tests ==========
+
+    #[test]
+    fn test_fuzzy_search_default_distance_2() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "database systems");
+        index.add_document(2, "body", "python programming");
+
+        // "dtabase~" (two characters transposed) has distance 2 from "database",
+        // so default distance 2 should match
+        let results = index.search("dtabase~");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_search_custom_distance() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "database systems");
+        index.add_document(2, "body", "python programming");
+
+        // "databse" has distance 1 from "database", so distance limit 0 should NOT match
+        let results = index.search("databse~0");
+        assert!(results.is_empty());
+
+        // "databse~1" should match "database" (distance exactly 1)
+        let results2 = index.search("databse~1");
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results2[0].node_id, 1);
+
+        // "databse~2" should also match "database"
+        let results3 = index.search("databse~2");
+        assert_eq!(results3.len(), 1);
+        assert_eq!(results3[0].node_id, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_search_exact_match() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "rust programming language");
+
+        // Exact match with fuzzy syntax should still work
+        let results = index.search("rust~");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_search_no_match_distance_exceeded() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "database");
+
+        // "xyz~0" — exact only, "xyz" != "database"
+        let results = index.search("xyz~0");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_contains_finds_typo() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "database management system");
+        index.add_document(2, "body", "graph processing");
+
+        let matches = index.contains("databse~");
+        assert_eq!(matches.len(), 1);
+        assert!(matches.contains(&1));
+    }
+
+    #[test]
+    fn test_fuzzy_contains_distance_1() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+
+        index.add_document(1, "body", "rust programming");
+
+        // "rast" has distance 1 from "rust" (u->a)
+        let matches = index.contains("rast~1");
+        assert_eq!(matches.len(), 1);
+        assert!(matches.contains(&1));
+    }
+
+    // ========== Manager-level phrase/fuzzy tests ==========
+
+    #[test]
+    fn test_manager_phrase_search() {
+        let mut manager = FulltextManager::new();
+        manager
+            .create_index("idx", "Article", vec!["body".to_string()])
+            .unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "body".to_string(),
+            PropertyValue::String("graph database systems".to_string()),
+        );
+        manager.index_node(1, "Article", &props);
+
+        let mut props2 = HashMap::new();
+        props2.insert(
+            "body".to_string(),
+            PropertyValue::String("database graph processing".to_string()),
+        );
+        manager.index_node(2, "Article", &props2);
+
+        let results = manager.search("idx", r#""graph database""#).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
+    }
+
+    #[test]
+    fn test_manager_fuzzy_search() {
+        let mut manager = FulltextManager::new();
+        manager
+            .create_index("idx", "Article", vec!["body".to_string()])
+            .unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "body".to_string(),
+            PropertyValue::String("database administration".to_string()),
+        );
+        manager.index_node(1, "Article", &props);
+
+        let results = manager.search("idx", "databse~").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, 1);
     }
 }

@@ -43,6 +43,8 @@ pub enum Statement {
     Explain(Box<Statement>),
     /// PROFILE文（実行統計付き実行）
     Profile(Box<Statement>),
+    /// プロシージャコール: CALL proc.name(args) YIELD col1, col2 ...
+    ProcedureCall(ProcedureCallStatement),
 }
 
 /// UNION文
@@ -821,4 +823,19 @@ pub struct AlterUserStatement {
     pub password: Option<String>,
     /// 新しいロール（省略可）
     pub role: Option<String>,
+}
+
+/// プロシージャコール文: CALL proc.name(arg1, arg2) YIELD col1, col2 ...
+///
+/// 例: CALL db.index.fulltext.search('idx', 'query') YIELD node, score
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcedureCallStatement {
+    /// プロシージャ名（ドット区切り、例: "db.index.fulltext.search"）
+    pub procedure: String,
+    /// 引数のリスト（リテラルまたはパラメータ参照）
+    pub arguments: Vec<Expression>,
+    /// YIELD列名のリスト（省略時は空）
+    pub yield_columns: Vec<String>,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
 }

@@ -9,6 +9,32 @@ use thiserror::Error;
 
 use crate::ast::*;
 
+/// Compute Levenshtein edit distance between two strings (used for fuzzy CONTAINS).
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    if m < n {
+        return levenshtein_distance(b, a);
+    }
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
 /// 実行エラー
 #[derive(Debug, Clone, Error, PartialEq)]
 pub enum ExecuteError {
@@ -278,6 +304,7 @@ impl<'a> Executor<'a> {
             )),
             Statement::Explain(inner) => self.execute_explain(*inner),
             Statement::Profile(inner) => self.execute_profile(*inner),
+            Statement::ProcedureCall(pc) => self.execute_procedure_call(pc),
         }
     }
 
@@ -1478,6 +1505,121 @@ impl<'a> Executor<'a> {
                 ))],
             }],
         ))
+    }
+
+    // ========== PROCEDURE CALLS ==========
+
+    /// Execute a top-level procedure call: CALL proc.name(args) YIELD col1, col2 [RETURN ...]
+    ///
+    /// Currently supports:
+    ///   - `db.index.fulltext.search(indexName, query)` — returns (node, score) rows
+    fn execute_procedure_call(
+        &mut self,
+        pc: ProcedureCallStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        match pc.procedure.as_str() {
+            "db.index.fulltext.search" => {
+                self.execute_fulltext_search_procedure(pc)
+            }
+            other => Err(ExecuteError::TypeError(format!(
+                "unknown procedure: {}",
+                other
+            ))),
+        }
+    }
+
+    /// Execute `CALL db.index.fulltext.search(indexName, query) YIELD node, score`.
+    ///
+    /// Returns a result set with columns derived from the YIELD clause.
+    /// Standard column names: `node` (NodeId as Node value) and `score` (Float).
+    fn execute_fulltext_search_procedure(
+        &mut self,
+        pc: ProcedureCallStatement,
+    ) -> Result<ResultSet, ExecuteError> {
+        if pc.arguments.len() != 2 {
+            return Err(ExecuteError::TypeError(
+                "db.index.fulltext.search requires exactly 2 arguments: (indexName, query)"
+                    .to_string(),
+            ));
+        }
+
+        // Evaluate arguments — they must resolve to strings
+        let empty_bindings = Bindings::new();
+        let index_name_val = self.evaluate_expression(&pc.arguments[0], &empty_bindings)?;
+        let query_val = self.evaluate_expression(&pc.arguments[1], &empty_bindings)?;
+
+        let index_name = match &index_name_val {
+            Value::String(s) => s.clone(),
+            _ => {
+                return Err(ExecuteError::TypeError(
+                    "db.index.fulltext.search: first argument must be a string (index name)"
+                        .to_string(),
+                ))
+            }
+        };
+
+        let query = match &query_val {
+            Value::String(s) => s.clone(),
+            _ => {
+                return Err(ExecuteError::TypeError(
+                    "db.index.fulltext.search: second argument must be a string (query)"
+                        .to_string(),
+                ))
+            }
+        };
+
+        // Perform the search
+        let search_results = self.fulltext.search(&index_name, &query)?;
+
+        // Determine column names from YIELD clause (default: node, score)
+        let yield_cols = if pc.yield_columns.is_empty() {
+            vec!["node".to_string(), "score".to_string()]
+        } else {
+            pc.yield_columns.clone()
+        };
+
+        // Build bindings for each result row
+        let mut all_bindings: Vec<Bindings> = Vec::new();
+        for result in &search_results {
+            let mut bindings = Bindings::new();
+            // Always bind "node" and "score" so RETURN items can reference them
+            bindings.insert(
+                "node".to_string(),
+                BindingValue::Node(result.node_id),
+            );
+            bindings.insert(
+                "score".to_string(),
+                BindingValue::Scalar(Value::Float(result.score)),
+            );
+            all_bindings.push(bindings);
+        }
+
+        // If RETURN clause present, use it for projection/ordering
+        if let Some(return_clause) = pc.return_clause {
+            return self.build_result_set(&return_clause, &all_bindings);
+        }
+
+        // Otherwise, project YIELD columns directly
+        let mut rows = Vec::new();
+        for bindings in &all_bindings {
+            let mut row_cols = Vec::new();
+            for col_name in &yield_cols {
+                let val = match bindings.get(col_name) {
+                    Some(BindingValue::Node(id)) => Value::Node(*id),
+                    Some(BindingValue::Scalar(v)) => v.clone(),
+                    Some(BindingValue::Edge(id)) => Value::Int(*id as i64),
+                    Some(BindingValue::Path { nodes, edges }) => Value::Path {
+                        nodes: nodes.clone(),
+                        edges: edges.clone(),
+                    },
+                    None => Value::Null,
+                };
+                row_cols.push(val);
+            }
+            rows.push(Row { columns: row_cols });
+        }
+
+        Ok(ResultSet::new(yield_cols, rows))
     }
 
     // ========== EXPLAIN / PROFILE ==========
@@ -4281,7 +4423,7 @@ impl<'a> Executor<'a> {
             },
             BinaryOp::Contains => match (left, right) {
                 (Value::String(haystack), Value::String(needle)) => {
-                    let result = haystack.to_lowercase().contains(&needle.to_lowercase());
+                    let result = self.string_contains(haystack, needle);
                     Ok(Value::Bool(result))
                 }
                 _ => Err(ExecuteError::TypeError(
@@ -4397,6 +4539,81 @@ impl<'a> Executor<'a> {
                 )),
             },
         }
+    }
+
+    /// Evaluate the CONTAINS operator with support for phrase and fuzzy search syntax.
+    ///
+    /// Query formats:
+    /// - `"phrase terms"` — phrase search: all tokens must appear consecutively in haystack
+    /// - `term~` or `term~N` — fuzzy search: any token in haystack within edit distance N
+    /// - plain text — standard case-insensitive substring containment
+    fn string_contains(&self, haystack: &str, needle: &str) -> bool {
+        // Phrase search: needle surrounded by double quotes
+        if needle.len() >= 2 {
+            let nb = needle.as_bytes();
+            if nb[0] == b'"' && nb[needle.len() - 1] == b'"' {
+                let phrase = &needle[1..needle.len() - 1];
+                return self.contains_phrase(haystack, phrase);
+            }
+        }
+
+        // Fuzzy search: needle ends with '~' (optionally followed by digit)
+        if let Some(tilde_pos) = needle.rfind('~') {
+            let term = &needle[..tilde_pos];
+            let suffix = &needle[tilde_pos + 1..];
+            if !term.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                let max_distance: usize = if suffix.is_empty() {
+                    2
+                } else {
+                    suffix.parse().unwrap_or(2)
+                };
+                return self.contains_fuzzy(haystack, term, max_distance);
+            }
+        }
+
+        // Standard case-insensitive substring search
+        haystack.to_lowercase().contains(&needle.to_lowercase())
+    }
+
+    /// Check whether all tokens of `phrase` appear consecutively in `haystack`.
+    fn contains_phrase(&self, haystack: &str, phrase: &str) -> bool {
+        let haystack_tokens: Vec<&str> = haystack
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let phrase_tokens: Vec<String> = phrase
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase())
+            .collect();
+
+        if phrase_tokens.is_empty() {
+            return false;
+        }
+        if phrase_tokens.len() > haystack_tokens.len() {
+            return false;
+        }
+
+        'outer: for i in 0..=(haystack_tokens.len() - phrase_tokens.len()) {
+            for (j, phrase_token) in phrase_tokens.iter().enumerate() {
+                if haystack_tokens[i + j].to_lowercase() != *phrase_token {
+                    continue 'outer;
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
+    /// Check whether any token in `haystack` is within `max_distance` Levenshtein
+    /// distance from `term`.
+    fn contains_fuzzy(&self, haystack: &str, term: &str, max_distance: usize) -> bool {
+        let term_lower = term.to_lowercase();
+        haystack
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .any(|token| levenshtein_distance(token, &term_lower) <= max_distance)
     }
 }
 
@@ -7312,6 +7529,323 @@ mod tests {
             assert_eq!(dfi.name, "my_idx");
         } else {
             panic!("expected DropFulltextIndex statement");
+        }
+    }
+
+    // ========== Phrase search tests (CONTAINS with quoted phrase) ==========
+
+    #[test]
+    fn test_phrase_search_via_contains_matches_adjacent() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "graph database systems are powerful"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "database graph systems"})"#,
+        )
+        .unwrap();
+
+        // Phrase "graph database" should only match the first article
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS '"graph database"' RETURN n.body"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("graph database systems are powerful".to_string())
+        );
+    }
+
+    #[test]
+    fn test_phrase_search_order_matters() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "graph database"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "database graph"})"#,
+        )
+        .unwrap();
+
+        // "graph database" must match only the first document (order matters)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS '"graph database"' RETURN n.body"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("graph database".to_string())
+        );
+    }
+
+    #[test]
+    fn test_phrase_search_no_match_non_adjacent() {
+        let mut graph = Graph::new();
+        // Words exist but not adjacent
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "graph systems and database management"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS '"graph database"' RETURN n.body"#,
+        )
+        .unwrap();
+        assert!(result.rows.is_empty());
+    }
+
+    // ========== Fuzzy search tests (CONTAINS with ~ suffix) ==========
+
+    #[test]
+    fn test_fuzzy_search_via_contains_default_distance() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "database management systems"})"#,
+        )
+        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Article {body: "python code"})"#).unwrap();
+
+        // "dtabase~" has distance 2 from "database" (2 character transpositions)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS 'dtabase~' RETURN n.body"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("database management systems".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_search_via_contains_explicit_distance() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "database systems"})"#,
+        )
+        .unwrap();
+
+        // "databse" has distance 1 from "database"
+        // with limit 0, should NOT match
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS 'databse~0' RETURN n.body"#,
+        )
+        .unwrap();
+        assert!(result.rows.is_empty());
+
+        // with limit 1, should match
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS 'databse~1' RETURN n.body"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_fuzzy_search_exact_match_with_tilde() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Article {body: "rust programming language"})"#,
+        )
+        .unwrap();
+
+        // Exact term with ~ should still match (distance 0 <= 2)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Article) WHERE n.body CONTAINS 'rust~' RETURN n.body"#,
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    // ========== CALL db.index.fulltext.search tests ==========
+
+    #[test]
+    fn test_procedure_call_fulltext_search() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        // Create fulltext index
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE FULLTEXT INDEX article_idx FOR (n:Article) ON (n.title, n.body)"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Create nodes (they get indexed automatically)
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE (n:Article {title: "Graph Database Systems", body: "graph database tutorial"})"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE (n:Article {title: "Relational Databases", body: "SQL and tables"})"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE (n:Article {title: "Machine Learning", body: "neural networks"})"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Search using the procedure call
+        let result = executor
+            .execute(
+                Parser::new(
+                    r#"CALL db.index.fulltext.search('article_idx', 'graph') YIELD node, score"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Should return rows with "graph" in them (2 articles)
+        assert!(!result.rows.is_empty());
+        // Scores should be positive
+        for row in &result.rows {
+            if let Value::Float(score) = row.columns[1] {
+                assert!(score > 0.0, "score should be positive");
+            } else {
+                panic!("second column should be a float score");
+            }
+        }
+        // Columns should be ["node", "score"]
+        assert_eq!(result.columns[0], "node");
+        assert_eq!(result.columns[1], "score");
+    }
+
+    #[test]
+    fn test_procedure_call_fulltext_search_unknown_index() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        let result = executor.execute(
+            Parser::new(
+                r#"CALL db.index.fulltext.search('nonexistent', 'query') YIELD node, score"#,
+            )
+            .unwrap()
+            .parse()
+            .unwrap(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_procedure_call_fulltext_search_returns_sorted_scores() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE FULLTEXT INDEX idx FOR (n:Doc) ON (n.text)"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Document with "graph" appearing many times should rank higher
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE (n:Doc {text: "graph graph graph graph graph"})"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                Parser::new(
+                    r#"CREATE (n:Doc {text: "graph systems"})"#,
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+
+        let result = executor
+            .execute(
+                Parser::new(r#"CALL db.index.fulltext.search('idx', 'graph') YIELD node, score"#)
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        // Scores should be in descending order
+        if let (Value::Float(s1), Value::Float(s2)) = (
+            result.rows[0].columns[1].clone(),
+            result.rows[1].columns[1].clone(),
+        ) {
+            assert!(s1 >= s2, "results should be sorted by score descending");
+        }
+    }
+
+    #[test]
+    fn test_parse_procedure_call() {
+        let stmt = Parser::new(
+            r#"CALL db.index.fulltext.search('my_idx', 'query') YIELD node, score"#,
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+
+        if let Statement::ProcedureCall(pc) = stmt {
+            assert_eq!(pc.procedure, "db.index.fulltext.search");
+            assert_eq!(pc.arguments.len(), 2);
+            assert_eq!(pc.yield_columns, vec!["node", "score"]);
+        } else {
+            panic!("expected ProcedureCall statement");
         }
     }
 

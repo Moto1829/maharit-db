@@ -246,6 +246,9 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         }
         Statement::Explain(inner) => return build_plan_with_stats(inner, stats),
         Statement::Profile(inner) => return build_plan_with_stats(inner, stats),
+        Statement::ProcedureCall(pc) => {
+            vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
+        }
     };
 
     QueryPlan { nodes }
@@ -307,6 +310,9 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         }
         Statement::Explain(inner) => return build_plan(inner, node_count, edge_count),
         Statement::Profile(inner) => return build_plan(inner, node_count, edge_count),
+        Statement::ProcedureCall(pc) => {
+            vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
+        }
     };
 
     QueryPlan { nodes }
