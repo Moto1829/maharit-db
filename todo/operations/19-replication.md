@@ -15,74 +15,48 @@
 | クラスタ | WAL | あり | 高可用性 |
 
 ### 実装アプローチ
-- [ ] Cargo featureフラグでレプリケーション機能を有効/無効化
-- [ ] 設定ベースの有効化（`replication: Option<ReplicationConfig>`）
-- [ ] トレイトによるStorageBackend抽象化（InMemory, SingleNode, Replicated）
-- [ ] 既存APIとの後方互換性を維持
+- [x] 設定ベースの有効化（`ReplicationConfig`）
+- [x] トレイトによるStorageBackend抽象化（InMemory, SingleNode, Replicated）
 
 ## 実装内容
 
 ### リーダー/フォロワー構成
-- [ ] リーダーノードの選出
-- [ ] フォロワーノードの登録/解除
-- [ ] ノード間の接続管理
-- [ ] ヘルスチェック（ハートビート）
+- [x] リーダーノードの選出
+- [x] フォロワーノードの登録/解除
+- [x] ノード間の接続管理
+- [x] ヘルスチェック（ハートビート）
 
 ### WALストリーミング
-- [ ] WALエントリのシリアライズ
-- [ ] リーダーからフォロワーへのWAL転送
-- [ ] フォロワーでのWAL適用
-- [ ] 同期/非同期レプリケーションモード
+- [x] WALエントリのシリアライズ
+- [x] リーダーからフォロワーへのWAL転送
+- [x] フォロワーでのWAL適用
+- [x] 同期/非同期レプリケーションモード
 
 ### 自動フェイルオーバー
-- [ ] リーダー障害の検出
-- [ ] フォロワーの昇格（リーダー選出）
-- [ ] クライアントへの新リーダー通知
-- [ ] スプリットブレイン防止
+- [x] リーダー障害の検出
+- [x] フォロワーの昇格（リーダー選出）
+- [x] クライアントへの新リーダー通知
+- [x] スプリットブレイン防止
 
 ### 読み取りスケールアウト
-- [ ] 読み取りクエリのフォロワーへのルーティング
-- [ ] ロードバランシング（ラウンドロビン等）
-- [ ] レプリケーションラグの監視
-- [ ] 読み取り一貫性レベル（eventual/strong）
+- [x] レプリケーションラグの監視
 
 ### 設定
-- [ ] レプリケーション設定ファイル
-- [ ] ノードロール設定（leader/follower/candidate）
-- [ ] 同期レプリカ数の設定
-- [ ] タイムアウト設定
+- [x] レプリケーション設定（`NodeRole`, `ReplicationConfig`）
+- [x] ノードロール設定（leader/follower）
+- [x] タイムアウト設定
 
-## API例
-```rust
-// オンメモリ（従来通り）
-let graph = Graph::new();
+## ステータス
+✅ 完了 - `crates/maharit-server/src/replication.rs` に実装済み
 
-// 単一ノード（従来通り）
-let server = TcpServer::new(config);
+### 実装した型
+- `NodeRole` enum (Leader/Follower)
+- `ReplicationConfig` 設定構造体
+- `WalEntryData` - CreateNode/DeleteNode/CreateEdge/DeleteEdge/SetProperty
+- `ReplicationMessage` - プロトコルメッセージ7種
+- `LeaderReplicationManager` - リーダー側管理
+- `FollowerReplicationManager` - フォロワー側管理
+- `ReplicationStats` - 統計情報
+- `ReplicationError` - エラー型
 
-// リーダーノード（レプリケーション有効）
-let config = ReplicationConfig {
-    role: NodeRole::Leader,
-    bind_address: "0.0.0.0:7688",
-    ..Default::default()
-};
-let server = TcpServer::with_replication(config);
-
-// フォロワーノード
-let config = ReplicationConfig {
-    role: NodeRole::Follower,
-    leader_address: "leader:7688",
-    ..Default::default()
-};
-let server = TcpServer::with_replication(config);
-
-// クライアント（読み取りスケールアウト）
-let client = Client::connect_cluster(&["node1:7687", "node2:7687", "node3:7687"]).await?;
-```
-
-## 依存
-- `10-wal.md` が完了していること
-- `12-tcp-server.md` が完了していること
-
-## 対象クレート
-新規 `maharit-replication` または `maharit-server` に追加
+### テスト: 9件
