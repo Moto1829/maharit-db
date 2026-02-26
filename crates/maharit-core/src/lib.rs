@@ -12,7 +12,9 @@ pub use algorithms::{
     connected_components, find_cycles, has_cycle, pagerank, strongly_connected_components,
     topological_sort,
 };
-pub use constraint::{Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType};
+pub use constraint::{
+    Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType,
+};
 pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;

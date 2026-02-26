@@ -4,9 +4,9 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use maharit_core::{Graph, PropertyValue};
 use thiserror::Error;
 
@@ -509,8 +509,7 @@ impl Backup {
 mod tests {
     use super::*;
 
-    const TEST_DIR: &str =
-        "/private/tmp/claude-501/-Users-suzukishimei-Git-maharit-db/501c15b1-be07-44f2-8bd6-9023511fac23/scratchpad/";
+    const TEST_DIR: &str = "/private/tmp/claude-501/-Users-suzukishimei-Git-maharit-db/501c15b1-be07-44f2-8bd6-9023511fac23/scratchpad/";
 
     fn test_path(name: &str) -> String {
         format!("{}{}", TEST_DIR, name)
@@ -615,9 +614,7 @@ mod tests {
         let nodes: Vec<_> = restored.nodes().collect();
         let alice_node = nodes
             .iter()
-            .find(|n| {
-                n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string()))
-            })
+            .find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string())))
             .unwrap();
         assert!(alice_node.properties.get("bio").is_some());
 
@@ -631,8 +628,8 @@ mod tests {
         graph.create_node("Person");
 
         let path = test_path("test_metadata.backup");
-        let options = BackupOptions::default()
-            .with_description("Test backup for metadata inspection");
+        let options =
+            BackupOptions::default().with_description("Test backup for metadata inspection");
 
         let created_metadata = Backup::create(&graph, &path, &options).unwrap();
 
@@ -775,10 +772,7 @@ mod tests {
         drop(file);
 
         let result = Backup::restore(&path);
-        assert!(matches!(
-            result,
-            Err(BackupError::UnsupportedVersion(999))
-        ));
+        assert!(matches!(result, Err(BackupError::UnsupportedVersion(999))));
 
         std::fs::remove_file(path).ok();
     }

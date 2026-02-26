@@ -32,15 +32,15 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, ServerName};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
 /// Client errors
 #[derive(Debug, Error)]
@@ -598,11 +598,9 @@ impl Client {
                 self.buffer.clear();
                 Ok(())
             }
-            ConnectionStream::Tls(_) => {
-                Err(ClientError::Protocol(
-                    "TLS reconnection not supported. Please create a new client.".to_string(),
-                ))
-            }
+            ConnectionStream::Tls(_) => Err(ClientError::Protocol(
+                "TLS reconnection not supported. Please create a new client.".to_string(),
+            )),
         }
     }
 
@@ -623,7 +621,10 @@ impl Client {
 
     /// Check if an error should trigger reconnection
     fn should_reconnect(err: &ClientError) -> bool {
-        matches!(err, ClientError::ConnectionClosed | ClientError::Connection(_))
+        matches!(
+            err,
+            ClientError::ConnectionClosed | ClientError::Connection(_)
+        )
     }
 
     /// Execute a query and return the result
@@ -684,7 +685,11 @@ impl Client {
     ///     }
     /// }
     /// ```
-    pub async fn query_stream(&mut self, query: &str, chunk_size: usize) -> Result<StreamingResult<'_>> {
+    pub async fn query_stream(
+        &mut self,
+        query: &str,
+        chunk_size: usize,
+    ) -> Result<StreamingResult<'_>> {
         self.query_stream_in_tx(query, None, chunk_size).await
     }
 
@@ -698,7 +703,11 @@ impl Client {
         let request = Request::StreamQuery {
             query: query.to_string(),
             tx_id,
-            chunk_size: if chunk_size == 0 { DEFAULT_CHUNK_SIZE } else { chunk_size },
+            chunk_size: if chunk_size == 0 {
+                DEFAULT_CHUNK_SIZE
+            } else {
+                chunk_size
+            },
         };
 
         self.send_request(&request).await?;
@@ -1016,7 +1025,8 @@ pub mod pool {
             // Pre-create minimum connections
             let mut initial_connections = Vec::new();
             for _ in 0..config.min_connections {
-                let client = Client::connect_with_config(addr, config.client_config.clone()).await?;
+                let client =
+                    Client::connect_with_config(addr, config.client_config.clone()).await?;
                 initial_connections.push(client);
             }
 
@@ -1031,9 +1041,12 @@ pub mod pool {
         /// Get a connection from the pool
         pub async fn get(&self) -> Result<PooledConnection> {
             // Wait for an available slot
-            let permit = self.inner.semaphore.acquire().await.map_err(|_| {
-                ClientError::Protocol("Pool closed".to_string())
-            })?;
+            let permit = self
+                .inner
+                .semaphore
+                .acquire()
+                .await
+                .map_err(|_| ClientError::Protocol("Pool closed".to_string()))?;
             permit.forget(); // We'll add it back when connection is returned
 
             let mut connections = self.inner.connections.lock().await;
@@ -1170,7 +1183,10 @@ pub mod sync {
             chunk_size: usize,
         ) -> Result<QueryResult> {
             self.runtime.block_on(async {
-                let stream = self.client.query_stream_in_tx(query, tx_id, chunk_size).await?;
+                let stream = self
+                    .client
+                    .query_stream_in_tx(query, tx_id, chunk_size)
+                    .await?;
                 let rows = stream.collect_all().await?;
                 Ok(QueryResult { rows })
             })
@@ -1356,16 +1372,14 @@ mod tests {
 
     #[test]
     fn test_tls_client_config_with_ca_cert() {
-        let config = TlsClientConfig::new("example.com")
-            .with_ca_cert("/path/to/ca.crt");
+        let config = TlsClientConfig::new("example.com").with_ca_cert("/path/to/ca.crt");
         assert_eq!(config.ca_cert_path, Some("/path/to/ca.crt".to_string()));
         assert_eq!(config.domain, "example.com");
     }
 
     #[test]
     fn test_tls_client_config_with_skip_verify() {
-        let config = TlsClientConfig::new("example.com")
-            .with_skip_verify(true);
+        let config = TlsClientConfig::new("example.com").with_skip_verify(true);
         assert!(config.skip_verify);
         assert_eq!(config.domain, "example.com");
     }
@@ -1382,8 +1396,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tls_connect_invalid_ca_cert_path() {
-        let tls_config = TlsClientConfig::new("localhost")
-            .with_ca_cert("/nonexistent/path/ca.crt");
+        let tls_config = TlsClientConfig::new("localhost").with_ca_cert("/nonexistent/path/ca.crt");
 
         let result = Client::connect_tls("localhost:7687", tls_config).await;
         assert!(result.is_err());
@@ -1435,7 +1448,10 @@ mod tests {
         let json = r#"{"type":"streamStart","streamId":1,"totalRows":100}"#;
         let response: Response = serde_json::from_str(json).unwrap();
         match response {
-            Response::StreamStart { stream_id, total_rows } => {
+            Response::StreamStart {
+                stream_id,
+                total_rows,
+            } => {
                 assert_eq!(stream_id, 1);
                 assert_eq!(total_rows, Some(100));
             }
@@ -1445,10 +1461,15 @@ mod tests {
 
     #[test]
     fn test_stream_chunk_response() {
-        let json = r#"{"type":"streamChunk","streamId":1,"chunkIndex":0,"rows":[{"name":"Alice"}]}"#;
+        let json =
+            r#"{"type":"streamChunk","streamId":1,"chunkIndex":0,"rows":[{"name":"Alice"}]}"#;
         let response: Response = serde_json::from_str(json).unwrap();
         match response {
-            Response::StreamChunk { stream_id, chunk_index, rows } => {
+            Response::StreamChunk {
+                stream_id,
+                chunk_index,
+                rows,
+            } => {
                 assert_eq!(stream_id, 1);
                 assert_eq!(chunk_index, 0);
                 assert_eq!(rows.len(), 1);
@@ -1463,7 +1484,10 @@ mod tests {
         let json = r#"{"type":"streamEnd","streamId":1,"totalRows":100}"#;
         let response: Response = serde_json::from_str(json).unwrap();
         match response {
-            Response::StreamEnd { stream_id, total_rows } => {
+            Response::StreamEnd {
+                stream_id,
+                total_rows,
+            } => {
                 assert_eq!(stream_id, 1);
                 assert_eq!(total_rows, 100);
             }

@@ -199,12 +199,7 @@ impl PlanCache {
     }
 
     /// Get a cached plan or build and cache one from the statement and stats.
-    pub fn get_or_build(
-        &mut self,
-        query: &str,
-        stmt: &Statement,
-        stats: &GraphStats,
-    ) -> QueryPlan {
+    pub fn get_or_build(&mut self, query: &str, stmt: &Statement, stats: &GraphStats) -> QueryPlan {
         let normalized = normalize_query(query);
 
         if let Some(entry) = self.entries.get_mut(&normalized) {
@@ -293,12 +288,8 @@ mod tests {
     fn test_cache_hit() {
         let mut cache = QueryCache::new(10);
 
-        let stmt1 = cache
-            .get_or_parse("MATCH (n:Person) RETURN n")
-            .unwrap();
-        let stmt2 = cache
-            .get_or_parse("MATCH (n:Person) RETURN n")
-            .unwrap();
+        let stmt1 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+        let stmt2 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
 
         assert_eq!(stmt1, stmt2);
 
@@ -312,7 +303,9 @@ mod tests {
     fn test_cache_miss() {
         let mut cache = QueryCache::new(10);
 
-        cache.get_or_parse("CREATE (n:Person {name: 'Alice'})").unwrap();
+        cache
+            .get_or_parse("CREATE (n:Person {name: 'Alice'})")
+            .unwrap();
         cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
 
         let stats = cache.stats();
@@ -325,12 +318,8 @@ mod tests {
     fn test_whitespace_normalization() {
         let mut cache = QueryCache::new(10);
 
-        let stmt1 = cache
-            .get_or_parse("MATCH  (n:Person)  RETURN  n")
-            .unwrap();
-        let stmt2 = cache
-            .get_or_parse("MATCH (n:Person) RETURN n")
-            .unwrap();
+        let stmt1 = cache.get_or_parse("MATCH  (n:Person)  RETURN  n").unwrap();
+        let stmt2 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
 
         assert_eq!(stmt1, stmt2);
 

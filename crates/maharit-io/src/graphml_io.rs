@@ -135,7 +135,9 @@ impl GraphMlImporter {
                     if matches!(xml_reader.read_event_into(&mut buf), Ok(Event::Empty(_))) {
                         // Process empty node
                         if let Some(ref node_id) = current_node_id {
-                            let label = current_node_label.clone().unwrap_or_else(|| "Node".to_string());
+                            let label = current_node_label
+                                .clone()
+                                .unwrap_or_else(|| "Node".to_string());
                             let internal_id = graph.create_node(&label);
                             id_map.insert(node_id.clone(), internal_id);
                             nodes_imported += 1;
@@ -149,7 +151,10 @@ impl GraphMlImporter {
 
                         // Check if this is a label key
                         if let Some(key_def) = keys.get(key_id) {
-                            if key_def.name == "label" || key_def.name == "labelV" || key_def.name == "labelE" {
+                            if key_def.name == "label"
+                                || key_def.name == "labelV"
+                                || key_def.name == "labelE"
+                            {
                                 if current_node_id.is_some() {
                                     current_node_label = Some(text.clone());
                                 } else if current_edge.is_some() {
@@ -161,63 +166,67 @@ impl GraphMlImporter {
                         let value = Self::parse_value(&text, keys.get(key_id));
 
                         if current_node_id.is_some() {
-                            let prop_name = keys.get(key_id)
+                            let prop_name = keys
+                                .get(key_id)
                                 .map(|k| k.name.clone())
                                 .unwrap_or_else(|| key_id.clone());
                             current_node_properties.insert(prop_name, value);
                         } else if current_edge.is_some() {
-                            let prop_name = keys.get(key_id)
+                            let prop_name = keys
+                                .get(key_id)
                                 .map(|k| k.name.clone())
                                 .unwrap_or_else(|| key_id.clone());
                             current_edge_properties.insert(prop_name, value);
                         }
                     }
                 }
-                Ok(Event::End(ref e)) => {
-                    match e.name().as_ref() {
-                        b"node" => {
-                            if let Some(ref node_id) = current_node_id {
-                                let label = current_node_label.take().unwrap_or_else(|| "Node".to_string());
-                                let internal_id = graph.create_node(&label);
-                                id_map.insert(node_id.clone(), internal_id);
+                Ok(Event::End(ref e)) => match e.name().as_ref() {
+                    b"node" => {
+                        if let Some(ref node_id) = current_node_id {
+                            let label = current_node_label
+                                .take()
+                                .unwrap_or_else(|| "Node".to_string());
+                            let internal_id = graph.create_node(&label);
+                            id_map.insert(node_id.clone(), internal_id);
 
-                                if let Some(node) = graph.get_node_mut(internal_id) {
-                                    for (k, v) in current_node_properties.drain() {
-                                        if k != "label" && k != "labelV" {
-                                            node.set_property(k, v);
-                                        }
+                            if let Some(node) = graph.get_node_mut(internal_id) {
+                                for (k, v) in current_node_properties.drain() {
+                                    if k != "label" && k != "labelV" {
+                                        node.set_property(k, v);
                                     }
                                 }
-                                nodes_imported += 1;
                             }
-                            current_node_id = None;
+                            nodes_imported += 1;
                         }
-                        b"edge" => {
-                            if let Some((source, target)) = current_edge.take() {
-                                let from_id = id_map.get(&source).copied();
-                                let to_id = id_map.get(&target).copied();
+                        current_node_id = None;
+                    }
+                    b"edge" => {
+                        if let Some((source, target)) = current_edge.take() {
+                            let from_id = id_map.get(&source).copied();
+                            let to_id = id_map.get(&target).copied();
 
-                                if let (Some(from), Some(to)) = (from_id, to_id) {
-                                    let label = current_edge_label.take().unwrap_or_else(|| "EDGE".to_string());
-                                    if let Ok(edge_id) = graph.create_edge(from, to, &label) {
-                                        if let Some(edge) = graph.get_edge_mut(edge_id) {
-                                            for (k, v) in current_edge_properties.drain() {
-                                                if k != "label" && k != "labelE" {
-                                                    edge.set_property(k, v);
-                                                }
+                            if let (Some(from), Some(to)) = (from_id, to_id) {
+                                let label = current_edge_label
+                                    .take()
+                                    .unwrap_or_else(|| "EDGE".to_string());
+                                if let Ok(edge_id) = graph.create_edge(from, to, &label) {
+                                    if let Some(edge) = graph.get_edge_mut(edge_id) {
+                                        for (k, v) in current_edge_properties.drain() {
+                                            if k != "label" && k != "labelE" {
+                                                edge.set_property(k, v);
                                             }
                                         }
-                                        edges_imported += 1;
                                     }
+                                    edges_imported += 1;
                                 }
                             }
                         }
-                        b"data" => {
-                            current_data_key = None;
-                        }
-                        _ => {}
                     }
-                }
+                    b"data" => {
+                        current_data_key = None;
+                    }
+                    _ => {}
+                },
                 Ok(Event::Eof) => break,
                 Err(e) => {
                     return Err(IoError::InvalidFormat(format!("XML parse error: {}", e)));
@@ -263,15 +272,15 @@ impl GraphMlImporter {
     fn parse_value(text: &str, key_def: Option<&KeyDef>) -> PropertyValue {
         if let Some(key) = key_def {
             match key.attr_type {
-                AttrType::Int | AttrType::Long => {
-                    text.parse::<i64>().map(PropertyValue::Int).unwrap_or(PropertyValue::String(text.to_string()))
-                }
-                AttrType::Float | AttrType::Double => {
-                    text.parse::<f64>().map(PropertyValue::Float).unwrap_or(PropertyValue::String(text.to_string()))
-                }
-                AttrType::Boolean => {
-                    PropertyValue::Bool(text == "true" || text == "1")
-                }
+                AttrType::Int | AttrType::Long => text
+                    .parse::<i64>()
+                    .map(PropertyValue::Int)
+                    .unwrap_or(PropertyValue::String(text.to_string())),
+                AttrType::Float | AttrType::Double => text
+                    .parse::<f64>()
+                    .map(PropertyValue::Float)
+                    .unwrap_or(PropertyValue::String(text.to_string())),
+                AttrType::Boolean => PropertyValue::Bool(text == "true" || text == "1"),
                 AttrType::String => PropertyValue::String(text.to_string()),
             }
         } else {
@@ -315,10 +324,22 @@ impl GraphMlExporter {
         Self::write_key(&mut xml_writer, "labelE", "label", "edge", "string")?;
 
         for (name, attr_type) in &node_keys {
-            Self::write_key(&mut xml_writer, &format!("n_{}", name), name, "node", attr_type)?;
+            Self::write_key(
+                &mut xml_writer,
+                &format!("n_{}", name),
+                name,
+                "node",
+                attr_type,
+            )?;
         }
         for (name, attr_type) in &edge_keys {
-            Self::write_key(&mut xml_writer, &format!("e_{}", name), name, "edge", attr_type)?;
+            Self::write_key(
+                &mut xml_writer,
+                &format!("e_{}", name),
+                name,
+                "edge",
+                attr_type,
+            )?;
         }
 
         // Graph element
@@ -338,7 +359,11 @@ impl GraphMlExporter {
 
             // Properties
             for (key, value) in &node.properties {
-                Self::write_data(&mut xml_writer, &format!("n_{}", key), &Self::property_to_string(value))?;
+                Self::write_data(
+                    &mut xml_writer,
+                    &format!("n_{}", key),
+                    &Self::property_to_string(value),
+                )?;
             }
 
             xml_writer.write_event(Event::End(BytesEnd::new("node")))?;
@@ -357,7 +382,11 @@ impl GraphMlExporter {
 
             // Properties
             for (key, value) in &edge.properties {
-                Self::write_data(&mut xml_writer, &format!("e_{}", key), &Self::property_to_string(value))?;
+                Self::write_data(
+                    &mut xml_writer,
+                    &format!("e_{}", key),
+                    &Self::property_to_string(value),
+                )?;
             }
 
             xml_writer.write_event(Event::End(BytesEnd::new("edge")))?;
@@ -385,17 +414,24 @@ impl GraphMlExporter {
 
         for node in graph.nodes() {
             for (key, value) in &node.properties {
-                node_keys.entry(key.clone()).or_insert_with(|| Self::property_type(value));
+                node_keys
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::property_type(value));
             }
         }
 
         for edge in graph.edges() {
             for (key, value) in &edge.properties {
-                edge_keys.entry(key.clone()).or_insert_with(|| Self::property_type(value));
+                edge_keys
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::property_type(value));
             }
         }
 
-        (node_keys.into_iter().collect(), edge_keys.into_iter().collect())
+        (
+            node_keys.into_iter().collect(),
+            edge_keys.into_iter().collect(),
+        )
     }
 
     fn property_type(value: &PropertyValue) -> &'static str {
@@ -408,7 +444,13 @@ impl GraphMlExporter {
         }
     }
 
-    fn write_key<W: Write>(writer: &mut Writer<W>, id: &str, name: &str, for_type: &str, attr_type: &str) -> Result<()> {
+    fn write_key<W: Write>(
+        writer: &mut Writer<W>,
+        id: &str,
+        name: &str,
+        for_type: &str,
+        attr_type: &str,
+    ) -> Result<()> {
         let mut key = BytesStart::new("key");
         key.push_attribute(("id", id));
         key.push_attribute(("for", for_type));

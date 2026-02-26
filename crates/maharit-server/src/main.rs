@@ -151,10 +151,7 @@ fn run_backup(args: &[String]) {
             Ok(meta) => {
                 println!("Backup: {}", path);
                 println!("  Version:     {}", meta.version);
-                println!(
-                    "  Created:     {}",
-                    format_timestamp(meta.timestamp)
-                );
+                println!("  Created:     {}", format_timestamp(meta.timestamp));
                 println!("  Nodes:       {}", meta.node_count);
                 println!("  Edges:       {}", meta.edge_count);
                 println!("  Compressed:  {}", meta.compressed);

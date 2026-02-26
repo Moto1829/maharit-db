@@ -259,8 +259,7 @@ impl LeaderReplicationManager {
     /// handles each one in its own task.  Returns `Ok(())` immediately after
     /// the listener is bound.
     pub async fn start(&self) -> Result<(), ReplicationError> {
-        let listener =
-            TcpListener::bind(&self.config.replication_bind_address).await?;
+        let listener = TcpListener::bind(&self.config.replication_bind_address).await?;
 
         let config = self.config.clone();
         let lsn = Arc::clone(&self.lsn);
@@ -274,8 +273,7 @@ impl LeaderReplicationManager {
                     break;
                 }
 
-                let accept_result =
-                    timeout(Duration::from_secs(1), listener.accept()).await;
+                let accept_result = timeout(Duration::from_secs(1), listener.accept()).await;
 
                 match accept_result {
                     Ok(Ok((socket, _addr))) => {

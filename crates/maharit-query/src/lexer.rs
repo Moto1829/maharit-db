@@ -900,10 +900,7 @@ mod tests {
 
     #[test]
     fn test_regex_match_token() {
-        assert_eq!(
-            tokenize("=~"),
-            vec![TokenKind::RegexMatch, TokenKind::Eof]
-        );
+        assert_eq!(tokenize("=~"), vec![TokenKind::RegexMatch, TokenKind::Eof]);
     }
 
     #[test]

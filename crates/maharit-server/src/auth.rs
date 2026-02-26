@@ -1,14 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 /// Role-based access control roles
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Role {
-    Admin,      // Full access
-    ReadWrite,  // Read and write, no user management
-    ReadOnly,   // Read only
+    Admin,     // Full access
+    ReadWrite, // Read and write, no user management
+    ReadOnly,  // Read only
 }
 
 /// User account representation
@@ -18,7 +18,7 @@ pub struct User {
     password_hash: String,
     salt: String,
     pub role: Role,
-    pub created_at: u64,  // Unix timestamp
+    pub created_at: u64, // Unix timestamp
     pub active: bool,
 }
 
@@ -93,11 +93,11 @@ impl Session {
 /// Database operations requiring authorization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
-    Read,           // MATCH, RETURN
-    Write,          // CREATE, SET, DELETE, MERGE, REMOVE
-    CreateIndex,    // CREATE INDEX, CREATE CONSTRAINT
-    DropIndex,      // DROP INDEX, DROP CONSTRAINT
-    ManageUsers,    // CREATE USER, DROP USER, ALTER USER
+    Read,        // MATCH, RETURN
+    Write,       // CREATE, SET, DELETE, MERGE, REMOVE
+    CreateIndex, // CREATE INDEX, CREATE CONSTRAINT
+    DropIndex,   // DROP INDEX, DROP CONSTRAINT
+    ManageUsers, // CREATE USER, DROP USER, ALTER USER
 }
 
 /// Authentication and authorization errors
@@ -157,7 +157,12 @@ impl AuthManager {
     }
 
     /// Create a new user account
-    pub fn create_user(&mut self, username: &str, password: &str, role: Role) -> Result<(), AuthError> {
+    pub fn create_user(
+        &mut self,
+        username: &str,
+        password: &str,
+        role: Role,
+    ) -> Result<(), AuthError> {
         if self.users.contains_key(username) {
             return Err(AuthError::UserAlreadyExists(username.to_string()));
         }
@@ -170,12 +175,16 @@ impl AuthManager {
     /// Delete a user account
     /// Cannot delete the last admin user
     pub fn drop_user(&mut self, username: &str) -> Result<(), AuthError> {
-        let user = self.users.get(username)
+        let user = self
+            .users
+            .get(username)
             .ok_or_else(|| AuthError::UserNotFound(username.to_string()))?;
 
         // Check if this is the last admin
         if user.role == Role::Admin {
-            let admin_count = self.users.values()
+            let admin_count = self
+                .users
+                .values()
                 .filter(|u| u.role == Role::Admin && u.active)
                 .count();
 
@@ -187,7 +196,8 @@ impl AuthManager {
         self.users.remove(username);
 
         // Invalidate all sessions for this user
-        self.sessions.retain(|_, session| session.username != username);
+        self.sessions
+            .retain(|_, session| session.username != username);
 
         Ok(())
     }
@@ -201,7 +211,9 @@ impl AuthManager {
         // Check if changing from admin would leave no admins
         let current_role = self.users[username].role;
         if current_role == Role::Admin && role != Role::Admin {
-            let admin_count = self.users.values()
+            let admin_count = self
+                .users
+                .values()
                 .filter(|u| u.role == Role::Admin && u.active)
                 .count();
 
@@ -216,7 +228,9 @@ impl AuthManager {
 
     /// Change a user's password
     pub fn alter_user_password(&mut self, username: &str, password: &str) -> Result<(), AuthError> {
-        let user = self.users.get_mut(username)
+        let user = self
+            .users
+            .get_mut(username)
             .ok_or_else(|| AuthError::UserNotFound(username.to_string()))?;
 
         user.update_password(password);
@@ -226,7 +240,9 @@ impl AuthManager {
     /// Authenticate user and create a new session
     /// Returns session token on success
     pub fn authenticate(&mut self, username: &str, password: &str) -> Result<String, AuthError> {
-        let user = self.users.get(username)
+        let user = self
+            .users
+            .get(username)
             .ok_or(AuthError::InvalidCredentials)?;
 
         if !user.active {
@@ -246,7 +262,9 @@ impl AuthManager {
 
     /// Validate a session token and refresh its timeout
     pub fn validate_session(&mut self, token: &str) -> Result<&Session, AuthError> {
-        let session = self.sessions.get_mut(token)
+        let session = self
+            .sessions
+            .get_mut(token)
             .ok_or(AuthError::InvalidSession)?;
 
         if session.is_expired(self.session_timeout) {
@@ -267,7 +285,8 @@ impl AuthManager {
     pub fn check_permission(&self, role: Role, operation: Operation) -> Result<(), AuthError> {
         let allowed = match role {
             Role::Admin => true,
-            Role::ReadWrite => matches!(operation,
+            Role::ReadWrite => matches!(
+                operation,
                 Operation::Read | Operation::Write | Operation::CreateIndex | Operation::DropIndex
             ),
             Role::ReadOnly => matches!(operation, Operation::Read),
@@ -276,9 +295,10 @@ impl AuthManager {
         if allowed {
             Ok(())
         } else {
-            Err(AuthError::PermissionDenied(
-                format!("{:?} role cannot perform {:?} operation", role, operation)
-            ))
+            Err(AuthError::PermissionDenied(format!(
+                "{:?} role cannot perform {:?} operation",
+                role, operation
+            )))
         }
     }
 
@@ -290,7 +310,8 @@ impl AuthManager {
     /// Remove expired sessions
     pub fn cleanup_expired_sessions(&mut self) {
         let timeout = self.session_timeout;
-        self.sessions.retain(|_, session| !session.is_expired(timeout));
+        self.sessions
+            .retain(|_, session| !session.is_expired(timeout));
     }
 }
 
@@ -400,7 +421,9 @@ mod tests {
     #[test]
     fn test_create_duplicate_user_error() {
         let mut manager = AuthManager::new();
-        manager.create_user("bob", "password", Role::ReadOnly).unwrap();
+        manager
+            .create_user("bob", "password", Role::ReadOnly)
+            .unwrap();
 
         let result = manager.create_user("bob", "different", Role::Admin);
 
@@ -410,7 +433,9 @@ mod tests {
     #[test]
     fn test_drop_user_success() {
         let mut manager = AuthManager::new();
-        manager.create_user("charlie", "pass", Role::ReadOnly).unwrap();
+        manager
+            .create_user("charlie", "pass", Role::ReadOnly)
+            .unwrap();
 
         assert_eq!(manager.list_users().len(), 2);
 
@@ -432,7 +457,9 @@ mod tests {
     #[test]
     fn test_authenticate_success() {
         let mut manager = AuthManager::new();
-        manager.create_user("dave", "secret123", Role::ReadWrite).unwrap();
+        manager
+            .create_user("dave", "secret123", Role::ReadWrite)
+            .unwrap();
 
         let result = manager.authenticate("dave", "secret123");
 
@@ -445,7 +472,9 @@ mod tests {
     #[test]
     fn test_authenticate_wrong_password() {
         let mut manager = AuthManager::new();
-        manager.create_user("eve", "correct", Role::ReadOnly).unwrap();
+        manager
+            .create_user("eve", "correct", Role::ReadOnly)
+            .unwrap();
 
         let result = manager.authenticate("eve", "wrong");
 
@@ -478,18 +507,42 @@ mod tests {
     fn test_permission_check_admin_all_ops() {
         let manager = AuthManager::new();
 
-        assert!(manager.check_permission(Role::Admin, Operation::Read).is_ok());
-        assert!(manager.check_permission(Role::Admin, Operation::Write).is_ok());
-        assert!(manager.check_permission(Role::Admin, Operation::CreateIndex).is_ok());
-        assert!(manager.check_permission(Role::Admin, Operation::DropIndex).is_ok());
-        assert!(manager.check_permission(Role::Admin, Operation::ManageUsers).is_ok());
+        assert!(
+            manager
+                .check_permission(Role::Admin, Operation::Read)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .check_permission(Role::Admin, Operation::Write)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .check_permission(Role::Admin, Operation::CreateIndex)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .check_permission(Role::Admin, Operation::DropIndex)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .check_permission(Role::Admin, Operation::ManageUsers)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_permission_check_readonly_denied_write() {
         let manager = AuthManager::new();
 
-        assert!(manager.check_permission(Role::ReadOnly, Operation::Read).is_ok());
+        assert!(
+            manager
+                .check_permission(Role::ReadOnly, Operation::Read)
+                .is_ok()
+        );
 
         let write_result = manager.check_permission(Role::ReadOnly, Operation::Write);
         assert!(write_result.is_err());
@@ -502,7 +555,9 @@ mod tests {
     #[test]
     fn test_alter_user_role() {
         let mut manager = AuthManager::new();
-        manager.create_user("frank", "pass", Role::ReadOnly).unwrap();
+        manager
+            .create_user("frank", "pass", Role::ReadOnly)
+            .unwrap();
 
         let result = manager.alter_user_role("frank", Role::ReadWrite);
 
@@ -514,7 +569,9 @@ mod tests {
     #[test]
     fn test_alter_user_password() {
         let mut manager = AuthManager::new();
-        manager.create_user("grace", "oldpass", Role::ReadWrite).unwrap();
+        manager
+            .create_user("grace", "oldpass", Role::ReadWrite)
+            .unwrap();
 
         // Old password works
         assert!(manager.authenticate("grace", "oldpass").is_ok());
@@ -536,8 +593,12 @@ mod tests {
     #[test]
     fn test_list_users() {
         let mut manager = AuthManager::new();
-        manager.create_user("user1", "pass", Role::ReadOnly).unwrap();
-        manager.create_user("user2", "pass", Role::ReadWrite).unwrap();
+        manager
+            .create_user("user1", "pass", Role::ReadOnly)
+            .unwrap();
+        manager
+            .create_user("user2", "pass", Role::ReadWrite)
+            .unwrap();
 
         let users = manager.list_users();
 

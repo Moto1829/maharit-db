@@ -14,7 +14,9 @@ pub enum ConstraintError {
     #[error("constraint not found: {0}")]
     NotFound(String),
 
-    #[error("unique constraint violation: {name} - property '{property}' with value '{value}' already exists on label '{label}'")]
+    #[error(
+        "unique constraint violation: {name} - property '{property}' with value '{value}' already exists on label '{label}'"
+    )]
     UniqueViolation {
         name: String,
         label: String,
@@ -22,21 +24,27 @@ pub enum ConstraintError {
         value: String,
     },
 
-    #[error("composite unique constraint violation: {name} - properties {properties:?} already exist with same values on label '{label}'")]
+    #[error(
+        "composite unique constraint violation: {name} - properties {properties:?} already exist with same values on label '{label}'"
+    )]
     CompositeUniqueViolation {
         name: String,
         label: String,
         properties: Vec<String>,
     },
 
-    #[error("not null constraint violation: {name} - property '{property}' is required on label '{label}'")]
+    #[error(
+        "not null constraint violation: {name} - property '{property}' is required on label '{label}'"
+    )]
     NotNullViolation {
         name: String,
         label: String,
         property: String,
     },
 
-    #[error("type constraint violation: {name} - property '{property}' on label '{label}' must be {expected_type}, got {actual_type}")]
+    #[error(
+        "type constraint violation: {name} - property '{property}' on label '{label}' must be {expected_type}, got {actual_type}"
+    )]
     TypeViolation {
         name: String,
         label: String,
@@ -182,7 +190,12 @@ impl ConstraintManager {
                         }
                     } else {
                         // Composite unique constraint
-                        self.check_unique_composite(graph, constraint, properties, exclude_node_id)?;
+                        self.check_unique_composite(
+                            graph,
+                            constraint,
+                            properties,
+                            exclude_node_id,
+                        )?;
                     }
                 }
                 ConstraintType::NotNull => {
@@ -229,7 +242,9 @@ impl ConstraintManager {
         }
 
         for constraint in self.constraints.values() {
-            if constraint.label != node.label || !constraint.properties.contains(&property.to_string()) {
+            if constraint.label != node.label
+                || !constraint.properties.contains(&property.to_string())
+            {
                 continue;
             }
 
@@ -248,7 +263,12 @@ impl ConstraintManager {
                                 updated_props.insert(prop.clone(), existing_value.clone());
                             }
                         }
-                        self.check_unique_composite(graph, constraint, &updated_props, Some(node.id))?;
+                        self.check_unique_composite(
+                            graph,
+                            constraint,
+                            &updated_props,
+                            Some(node.id),
+                        )?;
                     }
                 }
                 ConstraintType::NotNull => {
@@ -280,7 +300,9 @@ impl ConstraintManager {
         }
 
         for constraint in self.constraints.values() {
-            if constraint.label != node.label || !constraint.properties.contains(&property.to_string()) {
+            if constraint.label != node.label
+                || !constraint.properties.contains(&property.to_string())
+            {
                 continue;
             }
 
@@ -430,7 +452,10 @@ mod tests {
         let id = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(id) {
             node.set_property("name", PropertyValue::String("Alice".to_string()));
-            node.set_property("email", PropertyValue::String("alice@example.com".to_string()));
+            node.set_property(
+                "email",
+                PropertyValue::String("alice@example.com".to_string()),
+            );
             node.set_property("age", PropertyValue::Int(30));
         }
         graph
@@ -529,7 +554,10 @@ mod tests {
             PropertyValue::String("bob@example.com".to_string()),
         );
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -572,14 +600,15 @@ mod tests {
 
         // Updating same node with same value should pass
         let node = graph.get_node(node_id).unwrap();
-        assert!(cm
-            .validate_property_set(
+        assert!(
+            cm.validate_property_set(
                 &graph,
                 node,
                 "email",
                 &PropertyValue::String("alice@example.com".to_string()),
             )
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
@@ -595,12 +624,12 @@ mod tests {
         .unwrap();
 
         let mut props = HashMap::new();
-        props.insert(
-            "name".to_string(),
-            PropertyValue::String("Bob".to_string()),
-        );
+        props.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -679,7 +708,10 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("age".to_string(), PropertyValue::Int(25));
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -721,7 +753,10 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("age".to_string(), PropertyValue::Null);
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -743,7 +778,10 @@ mod tests {
             PropertyValue::String("alice@example.com".to_string()),
         );
 
-        assert!(cm.validate_node_create(&graph, "Company", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Company", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -768,11 +806,17 @@ mod tests {
         );
 
         // Should pass even with duplicate
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
 
         // Re-enable
         cm.enable();
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_err());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -781,7 +825,10 @@ mod tests {
         let id = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(id) {
             node.set_property("name", PropertyValue::String("Alice".to_string()));
-            node.set_property("email", PropertyValue::String("alice@example.com".to_string()));
+            node.set_property(
+                "email",
+                PropertyValue::String("alice@example.com".to_string()),
+            );
         }
 
         let mut cm = ConstraintManager::new();
@@ -795,10 +842,19 @@ mod tests {
 
         // Different combination should pass
         let mut props = HashMap::new();
-        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        props.insert("email".to_string(), PropertyValue::String("alice2@example.com".to_string()));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        props.insert(
+            "email".to_string(),
+            PropertyValue::String("alice2@example.com".to_string()),
+        );
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -807,7 +863,10 @@ mod tests {
         let id = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(id) {
             node.set_property("name", PropertyValue::String("Alice".to_string()));
-            node.set_property("email", PropertyValue::String("alice@example.com".to_string()));
+            node.set_property(
+                "email",
+                PropertyValue::String("alice@example.com".to_string()),
+            );
         }
 
         let mut cm = ConstraintManager::new();
@@ -821,8 +880,14 @@ mod tests {
 
         // Same combination should fail
         let mut props = HashMap::new();
-        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        props.insert("email".to_string(), PropertyValue::String("alice@example.com".to_string()));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        props.insert(
+            "email".to_string(),
+            PropertyValue::String("alice@example.com".to_string()),
+        );
 
         assert!(matches!(
             cm.validate_node_create(&graph, "Person", &props, None),
@@ -836,7 +901,10 @@ mod tests {
         let id = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(id) {
             node.set_property("name", PropertyValue::String("Alice".to_string()));
-            node.set_property("email", PropertyValue::String("alice@example.com".to_string()));
+            node.set_property(
+                "email",
+                PropertyValue::String("alice@example.com".to_string()),
+            );
         }
 
         let mut cm = ConstraintManager::new();
@@ -851,9 +919,15 @@ mod tests {
         // Only one property matches - should pass
         let mut props = HashMap::new();
         props.insert("name".to_string(), PropertyValue::String("Bob".to_string()));
-        props.insert("email".to_string(), PropertyValue::String("alice@example.com".to_string()));
+        props.insert(
+            "email".to_string(),
+            PropertyValue::String("alice@example.com".to_string()),
+        );
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -862,7 +936,10 @@ mod tests {
         let id = graph.create_node("Person");
         if let Some(node) = graph.get_node_mut(id) {
             node.set_property("name", PropertyValue::String("Alice".to_string()));
-            node.set_property("email", PropertyValue::String("alice@example.com".to_string()));
+            node.set_property(
+                "email",
+                PropertyValue::String("alice@example.com".to_string()),
+            );
         }
 
         let mut cm = ConstraintManager::new();
@@ -876,8 +953,14 @@ mod tests {
 
         // Missing one property - constraint doesn't apply
         let mut props = HashMap::new();
-        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
 
-        assert!(cm.validate_node_create(&graph, "Person", &props, None).is_ok());
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
     }
 }

@@ -208,7 +208,12 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         Statement::MatchForeach(mf) => {
             let seg_count = mf.segments.len() as u64;
             vec![
-                PlanNode::new("NodeByLabelScan", seg_count.max(1), seg_count.max(1) / 10 + 1, ""),
+                PlanNode::new(
+                    "NodeByLabelScan",
+                    seg_count.max(1),
+                    seg_count.max(1) / 10 + 1,
+                    "",
+                ),
                 PlanNode::new("Foreach", 1, 1, "iterate list"),
             ]
         }
@@ -264,7 +269,12 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         Statement::MatchForeach(mf) => {
             let seg_count = mf.segments.len() as u64;
             vec![
-                PlanNode::new("NodeByLabelScan", seg_count.max(1), seg_count.max(1) / 10 + 1, ""),
+                PlanNode::new(
+                    "NodeByLabelScan",
+                    seg_count.max(1),
+                    seg_count.max(1) / 10 + 1,
+                    "",
+                ),
                 PlanNode::new("Foreach", 1, 1, "iterate list"),
             ]
         }
@@ -324,7 +334,7 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
                         let label_info = np
                             .label
                             .as_ref()
-                            .map(|l| format!(":{}",l))
+                            .map(|l| format!(":{}", l))
                             .unwrap_or_default();
                         nodes.push(PlanNode::new(
                             "NodeByLabelScan",
@@ -369,17 +379,32 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
 
         if segment.with_clause.is_some() {
             let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
-            nodes.push(PlanNode::new("EagerAggregation", prev_est, prev_est / 5 + 1, ""));
+            nodes.push(PlanNode::new(
+                "EagerAggregation",
+                prev_est,
+                prev_est / 5 + 1,
+                "",
+            ));
         }
     }
 
     if m.call_clause.is_some() {
         let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
-        nodes.push(PlanNode::new("CallSubquery", prev_est, prev_est / 5 + 1, ""));
+        nodes.push(PlanNode::new(
+            "CallSubquery",
+            prev_est,
+            prev_est / 5 + 1,
+            "",
+        ));
     }
 
     let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
-    nodes.push(PlanNode::new("Projection", final_est, final_est / 10 + 1, ""));
+    nodes.push(PlanNode::new(
+        "Projection",
+        final_est,
+        final_est / 10 + 1,
+        "",
+    ));
 
     if let Some(ref ob) = m.return_clause.order_by {
         nodes.push(PlanNode::new(
@@ -423,11 +448,25 @@ fn plan_union(u: &UnionStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
     vec![union_node]
 }
 
-fn plan_match_create(mc: &MatchCreateStatement, node_count: u64, _edge_count: u64) -> Vec<PlanNode> {
+fn plan_match_create(
+    mc: &MatchCreateStatement,
+    node_count: u64,
+    _edge_count: u64,
+) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
-    nodes.push(PlanNode::new("NodeByLabelScan", node_count, node_count / 10 + 1, ""));
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        node_count,
+        node_count / 10 + 1,
+        "",
+    ));
     if mc.where_clause.is_some() {
-        nodes.push(PlanNode::new("Filter", node_count / 2, node_count / 20 + 1, ""));
+        nodes.push(PlanNode::new(
+            "Filter",
+            node_count / 2,
+            node_count / 20 + 1,
+            "",
+        ));
     }
     let create_count = mc.create_clause.patterns.len() as u64;
     nodes.push(PlanNode::new("CreateNode", create_count, create_count, ""));
@@ -436,9 +475,19 @@ fn plan_match_create(mc: &MatchCreateStatement, node_count: u64, _edge_count: u6
 
 fn plan_match_set(ms: &MatchSetStatement, node_count: u64, _edge_count: u64) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
-    nodes.push(PlanNode::new("NodeByLabelScan", node_count, node_count / 10 + 1, ""));
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        node_count,
+        node_count / 10 + 1,
+        "",
+    ));
     if ms.where_clause.is_some() {
-        nodes.push(PlanNode::new("Filter", node_count / 2, node_count / 20 + 1, ""));
+        nodes.push(PlanNode::new(
+            "Filter",
+            node_count / 2,
+            node_count / 20 + 1,
+            "",
+        ));
     }
     let set_count = ms.set_clause.items.len() as u64;
     nodes.push(PlanNode::new("SetProperty", set_count, set_count, ""));
@@ -448,7 +497,12 @@ fn plan_match_set(ms: &MatchSetStatement, node_count: u64, _edge_count: u64) -> 
 fn plan_merge(merge: &MergeStatement, node_count: u64, edge_count: u64) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
     if !merge.match_clauses.is_empty() {
-        nodes.push(PlanNode::new("NodeByLabelScan", node_count, node_count / 10 + 1, ""));
+        nodes.push(PlanNode::new(
+            "NodeByLabelScan",
+            node_count,
+            node_count / 10 + 1,
+            "",
+        ));
     }
     let pattern_count = merge.patterns.len() as u64;
     nodes.push(PlanNode::new(
@@ -460,14 +514,33 @@ fn plan_merge(merge: &MergeStatement, node_count: u64, edge_count: u64) -> Vec<P
     nodes
 }
 
-fn plan_match_remove(mr: &MatchRemoveStatement, node_count: u64, _edge_count: u64) -> Vec<PlanNode> {
+fn plan_match_remove(
+    mr: &MatchRemoveStatement,
+    node_count: u64,
+    _edge_count: u64,
+) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
-    nodes.push(PlanNode::new("NodeByLabelScan", node_count, node_count / 10 + 1, ""));
+    nodes.push(PlanNode::new(
+        "NodeByLabelScan",
+        node_count,
+        node_count / 10 + 1,
+        "",
+    ));
     if mr.where_clause.is_some() {
-        nodes.push(PlanNode::new("Filter", node_count / 2, node_count / 20 + 1, ""));
+        nodes.push(PlanNode::new(
+            "Filter",
+            node_count / 2,
+            node_count / 20 + 1,
+            "",
+        ));
     }
     let remove_count = mr.remove_clause.items.len() as u64;
-    nodes.push(PlanNode::new("RemoveProperty", remove_count, remove_count, ""));
+    nodes.push(PlanNode::new(
+        "RemoveProperty",
+        remove_count,
+        remove_count,
+        "",
+    ));
     nodes
 }
 
@@ -509,10 +582,12 @@ fn estimate_node_scan_with_stats(np: &NodePattern, stats: &GraphStats) -> u64 {
 fn is_pushable_filter(expr: &Expression) -> bool {
     match expr {
         Expression::BinaryOp(left, op, right) => match op {
-            BinaryOp::Eq | BinaryOp::Neq | BinaryOp::Lt | BinaryOp::Gt
-            | BinaryOp::Lte | BinaryOp::Gte => {
-                is_simple_operand(left) && is_simple_operand(right)
-            }
+            BinaryOp::Eq
+            | BinaryOp::Neq
+            | BinaryOp::Lt
+            | BinaryOp::Gt
+            | BinaryOp::Lte
+            | BinaryOp::Gte => is_simple_operand(left) && is_simple_operand(right),
             BinaryOp::And => is_pushable_filter(left) && is_pushable_filter(right),
             _ => false,
         },
@@ -523,9 +598,7 @@ fn is_pushable_filter(expr: &Expression) -> bool {
 fn is_simple_operand(expr: &Expression) -> bool {
     matches!(
         expr,
-        Expression::Property(_, _)
-            | Expression::Literal(_)
-            | Expression::Variable(_)
+        Expression::Property(_, _) | Expression::Literal(_) | Expression::Variable(_)
     )
 }
 
@@ -625,14 +698,13 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             .unwrap_or_default();
 
                         // Index selection: check if WHERE filters on an indexed property
-                        if let (Some(label), Some(where_expr)) =
-                            (&np.label, &segment.where_clause)
+                        if let (Some(label), Some(where_expr)) = (&np.label, &segment.where_clause)
                         {
                             let filter_type = classify_filter(where_expr);
                             match filter_type {
-                                FilterType::IndexSeek {
-                                    ref property, ..
-                                } if stats.has_index(label, property) => {
+                                FilterType::IndexSeek { ref property, .. }
+                                    if stats.has_index(label, property) =>
+                                {
                                     // IndexSeek: O(1) lookup, very cheap
                                     let seek_est = 1u64.max(est / 100);
                                     nodes.push(PlanNode::new(
@@ -644,9 +716,9 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                                     used_index = true;
                                     continue;
                                 }
-                                FilterType::IndexRange {
-                                    ref property, ..
-                                } if stats.has_index(label, property) => {
+                                FilterType::IndexRange { ref property, .. }
+                                    if stats.has_index(label, property) =>
+                                {
                                     // IndexRangeScan: scan a range in the index
                                     let range_est = (est / 5).max(1);
                                     nodes.push(PlanNode::new(
@@ -729,12 +801,16 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                                     est_end / 10 + 1,
                                     &format!("{} (reordered)", end_label),
                                 ));
-                                let expand_est = (est_end * stats.edge_count / stats.node_count.max(1)).max(1);
+                                let expand_est =
+                                    (est_end * stats.edge_count / stats.node_count.max(1)).max(1);
                                 nodes.push(PlanNode::new(
                                     "ExpandReverse",
                                     expand_est,
                                     expand_est / 5 + 1,
-                                    &format!("{} (join reordered: {} < {})", edge_info, end_label, start_label),
+                                    &format!(
+                                        "{} (join reordered: {} < {})",
+                                        edge_info, end_label, start_label
+                                    ),
                                 ));
                             } else {
                                 // Normal order
@@ -795,7 +871,10 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                 .unwrap_or(false);
 
             if !already_pushed {
-                let prev_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(stats.node_count);
+                let prev_est = nodes
+                    .last()
+                    .map(|n| n.estimated_rows)
+                    .unwrap_or(stats.node_count);
                 let filtered = (prev_est / 2).max(1);
                 nodes.push(PlanNode::new("Filter", filtered, filtered / 10 + 1, ""));
             }
@@ -883,12 +962,7 @@ fn analyze_projection(return_clause: &ReturnClause) -> String {
 fn plan_delete_with_stats(d: &DeleteStatement, stats: &GraphStats) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
     let est = stats.node_count;
-    nodes.push(PlanNode::new(
-        "NodeByLabelScan",
-        est,
-        est / 10 + 1,
-        "",
-    ));
+    nodes.push(PlanNode::new("NodeByLabelScan", est, est / 10 + 1, ""));
     if d.where_clause.is_some() {
         let filtered = est / 2;
         nodes.push(PlanNode::new("Filter", filtered, filtered / 10 + 1, ""));
@@ -912,10 +986,7 @@ fn plan_union_with_stats(u: &UnionStatement, stats: &GraphStats) -> Vec<PlanNode
     vec![union_node]
 }
 
-fn plan_match_create_with_stats(
-    mc: &MatchCreateStatement,
-    stats: &GraphStats,
-) -> Vec<PlanNode> {
+fn plan_match_create_with_stats(mc: &MatchCreateStatement, stats: &GraphStats) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
     nodes.push(PlanNode::new(
         "NodeByLabelScan",
@@ -977,10 +1048,7 @@ fn plan_merge_with_stats(merge: &MergeStatement, stats: &GraphStats) -> Vec<Plan
     nodes
 }
 
-fn plan_match_remove_with_stats(
-    mr: &MatchRemoveStatement,
-    stats: &GraphStats,
-) -> Vec<PlanNode> {
+fn plan_match_remove_with_stats(mr: &MatchRemoveStatement, stats: &GraphStats) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
     nodes.push(PlanNode::new(
         "NodeByLabelScan",
@@ -1235,11 +1303,10 @@ mod tests {
     fn test_filter_pushdown_and_conditions() {
         let stats = GraphStats::simple(1000, 5000);
 
-        let stmt =
-            Parser::new("MATCH (n:Person) WHERE n.age > 20 AND n.age < 60 RETURN n")
-                .unwrap()
-                .parse()
-                .unwrap();
+        let stmt = Parser::new("MATCH (n:Person) WHERE n.age > 20 AND n.age < 60 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
         let plan = build_plan_with_stats(&stmt, &stats);
 
         let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();
@@ -1250,11 +1317,10 @@ mod tests {
     fn test_no_filter_pushdown_for_path() {
         let stats = GraphStats::simple(1000, 5000);
 
-        let stmt =
-            Parser::new("MATCH (a:Person)-[:KNOWS]->(b) WHERE b.age > 30 RETURN a, b")
-                .unwrap()
-                .parse()
-                .unwrap();
+        let stmt = Parser::new("MATCH (a:Person)-[:KNOWS]->(b) WHERE b.age > 30 RETURN a, b")
+            .unwrap()
+            .parse()
+            .unwrap();
         let plan = build_plan_with_stats(&stmt, &stats);
 
         let ops: Vec<&str> = plan.nodes.iter().map(|n| n.operator.as_str()).collect();

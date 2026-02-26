@@ -377,12 +377,7 @@ fn reconstruct_all_paths(
 ///
 /// max_depth: 最大ホップ数の上限（Noneで無制限）
 /// 注意: グラフが大きい場合は指数的に増加する可能性がある
-pub fn all_paths(
-    graph: &Graph,
-    from: NodeId,
-    to: NodeId,
-    max_depth: Option<usize>,
-) -> Vec<Path> {
+pub fn all_paths(graph: &Graph, from: NodeId, to: NodeId, max_depth: Option<usize>) -> Vec<Path> {
     let mut results = Vec::new();
     if !graph.get_node(from).is_some() || !graph.get_node(to).is_some() {
         return results;
@@ -430,7 +425,16 @@ fn all_paths_dfs(
         } else if !visited.contains(&neighbor) {
             visited.insert(neighbor);
             current_path.push(neighbor);
-            all_paths_dfs(graph, neighbor, to, max_depth, depth + 1, visited, current_path, results);
+            all_paths_dfs(
+                graph,
+                neighbor,
+                to,
+                max_depth,
+                depth + 1,
+                visited,
+                current_path,
+                results,
+            );
             current_path.pop();
             visited.remove(&neighbor);
         }

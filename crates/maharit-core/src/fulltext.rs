@@ -260,7 +260,8 @@ impl FulltextIndex {
 
                 // BM25 formula
                 let numerator = tf * (self.k1 + 1.0);
-                let denominator = tf + self.k1 * (1.0 - self.b + self.b * (doc_length / avg_length));
+                let denominator =
+                    tf + self.k1 * (1.0 - self.b + self.b * (doc_length / avg_length));
 
                 score += idf * (numerator / denominator);
             }
@@ -430,7 +431,11 @@ impl FulltextManager {
     }
 
     /// Search an index by name.
-    pub fn search(&self, index_name: &str, query: &str) -> Result<Vec<SearchResult>, FulltextError> {
+    pub fn search(
+        &self,
+        index_name: &str,
+        query: &str,
+    ) -> Result<Vec<SearchResult>, FulltextError> {
         self.indexes
             .get(index_name)
             .map(|idx| idx.search(query))
@@ -575,8 +580,12 @@ mod tests {
     fn test_fulltext_manager_list() {
         let mut manager = FulltextManager::new();
 
-        manager.create_index("idx1", "Person", vec!["name".to_string()]).unwrap();
-        manager.create_index("idx2", "Article", vec!["title".to_string()]).unwrap();
+        manager
+            .create_index("idx1", "Person", vec!["name".to_string()])
+            .unwrap();
+        manager
+            .create_index("idx2", "Article", vec!["title".to_string()])
+            .unwrap();
 
         let indexes = manager.list_indexes();
         assert_eq!(indexes.len(), 2);
@@ -585,11 +594,23 @@ mod tests {
     #[test]
     fn test_index_node_integration() {
         let mut manager = FulltextManager::new();
-        manager.create_index("person_idx", "Person", vec!["name".to_string(), "bio".to_string()]).unwrap();
+        manager
+            .create_index(
+                "person_idx",
+                "Person",
+                vec!["name".to_string(), "bio".to_string()],
+            )
+            .unwrap();
 
         let mut properties = HashMap::new();
-        properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        properties.insert("bio".to_string(), PropertyValue::String("Software engineer".to_string()));
+        properties.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        properties.insert(
+            "bio".to_string(),
+            PropertyValue::String("Software engineer".to_string()),
+        );
         properties.insert("age".to_string(), PropertyValue::Int(30));
 
         manager.index_node(1, "Person", &properties);
@@ -643,10 +664,15 @@ mod tests {
     #[test]
     fn test_remove_node_from_manager() {
         let mut manager = FulltextManager::new();
-        manager.create_index("idx1", "Person", vec!["name".to_string()]).unwrap();
+        manager
+            .create_index("idx1", "Person", vec!["name".to_string()])
+            .unwrap();
 
         let mut properties = HashMap::new();
-        properties.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+        properties.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
 
         manager.index_node(1, "Person", &properties);
 

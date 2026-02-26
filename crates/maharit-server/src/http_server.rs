@@ -92,8 +92,7 @@ impl HttpServer {
                     let health = Arc::clone(&self.health);
 
                     tokio::spawn(async move {
-                        if let Err(_e) = handle_http_request(&mut socket, &metrics, &health).await
-                        {
+                        if let Err(_e) = handle_http_request(&mut socket, &metrics, &health).await {
                             // Connection errors are expected (client disconnects, etc.)
                         }
                     });
@@ -135,15 +134,15 @@ async fn handle_http_request(
     let (status, content_type, body) = match path {
         "/metrics" => {
             let body = metrics.to_prometheus();
-            (
-                "200 OK",
-                "text/plain; version=0.0.4; charset=utf-8",
-                body,
-            )
+            ("200 OK", "text/plain; version=0.0.4; charset=utf-8", body)
         }
         "/health" => {
             let ready = health.is_ready();
-            let status_code = if ready { "200 OK" } else { "503 Service Unavailable" };
+            let status_code = if ready {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
             let body = format!(
                 "{{\"status\":\"{}\",\"live\":true,\"ready\":{}}}",
                 if ready { "healthy" } else { "degraded" },
@@ -157,7 +156,11 @@ async fn handle_http_request(
         }
         "/health/ready" => {
             let ready = health.is_ready();
-            let status_code = if ready { "200 OK" } else { "503 Service Unavailable" };
+            let status_code = if ready {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
             let body = format!("{{\"ready\":{}}}", ready);
             (status_code, "application/json", body)
         }

@@ -226,8 +226,8 @@ impl TlsConfig {
     ///
     /// Returns an error if the file is not found, cannot be read, or contains an invalid key.
     fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
-        let file = std::fs::File::open(path)
-            .map_err(|_| TlsError::KeyNotFound(path.to_string()))?;
+        let file =
+            std::fs::File::open(path).map_err(|_| TlsError::KeyNotFound(path.to_string()))?;
         let mut reader = BufReader::new(file);
 
         // Try to load private key (handles PKCS8, RSA, and EC formats)
@@ -485,7 +485,10 @@ mod tests {
     fn test_load_certs_file_not_found() {
         let result = TlsConfig::load_certs("/nonexistent/cert.pem");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TlsError::CertificateNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TlsError::CertificateNotFound(_)
+        ));
     }
 
     #[test]
@@ -530,7 +533,10 @@ mod tests {
     fn test_client_config_with_invalid_ca() {
         let result = build_client_config(Some("/nonexistent/ca.pem"), false);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TlsError::CertificateNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TlsError::CertificateNotFound(_)
+        ));
     }
 
     #[test]

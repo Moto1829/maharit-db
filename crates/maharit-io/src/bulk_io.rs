@@ -265,30 +265,28 @@ impl BulkLoader {
                     let to_id = id_map.get(to_external).copied();
 
                     match (from_id, to_id) {
-                        (Some(from), Some(to)) => {
-                            match graph.create_edge(from, to, &edge_type) {
-                                Ok(edge_id) => {
-                                    if let Some(edge) = graph.get_edge_mut(edge_id) {
-                                        for (i, header) in headers.iter().enumerate().skip(3) {
-                                            if let Some(value) = record.get(i) {
-                                                if !value.is_empty() {
-                                                    let prop_value = Self::parse_value(value);
-                                                    edge.set_property(header.clone(), prop_value);
-                                                }
+                        (Some(from), Some(to)) => match graph.create_edge(from, to, &edge_type) {
+                            Ok(edge_id) => {
+                                if let Some(edge) = graph.get_edge_mut(edge_id) {
+                                    for (i, header) in headers.iter().enumerate().skip(3) {
+                                        if let Some(value) = record.get(i) {
+                                            if !value.is_empty() {
+                                                let prop_value = Self::parse_value(value);
+                                                edge.set_property(header.clone(), prop_value);
                                             }
                                         }
                                     }
-                                    stats.edges_imported += 1;
                                 }
-                                Err(e) => {
-                                    if self.config.skip_errors {
-                                        stats.add_error(format!("Row {}: {}", idx + 1, e));
-                                    } else {
-                                        return Err(e.into());
-                                    }
+                                stats.edges_imported += 1;
+                            }
+                            Err(e) => {
+                                if self.config.skip_errors {
+                                    stats.add_error(format!("Row {}: {}", idx + 1, e));
+                                } else {
+                                    return Err(e.into());
                                 }
                             }
-                        }
+                        },
                         _ => {
                             if self.config.skip_errors {
                                 stats.add_error(format!(
@@ -423,8 +421,8 @@ mod tests {
 
     #[test]
     fn test_progress_callback() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let nodes_csv = "id,label\n1,A\n2,B\n3,C\n4,D\n5,E\n";
         let mut graph = Graph::new();

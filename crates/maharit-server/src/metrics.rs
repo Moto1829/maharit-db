@@ -3,8 +3,8 @@
 //! This module provides thread-safe metrics tracking for queries, errors, latencies,
 //! and resource counts. Metrics can be exported in Prometheus text format.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Get the current process memory usage (RSS) in bytes.
@@ -65,11 +65,7 @@ fn macos_memory_usage() -> u64 {
         )
     };
 
-    if result == 0 {
-        info.resident_size
-    } else {
-        0
-    }
+    if result == 0 { info.resident_size } else { 0 }
 }
 
 #[cfg(target_os = "linux")]
