@@ -19,8 +19,8 @@ pub use index::LabelIndex;
 pub use property::PropertyValue;
 pub use property_index::{IndexDefinition, PropertyIndex, PropertyKey};
 pub use traversal::{
-    AStar, Dijkstra, Direction, HeuristicFn, Path, Traversal, WeightFn, WeightedPath, has_path,
-    shortest_path,
+    AStar, Dijkstra, Direction, HeuristicFn, Path, Traversal, WeightFn, WeightedPath, all_paths,
+    all_shortest_paths, has_path, shortest_path,
 };
 
 use thiserror::Error;

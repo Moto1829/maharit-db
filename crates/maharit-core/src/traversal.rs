@@ -373,6 +373,70 @@ fn reconstruct_all_paths(
     }
 }
 
+/// 2ノード間の全単純パスを列挙（DFSバックトラッキング）
+///
+/// max_depth: 最大ホップ数の上限（Noneで無制限）
+/// 注意: グラフが大きい場合は指数的に増加する可能性がある
+pub fn all_paths(
+    graph: &Graph,
+    from: NodeId,
+    to: NodeId,
+    max_depth: Option<usize>,
+) -> Vec<Path> {
+    let mut results = Vec::new();
+    if !graph.get_node(from).is_some() || !graph.get_node(to).is_some() {
+        return results;
+    }
+    if from == to {
+        return vec![Path::new(vec![from])];
+    }
+    let mut visited = HashSet::new();
+    visited.insert(from);
+    let mut current_path = vec![from];
+    all_paths_dfs(
+        graph,
+        from,
+        to,
+        max_depth,
+        0,
+        &mut visited,
+        &mut current_path,
+        &mut results,
+    );
+    results
+}
+
+fn all_paths_dfs(
+    graph: &Graph,
+    current: NodeId,
+    to: NodeId,
+    max_depth: Option<usize>,
+    depth: usize,
+    visited: &mut HashSet<NodeId>,
+    current_path: &mut Vec<NodeId>,
+    results: &mut Vec<Path>,
+) {
+    if let Some(max) = max_depth {
+        if depth >= max {
+            return;
+        }
+    }
+    for edge in graph.get_outgoing_edges(current) {
+        let neighbor = edge.to;
+        if neighbor == to {
+            let mut path = current_path.clone();
+            path.push(to);
+            results.push(Path::new(path));
+        } else if !visited.contains(&neighbor) {
+            visited.insert(neighbor);
+            current_path.push(neighbor);
+            all_paths_dfs(graph, neighbor, to, max_depth, depth + 1, visited, current_path, results);
+            current_path.pop();
+            visited.remove(&neighbor);
+        }
+    }
+}
+
 /// 2ノード間にパスが存在するか確認
 pub fn has_path(graph: &Graph, from: NodeId, to: NodeId) -> bool {
     if from == to {
@@ -1070,5 +1134,89 @@ mod tests {
         // E has no outgoing edges, so no path from E to A
         let paths = all_shortest_paths(&graph, 4, 0);
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_all_paths_basic() {
+        // A -> B -> C
+        //      |
+        //      v
+        //      D -> C  (追加: D -> C)
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+        let d = graph.create_node("D");
+        graph.create_edge(a, b, "E");
+        graph.create_edge(b, c, "E");
+        graph.create_edge(b, d, "E");
+        graph.create_edge(d, c, "E");
+
+        let paths = all_paths(&graph, a, c, None);
+        assert_eq!(paths.len(), 2);
+        // A->B->C and A->B->D->C
+        let path_nodes: Vec<Vec<NodeId>> = paths.iter().map(|p| p.nodes.clone()).collect();
+        assert!(path_nodes.contains(&vec![a, b, c]));
+        assert!(path_nodes.contains(&vec![a, b, d, c]));
+    }
+
+    #[test]
+    fn test_all_paths_same_node() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let paths = all_paths(&graph, a, a, None);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![a]);
+    }
+
+    #[test]
+    fn test_all_paths_no_path() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        // no edge
+        let paths = all_paths(&graph, a, b, None);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_all_paths_max_depth() {
+        // A -> B -> C -> D
+        // A -> D (direct shortcut)
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+        let d = graph.create_node("D");
+        graph.create_edge(a, b, "E");
+        graph.create_edge(b, c, "E");
+        graph.create_edge(c, d, "E");
+        graph.create_edge(a, d, "E");
+
+        // max_depth=1: only A->D (1 hop)
+        let paths = all_paths(&graph, a, d, Some(1));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![a, d]);
+
+        // max_depth=3: A->D and A->B->C->D
+        let paths = all_paths(&graph, a, d, Some(3));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_all_paths_avoids_cycles() {
+        // A -> B -> A (cycle) + B -> C
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+        graph.create_edge(a, b, "E");
+        graph.create_edge(b, a, "E"); // cycle
+        graph.create_edge(b, c, "E");
+
+        // Should find A->B->C and not loop infinitely
+        let paths = all_paths(&graph, a, c, None);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![a, b, c]);
     }
 }
