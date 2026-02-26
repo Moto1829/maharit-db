@@ -367,6 +367,11 @@ impl<'a> Executor<'a> {
                         };
 
                         let edge_label = segment.edge.edge_type.unwrap_or_default();
+
+                        // Validate endpoint label constraints before creating edge
+                        self.constraints
+                            .validate_edge_create(self.graph, &edge_label, from, to)?;
+
                         let edge_id = self.graph.create_edge(from, to, edge_label)?;
 
                         // Evaluate and set edge properties
@@ -651,6 +656,11 @@ impl<'a> Executor<'a> {
                         };
 
                         let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+
+                        // Validate endpoint label constraints before creating edge
+                        self.constraints
+                            .validate_edge_create(self.graph, &edge_label, from, to)?;
+
                         let edge_id = self.graph.create_edge(from, to, edge_label)?;
 
                         // Evaluate and set edge properties
@@ -957,6 +967,11 @@ impl<'a> Executor<'a> {
                     };
 
                     let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+
+                    // Validate endpoint label constraints before creating edge
+                    self.constraints
+                        .validate_edge_create(self.graph, &edge_label, from, to)?;
+
                     let edge_id = self.graph.create_edge(from, to, edge_label)?;
 
                     // Evaluate and set edge properties
@@ -1344,6 +1359,16 @@ impl<'a> Executor<'a> {
                 };
                 ConstraintType::TypeCheck(prop_type)
             }
+            ConstraintTypeAst::RequiredLabel(required_label) => {
+                ConstraintType::RequiredLabel(required_label)
+            }
+            ConstraintTypeAst::EndpointLabel {
+                source_label,
+                target_label,
+            } => ConstraintType::EndpointLabel {
+                source_label,
+                target_label,
+            },
         };
 
         let constraint = Constraint {
@@ -6794,6 +6819,175 @@ mod tests {
     fn test_parse_show_constraints() {
         let stmt = Parser::new("SHOW CONSTRAINTS").unwrap().parse().unwrap();
         assert_eq!(stmt, Statement::ShowConstraints);
+    }
+
+    // ========== Label constraint tests ==========
+
+    #[test]
+    fn test_parse_required_label_constraint() {
+        let stmt = Parser::new(
+            "CREATE CONSTRAINT employee_is_person FOR (n:Employee) REQUIRE n:Person",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.name, "employee_is_person");
+            assert_eq!(cc.label, "Employee");
+            assert_eq!(cc.properties, Vec::<String>::new());
+            assert_eq!(
+                cc.constraint_type,
+                ConstraintTypeAst::RequiredLabel("Person".to_string())
+            );
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_required_label_constraint_pass() {
+        let mut graph = Graph::new();
+        // Employee requires Person label; since our graph model has single labels,
+        // this passes when the node's label matches the required label (Person)
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT emp_is_person FOR (n:Employee) REQUIRE n:Person",
+                // Creating a Person node satisfies the Employee->Person constraint
+                // (the constraint says: if label=Employee, require label=Person)
+                // Since Person != Employee, creating Employee would fail
+                r#"CREATE (n:Person {name: "Alice"})"#, // Person node, not Employee - not affected by constraint
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok()); // Person node bypasses Employee constraint
+    }
+
+    #[test]
+    fn test_required_label_constraint_violation() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT emp_is_person FOR (n:Employee) REQUIRE n:Person",
+                r#"CREATE (n:Employee {name: "Bob"})"#, // Employee but not Person - violates constraint
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_required_label_constraint_satisfied_by_same_label() {
+        let mut graph = Graph::new();
+        // If required label equals the node label, the constraint is trivially satisfied
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT person_is_person FOR (n:Person) REQUIRE n:Person",
+                r#"CREATE (n:Person {name: "Alice"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok()); // Person satisfies Person requirement
+    }
+
+    #[test]
+    fn test_parse_endpoint_label_constraint() {
+        let stmt = Parser::new(
+            "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        if let Statement::CreateConstraint(cc) = stmt {
+            assert_eq!(cc.name, "knows_persons");
+            assert_eq!(cc.label, "KNOWS");
+            assert_eq!(cc.properties, Vec::<String>::new());
+            assert_eq!(
+                cc.constraint_type,
+                ConstraintTypeAst::EndpointLabel {
+                    source_label: "Person".to_string(),
+                    target_label: "Person".to_string(),
+                }
+            );
+        } else {
+            panic!("expected CreateConstraint statement");
+        }
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_violation() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
+                r#"CREATE (p:Person {name: "Alice"})-[:KNOWS]->(c:Company {name: "Acme"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_pass() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
+                r#"CREATE (p:Person {name: "Alice"})-[:KNOWS]->(q:Person {name: "Bob"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_source_violation() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
+                r#"CREATE (c:Company {name: "Acme"})-[:KNOWS]->(p:Person {name: "Alice"})"#,
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(ExecuteError::ConstraintError(_))));
+    }
+
+    #[test]
+    fn test_show_constraints_includes_label_constraints() {
+        let mut graph = Graph::new();
+        let results = execute_with_constraints(
+            &mut graph,
+            &[
+                "CREATE CONSTRAINT emp_is_person FOR (n:Employee) REQUIRE n:Person",
+                "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
+                "SHOW CONSTRAINTS",
+            ],
+        );
+        assert!(results[0].is_ok());
+        assert!(results[1].is_ok());
+        assert!(results[2].is_ok());
+        let rs = results[2].as_ref().unwrap();
+        assert_eq!(rs.rows.len(), 2);
+        // Both constraints should be listed
+        let names: Vec<String> = rs
+            .rows
+            .iter()
+            .map(|r| {
+                if let Value::String(s) = &r.columns[0] {
+                    s.clone()
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        assert!(names.contains(&"emp_is_person".to_string()));
+        assert!(names.contains(&"knows_persons".to_string()));
     }
 
     // ========== EXPLAIN / PROFILE tests ==========

@@ -730,13 +730,13 @@ pub enum ListExpression {
 pub struct CreateConstraintStatement {
     /// 制約名
     pub name: String,
-    /// 対象ラベル
+    /// 対象ラベル（ノード制約の場合はノードラベル、エッジ制約の場合はエッジタイプ）
     pub label: String,
     /// 対象のノード変数名
     pub variable: String,
     /// 制約の種類
     pub constraint_type: ConstraintTypeAst,
-    /// 対象プロパティ（複合制約の場合は複数）
+    /// 対象プロパティ（複合制約の場合は複数、ラベル制約の場合は空）
     pub properties: Vec<String>,
 }
 
@@ -749,6 +749,13 @@ pub enum ConstraintTypeAst {
     NotNull,
     /// IS :: TYPE
     TypeCheck(PropertyTypeAst),
+    /// REQUIRE n:RequiredLabel（ノードに必須のラベル）
+    RequiredLabel(String),
+    /// エッジ端点のラベル制約 FOR (s:SLabel)-[r:EType]->(t:TLabel)
+    EndpointLabel {
+        source_label: String,
+        target_label: String,
+    },
 }
 
 /// プロパティ型（AST用）

@@ -52,6 +52,25 @@ pub enum ConstraintError {
         expected_type: String,
         actual_type: String,
     },
+
+    #[error(
+        "required label constraint violation: {name} - node with label '{label}' must also have label '{required_label}'"
+    )]
+    RequiredLabelViolation {
+        name: String,
+        label: String,
+        required_label: String,
+    },
+
+    #[error(
+        "endpoint label constraint violation: {name} - edge '{edge_label}' requires source label '{source_label}' and target label '{target_label}'"
+    )]
+    EndpointLabelViolation {
+        name: String,
+        edge_label: String,
+        source_label: String,
+        target_label: String,
+    },
 }
 
 /// プロパティの型
@@ -83,6 +102,13 @@ pub enum ConstraintType {
     NotNull,
     /// 型制約
     TypeCheck(PropertyType),
+    /// 必須ラベル制約（ノードが指定ラベルを持つなら、別のラベルも必須）
+    RequiredLabel(String),
+    /// エッジ端点ラベル制約（始点・終点ノードのラベルを強制）
+    EndpointLabel {
+        source_label: String,
+        target_label: String,
+    },
 }
 
 impl std::fmt::Display for ConstraintType {
@@ -91,6 +117,11 @@ impl std::fmt::Display for ConstraintType {
             ConstraintType::Unique => write!(f, "UNIQUE"),
             ConstraintType::NotNull => write!(f, "NOT NULL"),
             ConstraintType::TypeCheck(t) => write!(f, "TYPE({})", t),
+            ConstraintType::RequiredLabel(label) => write!(f, "REQUIRED_LABEL({})", label),
+            ConstraintType::EndpointLabel {
+                source_label,
+                target_label,
+            } => write!(f, "ENDPOINT_LABEL({}->{})", source_label, target_label),
         }
     }
 }
@@ -223,6 +254,79 @@ impl ConstraintManager {
                         }
                     }
                 }
+                ConstraintType::RequiredLabel(required_label) => {
+                    // The node being created has `label` as its primary label.
+                    // This constraint fires when label matches and requires the node
+                    // to also carry `required_label`. Since a node only has one label
+                    // in this graph model, the required label must equal the node's
+                    // label OR be checked via labels list. Here we model it as: if
+                    // the node's label matches the constraint label, it must ALSO
+                    // declare the required_label in an additional_labels property list
+                    // (or the required label equals the primary label, which satisfies
+                    // the constraint trivially). For simplicity we treat the single-label
+                    // model: the constraint is violated if the node's label IS the
+                    // constraint label but is NOT the required label and has no
+                    // additional labels field indicating required_label is present.
+                    // Since the graph model has a single label per node, we check
+                    // whether the node's label matches required_label.
+                    if label != required_label.as_str() {
+                        return Err(ConstraintError::RequiredLabelViolation {
+                            name: constraint.name.clone(),
+                            label: constraint.label.clone(),
+                            required_label: required_label.clone(),
+                        });
+                    }
+                }
+                // EndpointLabel is an edge constraint; skip for node creation
+                ConstraintType::EndpointLabel { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// エッジ作成時のバリデーション
+    pub fn validate_edge_create(
+        &self,
+        graph: &Graph,
+        edge_label: &str,
+        from_id: NodeId,
+        to_id: NodeId,
+    ) -> Result<(), ConstraintError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        for constraint in self.constraints.values() {
+            if constraint.label != edge_label {
+                continue;
+            }
+
+            if let ConstraintType::EndpointLabel {
+                source_label,
+                target_label,
+            } = &constraint.constraint_type
+            {
+                // Check source node label
+                let from_node_label = graph
+                    .get_node(from_id)
+                    .map(|n| n.label.as_str())
+                    .unwrap_or("");
+                let to_node_label = graph
+                    .get_node(to_id)
+                    .map(|n| n.label.as_str())
+                    .unwrap_or("");
+
+                if from_node_label != source_label.as_str()
+                    || to_node_label != target_label.as_str()
+                {
+                    return Err(ConstraintError::EndpointLabelViolation {
+                        name: constraint.name.clone(),
+                        edge_label: edge_label.to_string(),
+                        source_label: source_label.clone(),
+                        target_label: target_label.clone(),
+                    });
+                }
             }
         }
 
@@ -283,6 +387,8 @@ impl ConstraintManager {
                 ConstraintType::TypeCheck(expected) => {
                     self.check_type_single(constraint, property, value, expected)?;
                 }
+                // Label constraints don't affect property validation
+                ConstraintType::RequiredLabel(_) | ConstraintType::EndpointLabel { .. } => {}
             }
         }
 
@@ -961,6 +1067,223 @@ mod tests {
         assert!(
             cm.validate_node_create(&graph, "Person", &props, None)
                 .is_ok()
+        );
+    }
+
+    // ========== RequiredLabel constraint tests ==========
+
+    #[test]
+    fn test_required_label_constraint_violation() {
+        let graph = Graph::new();
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "emp_is_person".to_string(),
+            label: "Employee".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::RequiredLabel("Person".to_string()),
+        })
+        .unwrap();
+
+        let props = HashMap::new();
+        // Creating an Employee node without being Person should fail
+        assert!(matches!(
+            cm.validate_node_create(&graph, "Employee", &props, None),
+            Err(ConstraintError::RequiredLabelViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_required_label_constraint_pass_same_label() {
+        let graph = Graph::new();
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "person_is_person".to_string(),
+            label: "Person".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::RequiredLabel("Person".to_string()),
+        })
+        .unwrap();
+
+        let props = HashMap::new();
+        // Person satisfies Person required label
+        assert!(
+            cm.validate_node_create(&graph, "Person", &props, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_required_label_constraint_not_triggered_other_labels() {
+        let graph = Graph::new();
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "emp_is_person".to_string(),
+            label: "Employee".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::RequiredLabel("Person".to_string()),
+        })
+        .unwrap();
+
+        let props = HashMap::new();
+        // Creating a Company node does not trigger Employee constraint
+        assert!(
+            cm.validate_node_create(&graph, "Company", &props, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_required_label_constraint_display() {
+        let ct = ConstraintType::RequiredLabel("Person".to_string());
+        assert_eq!(ct.to_string(), "REQUIRED_LABEL(Person)");
+    }
+
+    // ========== EndpointLabel constraint tests ==========
+
+    #[test]
+    fn test_endpoint_label_constraint_pass() {
+        let mut graph = Graph::new();
+        let alice = graph.create_node("Person");
+        graph
+            .get_node_mut(alice)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Alice".to_string()));
+        let bob = graph.create_node("Person");
+        graph
+            .get_node_mut(bob)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Bob".to_string()));
+
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "knows_persons".to_string(),
+            label: "KNOWS".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::EndpointLabel {
+                source_label: "Person".to_string(),
+                target_label: "Person".to_string(),
+            },
+        })
+        .unwrap();
+
+        // Person -> Person KNOWS edge should pass
+        assert!(cm.validate_edge_create(&graph, "KNOWS", alice, bob).is_ok());
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_source_violation() {
+        let mut graph = Graph::new();
+        let company = graph.create_node("Company");
+        let person = graph.create_node("Person");
+
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "knows_persons".to_string(),
+            label: "KNOWS".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::EndpointLabel {
+                source_label: "Person".to_string(),
+                target_label: "Person".to_string(),
+            },
+        })
+        .unwrap();
+
+        // Company -> Person KNOWS edge should fail (source is not Person)
+        assert!(matches!(
+            cm.validate_edge_create(&graph, "KNOWS", company, person),
+            Err(ConstraintError::EndpointLabelViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_target_violation() {
+        let mut graph = Graph::new();
+        let alice = graph.create_node("Person");
+        let company = graph.create_node("Company");
+
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "knows_persons".to_string(),
+            label: "KNOWS".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::EndpointLabel {
+                source_label: "Person".to_string(),
+                target_label: "Person".to_string(),
+            },
+        })
+        .unwrap();
+
+        // Person -> Company KNOWS edge should fail (target is not Person)
+        assert!(matches!(
+            cm.validate_edge_create(&graph, "KNOWS", alice, company),
+            Err(ConstraintError::EndpointLabelViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_wrong_edge_type_ignored() {
+        let mut graph = Graph::new();
+        let company = graph.create_node("Company");
+        let person = graph.create_node("Person");
+
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "knows_persons".to_string(),
+            label: "KNOWS".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::EndpointLabel {
+                source_label: "Person".to_string(),
+                target_label: "Person".to_string(),
+            },
+        })
+        .unwrap();
+
+        // WORKS edge is not constrained by KNOWS endpoint constraint
+        assert!(
+            cm.validate_edge_create(&graph, "WORKS_AT", company, person)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_display() {
+        let ct = ConstraintType::EndpointLabel {
+            source_label: "Person".to_string(),
+            target_label: "Company".to_string(),
+        };
+        assert_eq!(ct.to_string(), "ENDPOINT_LABEL(Person->Company)");
+    }
+
+    #[test]
+    fn test_endpoint_label_constraint_disabled() {
+        let mut graph = Graph::new();
+        let company = graph.create_node("Company");
+        let person = graph.create_node("Person");
+
+        let mut cm = ConstraintManager::new();
+        cm.create_constraint(Constraint {
+            name: "knows_persons".to_string(),
+            label: "KNOWS".to_string(),
+            properties: vec![],
+            constraint_type: ConstraintType::EndpointLabel {
+                source_label: "Person".to_string(),
+                target_label: "Person".to_string(),
+            },
+        })
+        .unwrap();
+
+        cm.disable();
+        // With constraints disabled, the invalid edge should pass
+        assert!(
+            cm.validate_edge_create(&graph, "KNOWS", company, person)
+                .is_ok()
+        );
+
+        cm.enable();
+        // With constraints enabled, the invalid edge should fail
+        assert!(
+            cm.validate_edge_create(&graph, "KNOWS", company, person)
+                .is_err()
         );
     }
 }

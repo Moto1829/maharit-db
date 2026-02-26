@@ -1441,7 +1441,12 @@ impl Parser {
 
     // ========== CONSTRAINT DDL ==========
 
-    /// CREATE CONSTRAINT name FOR (n:Label) REQUIRE n.prop IS UNIQUE/NOT NULL/:: TYPE
+    /// CREATE CONSTRAINT name FOR pattern REQUIRE ...
+    ///
+    /// Supported forms:
+    /// - `FOR (n:Label) REQUIRE n.prop IS UNIQUE/NOT NULL/:: TYPE`
+    /// - `FOR (n:Label1) REQUIRE n:Label2`  (RequiredLabel)
+    /// - `FOR (s:SLabel)-[r:EType]->(t:TLabel)`  (EndpointLabel, no REQUIRE needed)
     fn parse_create_constraint(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Create)?;
         self.expect(TokenKind::Constraint)?;
@@ -1450,16 +1455,61 @@ impl Parser {
 
         self.expect(TokenKind::For)?;
 
-        // Parse (variable:Label)
+        // Parse leading '(' for the start node
         self.expect(TokenKind::LParen)?;
         let variable = self.expect_ident()?;
         self.expect(TokenKind::Colon)?;
         let label = self.expect_ident()?;
         self.expect(TokenKind::RParen)?;
 
+        // Check if this is an edge pattern: (s:SLabel)-[r:EType]->(t:TLabel)
+        // Edge patterns start with '-' (Dash) or '<-' (ArrowLeft)
+        if self.check(TokenKind::Dash) || self.check(TokenKind::ArrowLeft) {
+            return self.parse_endpoint_label_constraint(name, label, variable);
+        }
+
         self.expect(TokenKind::Require)?;
 
-        // Parse variable.property or (variable.property, variable.property, ...)
+        // After REQUIRE, check if it's `var:Label` (RequiredLabel) or `var.prop IS ...`
+        // Peek ahead: if we see `ident colon ident` it's a RequiredLabel constraint
+        // If we see `ident dot ident` or `(ident dot ident` it's a property constraint
+        let is_required_label = {
+            // Save position to peek
+            let saved = self.pos;
+            let next_is_ident = matches!(self.peek_kind(), Some(TokenKind::Ident(_)));
+            if next_is_ident {
+                self.advance(); // consume ident
+                let after_ident = self.peek_kind().cloned();
+                self.pos = saved; // restore
+                matches!(after_ident, Some(TokenKind::Colon))
+            } else {
+                false
+            }
+        };
+
+        if is_required_label {
+            // Parse: REQUIRE var:RequiredLabel
+            let req_var = self.expect_ident()?;
+            if req_var != variable {
+                return Err(ParseError::UnexpectedToken {
+                    expected: format!("variable '{}'", variable),
+                    found: req_var,
+                    span: self.current_span(),
+                });
+            }
+            self.expect(TokenKind::Colon)?;
+            let required_label = self.expect_ident()?;
+
+            return Ok(Statement::CreateConstraint(CreateConstraintStatement {
+                name,
+                label,
+                variable,
+                constraint_type: ConstraintTypeAst::RequiredLabel(required_label),
+                properties: vec![],
+            }));
+        }
+
+        // Property constraint: parse var.prop or (var.prop, var.prop, ...)
         let properties = if self.check(TokenKind::LParen) {
             // Composite constraint: (var.prop, var.prop, ...)
             self.advance(); // consume '('
@@ -1540,6 +1590,83 @@ impl Parser {
             variable,
             constraint_type,
             properties,
+        }))
+    }
+
+    /// Parse endpoint label constraint from edge pattern:
+    /// `(s:SLabel)-[r:EType]->(t:TLabel)` already consumed start node.
+    /// Builds an `EndpointLabel` constraint with the edge type as the constraint label.
+    fn parse_endpoint_label_constraint(
+        &mut self,
+        name: String,
+        source_label: String,
+        _source_var: String,
+    ) -> Result<Statement, ParseError> {
+        // Parse `-[r:EType]->` or `<-[r:EType]-`
+        // Accept: `->` direction (dash lbracket ... rbracket arrowright)
+        // or `<-` direction (arrowleft lbracket ... rbracket dash)
+        // For simplicity support outgoing `->` and both `--`
+
+        // consume leading dash or arrowleft
+        let _dash_or_arrow = self.advance(); // '-' or '<-'
+
+        // optional additional dash for `--[`
+        if self.check(TokenKind::LBracket) {
+            // already at '['
+        } else if self.check(TokenKind::Dash) {
+            self.advance(); // consume extra dash if `--[`
+        }
+
+        self.expect(TokenKind::LBracket)?;
+
+        // Optional edge variable
+        let _edge_var = if matches!(self.peek_kind(), Some(TokenKind::Ident(_))) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Colon)?;
+        let edge_type = self.expect_ident()?;
+        self.expect(TokenKind::RBracket)?;
+
+        // consume `->` or `-`
+        if self.check(TokenKind::Arrow) {
+            self.advance();
+        } else if self.check(TokenKind::Dash) {
+            self.advance();
+        }
+
+        // Parse target node: (t:TLabel)
+        self.expect(TokenKind::LParen)?;
+        let _target_var = if matches!(self.peek_kind(), Some(TokenKind::Ident(_))) {
+            // peek further to see if there's a colon after
+            let saved = self.pos;
+            let ident = self.expect_ident()?;
+            if self.check(TokenKind::Colon) {
+                Some(ident)
+            } else {
+                // it was the label with no variable
+                self.pos = saved;
+                None
+            }
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Colon)?;
+        let target_label = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+
+        Ok(Statement::CreateConstraint(CreateConstraintStatement {
+            name,
+            label: edge_type,
+            variable: String::new(),
+            constraint_type: ConstraintTypeAst::EndpointLabel {
+                source_label,
+                target_label,
+            },
+            properties: vec![],
         }))
     }
 
