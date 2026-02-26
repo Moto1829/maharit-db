@@ -468,22 +468,8 @@ impl<'a> Executor<'a> {
         }
 
         // Apply SET clause
-        if let Some(set_clause) = &d.set_clause {
-            for bindings in &all_bindings {
-                for item in &set_clause.items {
-                    let node_id = bindings
-                        .get(&item.variable)
-                        .and_then(|v| v.as_node())
-                        .ok_or_else(|| ExecuteError::UndefinedVariable(item.variable.clone()))?;
-
-                    let value = self.evaluate_expression(&item.value, bindings)?;
-                    let prop_value = self.value_to_property(&value)?;
-
-                    if let Some(node) = self.graph.get_node_mut(node_id) {
-                        node.set_property(&item.property, prop_value);
-                    }
-                }
-            }
+        if let Some(set_clause) = &d.set_clause.clone() {
+            self.apply_set_clause(set_clause, &all_bindings)?;
         }
 
         // Collect all IDs to delete (to avoid modifying while iterating)
@@ -742,37 +728,120 @@ impl<'a> Executor<'a> {
     ) -> Result<(), ExecuteError> {
         for bindings in all_bindings {
             for item in &set_clause.items {
-                let binding_value = bindings
-                    .get(&item.variable)
-                    .ok_or_else(|| ExecuteError::UndefinedVariable(item.variable.clone()))?;
+                match item {
+                    SetItem::Property(variable, property, value_expr) => {
+                        let binding_value = bindings
+                            .get(variable)
+                            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
 
-                let value = self.evaluate_expression(&item.value, bindings)?;
-                let prop_value = self.value_to_property(&value)?;
+                        let value = self.evaluate_expression(value_expr, bindings)?;
+                        let prop_value = self.value_to_property(&value)?;
 
-                match binding_value {
-                    BindingValue::Node(node_id) => {
-                        // Validate constraint before setting
-                        if let Some(node) = self.graph.get_node(*node_id) {
-                            self.constraints.validate_property_set(
-                                self.graph,
-                                node,
-                                &item.property,
-                                &prop_value,
-                            )?;
-                        }
-                        if let Some(node) = self.graph.get_node_mut(*node_id) {
-                            node.set_property(&item.property, prop_value);
+                        match binding_value {
+                            BindingValue::Node(node_id) => {
+                                // Validate constraint before setting
+                                if let Some(node) = self.graph.get_node(*node_id) {
+                                    self.constraints.validate_property_set(
+                                        self.graph,
+                                        node,
+                                        property,
+                                        &prop_value,
+                                    )?;
+                                }
+                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                    node.set_property(property, prop_value);
+                                }
+                            }
+                            BindingValue::Edge(edge_id) => {
+                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                    edge.set_property(property, prop_value);
+                                }
+                            }
+                            _ => {
+                                return Err(ExecuteError::TypeError(
+                                    "SET requires node or edge binding".to_string(),
+                                ));
+                            }
                         }
                     }
-                    BindingValue::Edge(edge_id) => {
-                        if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
-                            edge.set_property(&item.property, prop_value);
+                    SetItem::MergeProperties(variable, props_map) => {
+                        let binding_value = bindings
+                            .get(variable)
+                            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
+
+                        // Evaluate all property expressions first
+                        let evaluated: Vec<(String, PropertyValue)> = props_map
+                            .iter()
+                            .map(|(k, expr)| {
+                                let val = self.evaluate_expression(expr, bindings)?;
+                                let prop_val = self.value_to_property(&val)?;
+                                Ok((k.clone(), prop_val))
+                            })
+                            .collect::<Result<_, ExecuteError>>()?;
+
+                        match binding_value {
+                            BindingValue::Node(node_id) => {
+                                // Validate constraints for each new property
+                                for (key, prop_val) in &evaluated {
+                                    if let Some(node) = self.graph.get_node(*node_id) {
+                                        self.constraints.validate_property_set(
+                                            self.graph,
+                                            node,
+                                            key,
+                                            prop_val,
+                                        )?;
+                                    }
+                                }
+                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                    for (key, prop_val) in evaluated {
+                                        node.set_property(key, prop_val);
+                                    }
+                                }
+                            }
+                            BindingValue::Edge(edge_id) => {
+                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                    for (key, prop_val) in evaluated {
+                                        edge.set_property(key, prop_val);
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(ExecuteError::TypeError(
+                                    "SET += requires node or edge binding".to_string(),
+                                ));
+                            }
                         }
                     }
-                    _ => {
-                        return Err(ExecuteError::TypeError(
-                            "SET requires node or edge binding".to_string(),
-                        ));
+                    SetItem::AddLabel(variable, new_label) => {
+                        let binding_value = bindings
+                            .get(variable)
+                            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
+
+                        match binding_value {
+                            BindingValue::Node(node_id) => {
+                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                    // Append the new label if not already present.
+                                    // Labels are stored as colon-separated strings, e.g. "Person:Adult".
+                                    let already_has = node
+                                        .label
+                                        .split(':')
+                                        .any(|l| l == new_label.as_str());
+                                    if !already_has {
+                                        if node.label.is_empty() {
+                                            node.label = new_label.clone();
+                                        } else {
+                                            node.label =
+                                                format!("{}:{}", node.label, new_label);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(ExecuteError::TypeError(
+                                    "SET n:Label requires a node binding".to_string(),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -2077,9 +2146,12 @@ impl<'a> Executor<'a> {
             None => return Ok(false),
         };
 
-        // Check label
+        // Check label. Labels are stored as colon-separated strings to support
+        // multi-label nodes added via SET n:Label. A node matches if the
+        // pattern label is one of the node's labels.
         if let Some(ref label) = pattern.label {
-            if &node.label != label {
+            let has_label = node.label.split(':').any(|l| l == label.as_str());
+            if !has_label {
                 return Ok(false);
             }
         }
@@ -3095,7 +3167,14 @@ impl<'a> Executor<'a> {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph.get_node(*node_id) {
-                                Ok(Value::List(vec![Value::String(node.label.clone())]))
+                                // Labels are stored as colon-separated strings.
+                                let labels: Vec<Value> = node
+                                    .label
+                                    .split(':')
+                                    .filter(|l| !l.is_empty())
+                                    .map(|l| Value::String(l.to_string()))
+                                    .collect();
+                                Ok(Value::List(labels))
                             } else {
                                 Ok(Value::Null)
                             }
@@ -5670,6 +5749,163 @@ mod tests {
 
         let edge = graph.edges().next().unwrap();
         assert_eq!(edge.get_property("since"), Some(&PropertyValue::Int(2024)));
+    }
+
+    // ========== SET += and SET n:Label tests ==========
+
+    #[test]
+    fn test_set_merge_properties_adds_new_props() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n += {age: 31, city: "Tokyo"}"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        // Existing property 'name' must be preserved
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+        // 'age' should be updated to 31
+        assert_eq!(node.get_property("age"), Some(&PropertyValue::Int(31)));
+        // New property 'city' should be added
+        assert_eq!(
+            node.get_property("city"),
+            Some(&PropertyValue::String("Tokyo".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_set_merge_properties_with_return() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person {name: "Alice"}) SET n += {age: 31, city: "Tokyo"} RETURN n.name, n.age, n.city"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(result.rows[0].columns[1], Value::Int(31));
+        assert_eq!(
+            result.rows[0].columns[2],
+            Value::String("Tokyo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_add_label_to_node() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 25})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age >= 20 SET n:Adult"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        // Node should now be matchable by both Person and Adult labels
+        let labels: Vec<&str> = node.label.split(':').collect();
+        assert!(labels.contains(&"Person"));
+        assert!(labels.contains(&"Adult"));
+    }
+
+    #[test]
+    fn test_set_add_label_idempotent() {
+        // Adding the same label twice should not duplicate it
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+
+        execute(&mut graph, r#"MATCH (n:Person) SET n:Adult"#).unwrap();
+        execute(&mut graph, r#"MATCH (n:Person) SET n:Adult"#).unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        let label_count = node.label.split(':').filter(|l| *l == "Adult").count();
+        assert_eq!(label_count, 1, "Label 'Adult' should appear only once");
+    }
+
+    #[test]
+    fn test_set_add_label_match_by_new_label() {
+        // After SET n:Adult, the node should be matchable by (n:Adult)
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 25})"#).unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE n.age >= 20 SET n:Adult"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Adult) RETURN n.name"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_add_label_with_return() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 25})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) SET n:Adult RETURN n.name, labels(n)"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        // labels(n) should contain both Person and Adult
+        let labels_val = &result.rows[0].columns[1];
+        if let Value::List(labels) = labels_val {
+            assert!(labels.contains(&Value::String("Person".to_string())));
+            assert!(labels.contains(&Value::String("Adult".to_string())));
+        } else {
+            panic!("Expected list of labels, got {:?}", labels_val);
+        }
+    }
+
+    #[test]
+    fn test_set_merge_properties_edge() {
+        // SET += on an edge should also merge properties
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS {since: 2020}]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r += {weight: 5}"#,
+        )
+        .unwrap();
+
+        let edge = graph.edges().next().unwrap();
+        // Existing property 'since' must be preserved
+        assert_eq!(edge.get_property("since"), Some(&PropertyValue::Int(2020)));
+        // New property 'weight' should be added
+        assert_eq!(edge.get_property("weight"), Some(&PropertyValue::Int(5)));
     }
 
     // ========== MERGE tests ==========

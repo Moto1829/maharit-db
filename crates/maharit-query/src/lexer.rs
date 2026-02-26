@@ -117,10 +117,11 @@ pub enum TokenKind {
     RegexMatch, // =~
 
     // 算術演算子
-    Plus,  // +
-    Minus, // -
-    Star,  // *
-    Slash, // /
+    Plus,       // +
+    PlusEquals, // +=
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
 
     // 記号
     LParen,   // (
@@ -218,6 +219,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Gte => write!(f, ">="),
             TokenKind::RegexMatch => write!(f, "=~"),
             TokenKind::Plus => write!(f, "+"),
+            TokenKind::PlusEquals => write!(f, "+="),
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Star => write!(f, "*"),
             TokenKind::Slash => write!(f, "/"),
@@ -360,7 +362,12 @@ impl<'a> Lexer<'a> {
             }
             '+' => {
                 self.advance();
-                TokenKind::Plus
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::PlusEquals
+                } else {
+                    TokenKind::Plus
+                }
             }
             '-' => {
                 self.advance();

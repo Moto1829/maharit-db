@@ -186,12 +186,15 @@ pub struct SetClause {
     pub items: Vec<SetItem>,
 }
 
-/// SET項目: n.prop = value
+/// SET項目
 #[derive(Debug, Clone, PartialEq)]
-pub struct SetItem {
-    pub variable: String,
-    pub property: String,
-    pub value: Expression,
+pub enum SetItem {
+    /// プロパティの上書き: n.prop = value
+    Property(String, String, Expression),
+    /// プロパティのマージ: n += {key: value, ...}
+    MergeProperties(String, HashMap<String, Expression>),
+    /// ラベルの追加: n:NewLabel
+    AddLabel(String, String),
 }
 
 /// パターン（ノードとエッジの連鎖）

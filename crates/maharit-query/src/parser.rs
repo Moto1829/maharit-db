@@ -531,16 +531,25 @@ impl Parser {
 
     fn parse_set_item(&mut self) -> Result<SetItem, ParseError> {
         let variable = self.expect_ident()?;
-        self.expect(TokenKind::Dot)?;
-        let property = self.expect_ident()?;
-        self.expect(TokenKind::Eq)?;
-        let value = self.parse_expression()?;
 
-        Ok(SetItem {
-            variable,
-            property,
-            value,
-        })
+        if self.check(TokenKind::PlusEquals) {
+            // n += {key: value, ...}
+            self.advance(); // consume +=
+            let props = self.parse_properties()?;
+            Ok(SetItem::MergeProperties(variable, props))
+        } else if self.check(TokenKind::Colon) {
+            // n:NewLabel
+            self.advance(); // consume :
+            let label = self.expect_ident()?;
+            Ok(SetItem::AddLabel(variable, label))
+        } else {
+            // n.prop = value
+            self.expect(TokenKind::Dot)?;
+            let property = self.expect_ident()?;
+            self.expect(TokenKind::Eq)?;
+            let value = self.parse_expression()?;
+            Ok(SetItem::Property(variable, property, value))
+        }
     }
 
     // ========== DELETE ==========
@@ -2708,9 +2717,14 @@ mod tests {
         if let Statement::Delete(d) = stmt {
             let set = d.set_clause.unwrap();
             assert_eq!(set.items.len(), 1);
-            assert_eq!(set.items[0].variable, "n");
-            assert_eq!(set.items[0].property, "age");
-            assert_eq!(set.items[0].value, Expression::Literal(Literal::Int(31)));
+            assert_eq!(
+                set.items[0],
+                SetItem::Property(
+                    "n".to_string(),
+                    "age".to_string(),
+                    Expression::Literal(Literal::Int(31))
+                )
+            );
         } else {
             panic!("expected DELETE statement with SET");
         }
@@ -2723,10 +2737,8 @@ mod tests {
         if let Statement::Delete(d) = stmt {
             let set = d.set_clause.unwrap();
             assert_eq!(set.items.len(), 2);
-            assert_eq!(set.items[0].variable, "n");
-            assert_eq!(set.items[0].property, "age");
-            assert_eq!(set.items[1].variable, "n");
-            assert_eq!(set.items[1].property, "name");
+            assert!(matches!(&set.items[0], SetItem::Property(v, p, _) if v == "n" && p == "age"));
+            assert!(matches!(&set.items[1], SetItem::Property(v, p, _) if v == "n" && p == "name"));
         } else {
             panic!("expected DELETE statement with SET");
         }
