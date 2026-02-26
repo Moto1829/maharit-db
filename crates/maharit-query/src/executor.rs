@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use maharit_core::{
-    traversal, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge,
-    FulltextError, FulltextManager, Graph, NodeId, PropertyType, PropertyValue,
+    Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge, FulltextError,
+    FulltextManager, Graph, NodeId, PropertyType, PropertyValue, traversal,
 };
 use regex::Regex;
 use thiserror::Error;
@@ -152,10 +152,7 @@ pub enum BindingValue {
     /// 単一エッジ
     Edge(u64),
     /// パス（可変長パス用）
-    Path {
-        nodes: Vec<NodeId>,
-        edges: Vec<u64>,
-    },
+    Path { nodes: Vec<NodeId>, edges: Vec<u64> },
     /// スカラー値（WITH句で渡される中間値）
     Scalar(Value),
 }
@@ -253,7 +250,10 @@ impl<'a> Executor<'a> {
             Statement::CreateUser(cu) => Ok(ResultSet::new(
                 vec!["result".to_string()],
                 vec![Row {
-                    columns: vec![Value::String(format!("User '{}' created with role '{}'", cu.username, cu.role))],
+                    columns: vec![Value::String(format!(
+                        "User '{}' created with role '{}'",
+                        cu.username, cu.role
+                    ))],
                 }],
             )),
             Statement::DropUser(du) => Ok(ResultSet::new(
@@ -271,7 +271,9 @@ impl<'a> Executor<'a> {
             Statement::ShowUsers => Ok(ResultSet::new(
                 vec!["result".to_string()],
                 vec![Row {
-                    columns: vec![Value::String("SHOW USERS requires server context".to_string())],
+                    columns: vec![Value::String(
+                        "SHOW USERS requires server context".to_string(),
+                    )],
                 }],
             )),
             Statement::Explain(inner) => self.execute_explain(*inner),
@@ -681,10 +683,7 @@ impl<'a> Executor<'a> {
 
     // ========== MATCH + SET ==========
 
-    fn execute_match_set(
-        &mut self,
-        ms: MatchSetStatement,
-    ) -> Result<ResultSet, ExecuteError> {
+    fn execute_match_set(&mut self, ms: MatchSetStatement) -> Result<ResultSet, ExecuteError> {
         // Execute MATCH segments
         let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
 
@@ -785,10 +784,7 @@ impl<'a> Executor<'a> {
                                 for (key, prop_val) in &evaluated {
                                     if let Some(node) = self.graph.get_node(*node_id) {
                                         self.constraints.validate_property_set(
-                                            self.graph,
-                                            node,
-                                            key,
-                                            prop_val,
+                                            self.graph, node, key, prop_val,
                                         )?;
                                     }
                                 }
@@ -822,16 +818,13 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph.get_node_mut(*node_id) {
                                     // Append the new label if not already present.
                                     // Labels are stored as colon-separated strings, e.g. "Person:Adult".
-                                    let already_has = node
-                                        .label
-                                        .split(':')
-                                        .any(|l| l == new_label.as_str());
+                                    let already_has =
+                                        node.label.split(':').any(|l| l == new_label.as_str());
                                     if !already_has {
                                         if node.label.is_empty() {
                                             node.label = new_label.clone();
                                         } else {
-                                            node.label =
-                                                format!("{}:{}", node.label, new_label);
+                                            node.label = format!("{}:{}", node.label, new_label);
                                         }
                                     }
                                 }
@@ -932,9 +925,9 @@ impl<'a> Executor<'a> {
             Pattern::Path(path_pattern) => {
                 let start_id = if let Some(var) = &path_pattern.start.variable {
                     if let Some(bound) = bindings.get(var) {
-                        bound.as_node().ok_or_else(|| {
-                            ExecuteError::TypeError("expected node".to_string())
-                        })?
+                        bound
+                            .as_node()
+                            .ok_or_else(|| ExecuteError::TypeError("expected node".to_string()))?
                     } else {
                         self.create_node(&path_pattern.start, bindings)?
                     }
@@ -1029,8 +1022,7 @@ impl<'a> Executor<'a> {
                             BindingValue::Node(node_id) => {
                                 // Validate constraint before removing
                                 if let Some(node) = self.graph.get_node(*node_id) {
-                                    self.constraints
-                                        .validate_property_remove(node, prop)?;
+                                    self.constraints.validate_property_remove(node, prop)?;
                                 }
                                 if let Some(node) = self.graph.get_node_mut(*node_id) {
                                     node.remove_property(prop);
@@ -1366,10 +1358,7 @@ impl<'a> Executor<'a> {
         Ok(ResultSet::new(
             vec!["result".to_string()],
             vec![Row {
-                columns: vec![Value::String(format!(
-                    "Constraint '{}' created",
-                    cc.name
-                ))],
+                columns: vec![Value::String(format!("Constraint '{}' created", cc.name))],
             }],
         ))
     }
@@ -1383,10 +1372,7 @@ impl<'a> Executor<'a> {
         Ok(ResultSet::new(
             vec!["result".to_string()],
             vec![Row {
-                columns: vec![Value::String(format!(
-                    "Constraint '{}' dropped",
-                    dc.name
-                ))],
+                columns: vec![Value::String(format!("Constraint '{}' dropped", dc.name))],
             }],
         ))
     }
@@ -1724,13 +1710,15 @@ impl<'a> Executor<'a> {
         }
 
         // Apply SKIP
-        if let Some(skip) = with_clause.skip {
-            result = result.into_iter().skip(skip as usize).collect();
+        if let Some(ref skip_expr) = with_clause.skip {
+            let skip = self.resolve_skip_limit(skip_expr)? as usize;
+            result = result.into_iter().skip(skip).collect();
         }
 
         // Apply LIMIT
-        if let Some(limit) = with_clause.limit {
-            result = result.into_iter().take(limit as usize).collect();
+        if let Some(ref limit_expr) = with_clause.limit {
+            let limit = self.resolve_skip_limit(limit_expr)? as usize;
+            result = result.into_iter().take(limit).collect();
         }
 
         Ok(result)
@@ -2227,10 +2215,22 @@ impl<'a> Executor<'a> {
             rows = self.apply_distinct(rows);
         }
 
+        // Resolve SKIP and LIMIT expressions (integer literal or $parameter)
+        let resolved_skip = return_clause
+            .skip
+            .as_ref()
+            .map(|e| self.resolve_skip_limit(e))
+            .transpose()?;
+        let resolved_limit = return_clause
+            .limit
+            .as_ref()
+            .map(|e| self.resolve_skip_limit(e))
+            .transpose()?;
+
         // Apply ORDER BY with optional LIMIT optimization
         if let Some(ref order_by) = return_clause.order_by {
             // Calculate how many rows we actually need
-            let needed = match (return_clause.skip, return_clause.limit) {
+            let needed = match (resolved_skip, resolved_limit) {
                 (Some(skip), Some(limit)) => Some((skip + limit) as usize),
                 (None, Some(limit)) => Some(limit as usize),
                 _ => None,
@@ -2249,7 +2249,7 @@ impl<'a> Executor<'a> {
         }
 
         // Apply SKIP
-        if let Some(skip) = return_clause.skip {
+        if let Some(skip) = resolved_skip {
             let skip = skip as usize;
             if skip < rows.len() {
                 rows = rows.into_iter().skip(skip).collect();
@@ -2259,7 +2259,7 @@ impl<'a> Executor<'a> {
         }
 
         // Apply LIMIT
-        if let Some(limit) = return_clause.limit {
+        if let Some(limit) = resolved_limit {
             rows.truncate(limit as usize);
         }
 
@@ -2459,7 +2459,10 @@ impl<'a> Executor<'a> {
                     format!("AVG(DISTINCT {})", self.return_item_to_column_name(inner))
                 }
                 AggregateFunction::CollectDistinct(inner) => {
-                    format!("COLLECT(DISTINCT {})", self.return_item_to_column_name(inner))
+                    format!(
+                        "COLLECT(DISTINCT {})",
+                        self.return_item_to_column_name(inner)
+                    )
                 }
             },
             ReturnItem::Function(func) => match func {
@@ -2561,9 +2564,15 @@ impl<'a> Executor<'a> {
                     Self::expression_to_display(e1),
                     Self::expression_to_display(e2)
                 ),
-                ScalarFunction::ToBoolean(e) => format!("toBoolean({})", Self::expression_to_display(e)),
-                ScalarFunction::ToFloat(e) => format!("toFloat({})", Self::expression_to_display(e)),
-                ScalarFunction::ToInteger(e) => format!("toInteger({})", Self::expression_to_display(e)),
+                ScalarFunction::ToBoolean(e) => {
+                    format!("toBoolean({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::ToFloat(e) => {
+                    format!("toFloat({})", Self::expression_to_display(e))
+                }
+                ScalarFunction::ToInteger(e) => {
+                    format!("toInteger({})", Self::expression_to_display(e))
+                }
                 ScalarFunction::Timestamp => "timestamp()".to_string(),
                 ScalarFunction::RandomUUID => "randomUUID()".to_string(),
                 ScalarFunction::Head(e) => format!("head({})", Self::expression_to_display(e)),
@@ -2614,12 +2623,10 @@ impl<'a> Executor<'a> {
                             // Return edge as a simple value
                             Ok(Value::Int(*edge_id as i64))
                         }
-                        BindingValue::Path { nodes, edges } => {
-                            Ok(Value::Path {
-                                nodes: nodes.clone(),
-                                edges: edges.clone(),
-                            })
-                        }
+                        BindingValue::Path { nodes, edges } => Ok(Value::Path {
+                            nodes: nodes.clone(),
+                            edges: edges.clone(),
+                        }),
                         BindingValue::Scalar(value) => Ok(value.clone()),
                     }
                 } else {
@@ -2665,12 +2672,8 @@ impl<'a> Executor<'a> {
                 // Aggregates are handled separately
                 Ok(Value::Null)
             }
-            ReturnItem::Function(func) => {
-                self.evaluate_scalar_function(func, bindings)
-            }
-            ReturnItem::Expr(expr) => {
-                self.evaluate_expression(expr, bindings)
-            }
+            ReturnItem::Function(func) => self.evaluate_scalar_function(func, bindings),
+            ReturnItem::Expr(expr) => self.evaluate_expression(expr, bindings),
         }
     }
 
@@ -2791,7 +2794,9 @@ impl<'a> Executor<'a> {
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim().to_string())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("trim() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "trim() requires a string".to_string(),
+                    )),
                 }
             }
             ScalarFunction::LTrim(expr) => {
@@ -2799,7 +2804,9 @@ impl<'a> Executor<'a> {
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("ltrim() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "ltrim() requires a string".to_string(),
+                    )),
                 }
             }
             ScalarFunction::RTrim(expr) => {
@@ -2807,7 +2814,9 @@ impl<'a> Executor<'a> {
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("rtrim() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "rtrim() requires a string".to_string(),
+                    )),
                 }
             }
             ScalarFunction::ToLower(expr) => {
@@ -2815,7 +2824,9 @@ impl<'a> Executor<'a> {
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_lowercase())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("toLower() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "toLower() requires a string".to_string(),
+                    )),
                 }
             }
             ScalarFunction::ToUpper(expr) => {
@@ -2823,7 +2834,9 @@ impl<'a> Executor<'a> {
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_uppercase())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("toUpper() requires a string".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "toUpper() requires a string".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Reverse(expr) => {
@@ -2843,9 +2856,13 @@ impl<'a> Executor<'a> {
                     Value::String(s) => Ok(Value::String(s)),
                     Value::Int(n) => Ok(Value::String(format!("{}", n))),
                     Value::Float(n) => Ok(Value::String(format!("{}", n))),
-                    Value::Bool(b) => Ok(Value::String(if b { "true" } else { "false" }.to_string())),
+                    Value::Bool(b) => {
+                        Ok(Value::String(if b { "true" } else { "false" }.to_string()))
+                    }
                     Value::Null => Ok(Value::String("null".to_string())),
-                    _ => Err(ExecuteError::TypeError("toString() unsupported type".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "toString() unsupported type".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Size(expr) => {
@@ -2868,7 +2885,9 @@ impl<'a> Executor<'a> {
                         Ok(Value::String(s.chars().take(len).collect()))
                     }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("left() requires (string, int)".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "left() requires (string, int)".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Right(str_expr, len_expr) => {
@@ -2882,7 +2901,9 @@ impl<'a> Executor<'a> {
                         Ok(Value::String(chars[start..].iter().collect()))
                     }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("right() requires (string, int)".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "right() requires (string, int)".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Substring(str_expr, start_expr, len_expr) => {
@@ -2956,7 +2977,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(n) => Ok(Value::Float(n.abs())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("abs() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "abs() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Ceil(expr) => {
@@ -2965,7 +2988,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Int(n)),
                     Value::Float(n) => Ok(Value::Int(n.ceil() as i64)),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("ceil() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "ceil() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Floor(expr) => {
@@ -2974,7 +2999,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Int(n)),
                     Value::Float(n) => Ok(Value::Int(n.floor() as i64)),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("floor() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "floor() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Round(expr, precision_expr) => {
@@ -2996,14 +3023,18 @@ impl<'a> Executor<'a> {
                                     Ok(Value::Float((n * factor).round() / factor))
                                 }
                                 Value::Null => Ok(Value::Null),
-                                _ => Err(ExecuteError::TypeError("round() precision must be an integer".to_string())),
+                                _ => Err(ExecuteError::TypeError(
+                                    "round() precision must be an integer".to_string(),
+                                )),
                             }
                         } else {
                             Ok(Value::Int(n.round() as i64))
                         }
                     }
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("round() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "round() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Sign(expr) => {
@@ -3012,7 +3043,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Int(n.signum())),
                     Value::Float(n) => Ok(Value::Int(n.signum() as i64)),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("sign() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "sign() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Rand => {
@@ -3032,7 +3065,9 @@ impl<'a> Executor<'a> {
                     Value::Float(n) => Ok(Value::Bool(n.is_nan())),
                     Value::Int(_) => Ok(Value::Bool(false)),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("isNaN() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "isNaN() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Log(expr) => {
@@ -3041,7 +3076,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Float((n as f64).ln())),
                     Value::Float(n) => Ok(Value::Float(n.ln())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("log() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "log() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Log10(expr) => {
@@ -3050,7 +3087,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Float((n as f64).log10())),
                     Value::Float(n) => Ok(Value::Float(n.log10())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("log10() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "log10() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::Sqrt(expr) => {
@@ -3059,7 +3098,9 @@ impl<'a> Executor<'a> {
                     Value::Int(n) => Ok(Value::Float((n as f64).sqrt())),
                     Value::Float(n) => Ok(Value::Float(n.sqrt())),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(ExecuteError::TypeError("sqrt() requires a numeric value".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "sqrt() requires a numeric value".to_string(),
+                    )),
                 }
             }
             ScalarFunction::E => Ok(Value::Float(std::f64::consts::E)),
@@ -3196,10 +3237,7 @@ impl<'a> Executor<'a> {
                                     .properties
                                     .iter()
                                     .map(|(k, v)| {
-                                        Value::List(vec![
-                                            Value::String(k.clone()),
-                                            Value::from(v),
-                                        ])
+                                        Value::List(vec![Value::String(k.clone()), Value::from(v)])
                                     })
                                     .collect();
                                 Ok(Value::List(props))
@@ -3213,10 +3251,7 @@ impl<'a> Executor<'a> {
                                     .properties
                                     .iter()
                                     .map(|(k, v)| {
-                                        Value::List(vec![
-                                            Value::String(k.clone()),
-                                            Value::from(v),
-                                        ])
+                                        Value::List(vec![Value::String(k.clone()), Value::from(v)])
                                     })
                                     .collect();
                                 Ok(Value::List(props))
@@ -3362,11 +3397,22 @@ impl<'a> Executor<'a> {
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
                 let uuid = format!(
                     "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5],
-                    bytes[6], bytes[7],
-                    bytes[8], bytes[9],
-                    bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                    bytes[0],
+                    bytes[1],
+                    bytes[2],
+                    bytes[3],
+                    bytes[4],
+                    bytes[5],
+                    bytes[6],
+                    bytes[7],
+                    bytes[8],
+                    bytes[9],
+                    bytes[10],
+                    bytes[11],
+                    bytes[12],
+                    bytes[13],
+                    bytes[14],
+                    bytes[15],
                 );
                 Ok(Value::String(uuid))
             }
@@ -3422,7 +3468,7 @@ impl<'a> Executor<'a> {
                             _ => {
                                 return Err(ExecuteError::TypeError(
                                     "range() step must be an integer".to_string(),
-                                ))
+                                ));
                             }
                         };
                         if step == 0 {
@@ -3466,7 +3512,7 @@ impl<'a> Executor<'a> {
                     _ => {
                         return Err(ExecuteError::TypeError(
                             "reduce() requires a list".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let mut acc = init_val;
@@ -3670,7 +3716,7 @@ impl<'a> Executor<'a> {
                             return Err(ExecuteError::TypeError(
                                 "percentileCont() percentile must be a number between 0 and 1"
                                     .to_string(),
-                            ))
+                            ));
                         }
                     };
                     if p < 0.0 || p > 1.0 {
@@ -3713,7 +3759,7 @@ impl<'a> Executor<'a> {
                             return Err(ExecuteError::TypeError(
                                 "percentileDisc() percentile must be a number between 0 and 1"
                                     .to_string(),
-                            ))
+                            ));
                         }
                     };
                     if p < 0.0 || p > 1.0 {
@@ -3750,8 +3796,8 @@ impl<'a> Executor<'a> {
                         return Ok(Value::Float(0.0));
                     }
                     let mean = values.iter().sum::<f64>() / n as f64;
-                    let variance = values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>()
-                        / (n - 1) as f64;
+                    let variance =
+                        values.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
                     Ok(Value::Float(variance.sqrt()))
                 }
                 AggregateFunction::StDevP(inner) => {
@@ -3868,6 +3914,26 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// SKIP / LIMIT の式を評価して非負整数に変換するヘルパー。
+    /// 整数リテラルまたはパラメータ参照に対応する。
+    fn resolve_skip_limit(
+        &self,
+        expr: &Expression,
+    ) -> Result<u64, ExecuteError> {
+        let val = self.evaluate_expression(expr, &Bindings::new())?;
+        match val {
+            Value::Int(n) if n >= 0 => Ok(n as u64),
+            Value::Int(n) => Err(ExecuteError::TypeError(format!(
+                "SKIP/LIMIT value must be a non-negative integer, got {}",
+                n
+            ))),
+            other => Err(ExecuteError::TypeError(format!(
+                "SKIP/LIMIT value must be an integer, got {:?}",
+                other
+            ))),
+        }
+    }
+
     fn evaluate_expression(
         &self,
         expr: &Expression,
@@ -3930,11 +3996,7 @@ impl<'a> Executor<'a> {
                 let idx_val = self.evaluate_expression(index_expr, bindings)?;
                 match (list_val, idx_val) {
                     (Value::List(items), Value::Int(i)) => {
-                        let idx = if i < 0 {
-                            items.len() as i64 + i
-                        } else {
-                            i
-                        };
+                        let idx = if i < 0 { items.len() as i64 + i } else { i };
                         if idx >= 0 {
                             Ok(items.get(idx as usize).cloned().unwrap_or(Value::Null))
                         } else {
@@ -3973,7 +4035,7 @@ impl<'a> Executor<'a> {
                     _ => {
                         return Err(ExecuteError::TypeError(
                             "list comprehension requires a list".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let mut output = Vec::new();
@@ -3993,12 +4055,11 @@ impl<'a> Executor<'a> {
                 }
                 Ok(Value::List(output))
             }
-            Expression::Parameter(name) => {
-                self.params
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| ExecuteError::UndefinedVariable(format!("${}", name)))
-            }
+            Expression::Parameter(name) => self
+                .params
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ExecuteError::UndefinedVariable(format!("${}", name))),
             Expression::ExistsSubquery(subquery) => {
                 // Evaluate patterns starting from current bindings
                 let mut matches = vec![bindings.clone()];
@@ -4074,14 +4135,13 @@ impl<'a> Executor<'a> {
                     _ => {
                         return Err(ExecuteError::TypeError(
                             "list predicate requires a list".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let mut count = 0usize;
                 for item in &items {
                     let mut local_bindings = bindings.clone();
-                    local_bindings
-                        .insert(variable.clone(), BindingValue::Scalar(item.clone()));
+                    local_bindings.insert(variable.clone(), BindingValue::Scalar(item.clone()));
                     let pred_val = self.evaluate_expression(predicate, &local_bindings)?;
                     if matches!(pred_val, Value::Bool(true)) {
                         count += 1;
@@ -4186,9 +4246,8 @@ impl<'a> Executor<'a> {
                 (Value::String(s), Value::String(pattern)) => {
                     // Cypher =~ is full-match, so anchor the pattern
                     let anchored = format!("(?s)\\A(?:{})\\z", pattern);
-                    let re = Regex::new(&anchored).map_err(|e| {
-                        ExecuteError::TypeError(format!("invalid regex: {}", e))
-                    })?;
+                    let re = Regex::new(&anchored)
+                        .map_err(|e| ExecuteError::TypeError(format!("invalid regex: {}", e)))?;
                     Ok(Value::Bool(re.is_match(s)))
                 }
                 _ => Err(ExecuteError::TypeError(
@@ -4205,23 +4264,25 @@ impl<'a> Executor<'a> {
                 )),
             },
             BinaryOp::StartsWith => match (left, right) {
-                (Value::String(s), Value::String(prefix)) => {
-                    Ok(Value::Bool(s.to_lowercase().starts_with(&prefix.to_lowercase())))
-                }
+                (Value::String(s), Value::String(prefix)) => Ok(Value::Bool(
+                    s.to_lowercase().starts_with(&prefix.to_lowercase()),
+                )),
                 _ => Err(ExecuteError::TypeError(
                     "STARTS WITH requires string operands".to_string(),
                 )),
             },
             BinaryOp::EndsWith => match (left, right) {
-                (Value::String(s), Value::String(suffix)) => {
-                    Ok(Value::Bool(s.to_lowercase().ends_with(&suffix.to_lowercase())))
-                }
+                (Value::String(s), Value::String(suffix)) => Ok(Value::Bool(
+                    s.to_lowercase().ends_with(&suffix.to_lowercase()),
+                )),
                 _ => Err(ExecuteError::TypeError(
                     "ENDS WITH requires string operands".to_string(),
                 )),
             },
             BinaryOp::In => match right {
-                Value::List(items) => Ok(Value::Bool(items.iter().any(|item| self.values_equal(left, item)))),
+                Value::List(items) => Ok(Value::Bool(
+                    items.iter().any(|item| self.values_equal(left, item)),
+                )),
                 Value::Null => Ok(Value::Null),
                 _ => Ok(Value::Bool(false)),
             },
@@ -4794,7 +4855,11 @@ mod tests {
     #[test]
     fn test_order_by_asc() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
 
@@ -4806,8 +4871,14 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     #[test]
@@ -4815,7 +4886,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -4824,8 +4899,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 3);
-        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Charlie".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));
     }
 
@@ -4843,9 +4924,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 3);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
-        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     // ========== LIMIT tests ==========
@@ -4880,7 +4967,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -4889,8 +4980,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     #[test]
@@ -4898,7 +4995,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "David", age: 40})"#).unwrap();
 
         let result = execute(
@@ -4908,8 +5009,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     // ========== DISTINCT tests ==========
@@ -4917,15 +5024,23 @@ mod tests {
     #[test]
     fn test_distinct() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#).unwrap();
-
-        let result = execute(
+        execute(
             &mut graph,
-            "MATCH (n:Person) RETURN DISTINCT n.city",
+            r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#,
         )
         .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#,
+        )
+        .unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN DISTINCT n.city").unwrap();
 
         assert_eq!(result.row_count(), 2);
     }
@@ -4933,9 +5048,21 @@ mod tests {
     #[test]
     fn test_distinct_with_order_by() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Bob", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", city: "Osaka"})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -4944,8 +5071,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Osaka".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Tokyo".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Osaka".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Tokyo".to_string())
+        );
     }
 
     // ========== NULLS FIRST/LAST tests ==========
@@ -4956,7 +5089,11 @@ mod tests {
         // Create nodes with and without age property
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 25})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -4966,9 +5103,15 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         // ASC default: NULLS LAST
-        assert_eq!(result.rows[0].columns[0], Value::String("Charlie".to_string())); // age 25
-        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));   // age 30
-        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));     // NULL
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Charlie".to_string())
+        ); // age 25
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Alice".to_string())
+        ); // age 30
+        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string())); // NULL
         assert_eq!(result.rows[2].columns[1], Value::Null);
     }
 
@@ -4977,7 +5120,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 25})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -4987,9 +5134,15 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         // DESC default: NULLS FIRST
-        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));     // NULL
-        assert_eq!(result.rows[1].columns[0], Value::String("Alice".to_string()));   // age 30
-        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string())); // age 25
+        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string())); // NULL
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Alice".to_string())
+        ); // age 30
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Charlie".to_string())
+        ); // age 25
     }
 
     #[test]
@@ -4997,7 +5150,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 25})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -5007,9 +5164,15 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         // NULLS FIRST explicitly
-        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string()));     // NULL
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string())); // age 25
-        assert_eq!(result.rows[2].columns[0], Value::String("Alice".to_string()));   // age 30
+        assert_eq!(result.rows[0].columns[0], Value::String("Bob".to_string())); // NULL
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        ); // age 25
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Alice".to_string())
+        ); // age 30
     }
 
     #[test]
@@ -5017,7 +5180,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap(); // no age
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 25})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 25})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -5027,9 +5194,15 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         // NULLS LAST explicitly with DESC
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));   // age 30
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string())); // age 25
-        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string()));     // NULL
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        ); // age 30
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        ); // age 25
+        assert_eq!(result.rows[2].columns[0], Value::String("Bob".to_string())); // NULL
     }
 
     // ========== TopN optimization tests ==========
@@ -5041,7 +5214,11 @@ mod tests {
         for i in 1..=10 {
             execute(
                 &mut graph,
-                &format!(r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#, i, i * 10),
+                &format!(
+                    r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#,
+                    i,
+                    i * 10
+                ),
             )
             .unwrap();
         }
@@ -5055,8 +5232,8 @@ mod tests {
 
         assert_eq!(result.row_count(), 3);
         assert_eq!(result.rows[0].columns[1], Value::Int(100)); // age 100
-        assert_eq!(result.rows[1].columns[1], Value::Int(90));  // age 90
-        assert_eq!(result.rows[2].columns[1], Value::Int(80));  // age 80
+        assert_eq!(result.rows[1].columns[1], Value::Int(90)); // age 90
+        assert_eq!(result.rows[2].columns[1], Value::Int(80)); // age 80
     }
 
     #[test]
@@ -5066,7 +5243,11 @@ mod tests {
         for i in 1..=10 {
             execute(
                 &mut graph,
-                &format!(r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#, i, i * 10),
+                &format!(
+                    r#"CREATE (n:Person {{name: "Person{}", age: {}}})"#,
+                    i,
+                    i * 10
+                ),
             )
             .unwrap();
         }
@@ -5284,13 +5465,19 @@ mod tests {
 
         assert_eq!(result.row_count(), 3); // Alice, Bob, Charlie
         // Alice -> Bob
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
         // Bob has no outgoing KNOWS
         assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
         assert_eq!(result.rows[1].columns[1], Value::Null);
         // Charlie has no outgoing KNOWS
-        assert_eq!(result.rows[2].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[2].columns[0],
+            Value::String("Charlie".to_string())
+        );
         assert_eq!(result.rows[2].columns[1], Value::Null);
     }
 
@@ -5307,7 +5494,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[0].columns[1], Value::Null);
     }
 
@@ -5328,7 +5518,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
     }
 
@@ -5339,7 +5532,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 15})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 65})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 65})"#,
+        )
+        .unwrap();
 
         // Use CASE in WHERE to filter: only adults (age >= 18)
         let result = execute(
@@ -5349,8 +5546,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     #[test]
@@ -5367,7 +5570,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
@@ -5389,9 +5595,17 @@ mod tests {
     #[test]
     fn test_case_when_simple_form() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", status: 1})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice", status: 1})"#,
+        )
+        .unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", status: 2})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", status: 1})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", status: 1})"#,
+        )
+        .unwrap();
 
         // Simple CASE: CASE n.status WHEN 1 THEN true ELSE false END
         let result = execute(
@@ -5401,8 +5615,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     // ========== WITH clause tests ==========
@@ -5421,7 +5641,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
     }
 
@@ -5439,7 +5662,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::String("Bob".to_string()));
     }
 
@@ -5451,11 +5677,7 @@ mod tests {
         execute(&mut graph, r#"CREATE (n:Person {name: "Charlie"})"#).unwrap();
 
         // WITH n LIMIT 2 restricts intermediate results
-        let result = execute(
-            &mut graph,
-            "MATCH (n:Person) WITH n LIMIT 2 RETURN n.name",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:Person) WITH n LIMIT 2 RETURN n.name").unwrap();
 
         assert_eq!(result.row_count(), 2);
     }
@@ -5465,7 +5687,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Person {name: "Bob", age: 25})"#).unwrap();
-        execute(&mut graph, r#"CREATE (n:Person {name: "Charlie", age: 35})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Charlie", age: 35})"#,
+        )
+        .unwrap();
 
         // WITH + WHERE filters on projected values
         let result = execute(
@@ -5475,8 +5701,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
-        assert_eq!(result.rows[1].columns[0], Value::String("Charlie".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Charlie".to_string())
+        );
     }
 
     // ========== Regex match (=~) tests ==========
@@ -5495,7 +5727,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 2);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::String("Anna".to_string()));
     }
 
@@ -5583,7 +5818,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
@@ -5846,11 +6084,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:Adult) RETURN n.name"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:Adult) RETURN n.name"#).unwrap();
 
         assert_eq!(result.row_count(), 1);
         assert_eq!(
@@ -5914,11 +6148,7 @@ mod tests {
     fn test_merge_create_new() {
         let mut graph = Graph::new();
 
-        execute(
-            &mut graph,
-            r#"MERGE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
 
         assert_eq!(graph.node_count(), 1);
         let node = graph.nodes().next().unwrap();
@@ -5935,11 +6165,7 @@ mod tests {
         execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
         assert_eq!(graph.node_count(), 1);
 
-        execute(
-            &mut graph,
-            r#"MERGE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"MERGE (n:Person {name: "Alice"})"#).unwrap();
 
         // Should still be 1 node (matched existing)
         assert_eq!(graph.node_count(), 1);
@@ -6061,11 +6287,7 @@ mod tests {
     #[test]
     fn test_match_remove_with_return() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice", age: 30})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
 
         let result = execute(
             &mut graph,
@@ -6251,7 +6473,10 @@ mod tests {
         );
         assert!(results[0].is_ok());
         let rs = results[0].as_ref().unwrap();
-        assert_eq!(rs.rows[0].columns[0], Value::String("Constraint 'unique_email' created".to_string()));
+        assert_eq!(
+            rs.rows[0].columns[0],
+            Value::String("Constraint 'unique_email' created".to_string())
+        );
     }
 
     #[test]
@@ -6287,16 +6512,16 @@ mod tests {
         assert!(results[0].is_ok());
         assert!(results[1].is_ok());
         let rs = results[1].as_ref().unwrap();
-        assert_eq!(rs.rows[0].columns[0], Value::String("Constraint 'unique_email' dropped".to_string()));
+        assert_eq!(
+            rs.rows[0].columns[0],
+            Value::String("Constraint 'unique_email' dropped".to_string())
+        );
     }
 
     #[test]
     fn test_drop_nonexistent_constraint() {
         let mut graph = Graph::new();
-        let results = execute_with_constraints(
-            &mut graph,
-            &["DROP CONSTRAINT nonexistent"],
-        );
+        let results = execute_with_constraints(&mut graph, &["DROP CONSTRAINT nonexistent"]);
         assert!(matches!(results[0], Err(ExecuteError::ConstraintError(_))));
     }
 
@@ -6322,10 +6547,7 @@ mod tests {
     #[test]
     fn test_show_constraints_empty() {
         let mut graph = Graph::new();
-        let results = execute_with_constraints(
-            &mut graph,
-            &["SHOW CONSTRAINTS"],
-        );
+        let results = execute_with_constraints(&mut graph, &["SHOW CONSTRAINTS"]);
         assert!(results[0].is_ok());
         let rs = results[0].as_ref().unwrap();
         assert_eq!(rs.rows.len(), 0);
@@ -6509,10 +6731,11 @@ mod tests {
 
     #[test]
     fn test_parse_create_constraint() {
-        let stmt = Parser::new("CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let stmt =
+            Parser::new("CREATE CONSTRAINT unique_email FOR (n:Person) REQUIRE n.email IS UNIQUE")
+                .unwrap()
+                .parse()
+                .unwrap();
         if let Statement::CreateConstraint(cc) = stmt {
             assert_eq!(cc.name, "unique_email");
             assert_eq!(cc.label, "Person");
@@ -6525,10 +6748,11 @@ mod tests {
 
     #[test]
     fn test_parse_create_constraint_not_null() {
-        let stmt = Parser::new("CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let stmt =
+            Parser::new("CREATE CONSTRAINT require_name FOR (n:Person) REQUIRE n.name IS NOT NULL")
+                .unwrap()
+                .parse()
+                .unwrap();
         if let Statement::CreateConstraint(cc) = stmt {
             assert_eq!(cc.constraint_type, ConstraintTypeAst::NotNull);
         } else {
@@ -6538,12 +6762,16 @@ mod tests {
 
     #[test]
     fn test_parse_create_constraint_type_check() {
-        let stmt = Parser::new("CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let stmt =
+            Parser::new("CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER")
+                .unwrap()
+                .parse()
+                .unwrap();
         if let Statement::CreateConstraint(cc) = stmt {
-            assert_eq!(cc.constraint_type, ConstraintTypeAst::TypeCheck(PropertyTypeAst::Integer));
+            assert_eq!(
+                cc.constraint_type,
+                ConstraintTypeAst::TypeCheck(PropertyTypeAst::Integer)
+            );
         } else {
             panic!("expected CreateConstraint statement");
         }
@@ -6564,10 +6792,7 @@ mod tests {
 
     #[test]
     fn test_parse_show_constraints() {
-        let stmt = Parser::new("SHOW CONSTRAINTS")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let stmt = Parser::new("SHOW CONSTRAINTS").unwrap().parse().unwrap();
         assert_eq!(stmt, Statement::ShowConstraints);
     }
 
@@ -6627,11 +6852,7 @@ mod tests {
     #[test]
     fn test_explain_create() {
         let mut graph = Graph::new();
-        let result = execute(
-            &mut graph,
-            r#"EXPLAIN CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"EXPLAIN CREATE (n:Person {name: "Alice"})"#).unwrap();
         let plan_text: String = result
             .rows
             .iter()
@@ -6656,11 +6877,7 @@ mod tests {
         assert_eq!(graph.node_count(), 1);
 
         // EXPLAIN should not add/remove nodes
-        execute(
-            &mut graph,
-            r#"EXPLAIN CREATE (m:Person {name: "Bob"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"EXPLAIN CREATE (m:Person {name: "Bob"})"#).unwrap();
         assert_eq!(graph.node_count(), 1);
     }
 
@@ -6695,11 +6912,7 @@ mod tests {
     fn test_profile_executes_query() {
         let mut graph = Graph::new();
         // PROFILE CREATE should actually create the node (unlike EXPLAIN)
-        let result = execute(
-            &mut graph,
-            r#"PROFILE CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"PROFILE CREATE (n:Person {name: "Alice"})"#).unwrap();
         assert_eq!(graph.node_count(), 1);
         assert!(!result.rows.is_empty());
     }
@@ -6731,11 +6944,7 @@ mod tests {
     #[test]
     fn test_explain_merge() {
         let mut graph = Graph::new();
-        let result = execute(
-            &mut graph,
-            r#"EXPLAIN MERGE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"EXPLAIN MERGE (n:Person {name: "Alice"})"#).unwrap();
         let plan_text: String = result
             .rows
             .iter()
@@ -6827,12 +7036,11 @@ mod tests {
         let mut graph = Graph::new();
         let mut executor = Executor::new(&mut graph);
 
-        let stmt = Parser::new(
-            r#"CREATE FULLTEXT INDEX article_search FOR (n:Article) ON (n.title)"#,
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt =
+            Parser::new(r#"CREATE FULLTEXT INDEX article_search FOR (n:Article) ON (n.title)"#)
+                .unwrap()
+                .parse()
+                .unwrap();
         executor.execute(stmt).unwrap();
 
         let stmt = Parser::new("DROP FULLTEXT INDEX article_search")
@@ -6876,7 +7084,9 @@ mod tests {
         executor.execute(stmt).unwrap();
 
         // Verify the index has content
-        let results = executor.fulltext_manager().get_index("article_search")
+        let results = executor
+            .fulltext_manager()
+            .get_index("article_search")
             .unwrap()
             .search("graph");
         assert_eq!(results.len(), 1);
@@ -6884,12 +7094,10 @@ mod tests {
 
     #[test]
     fn test_parse_create_fulltext_index() {
-        let stmt = Parser::new(
-            r#"CREATE FULLTEXT INDEX my_idx FOR (n:Person) ON (n.name, n.bio)"#,
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt = Parser::new(r#"CREATE FULLTEXT INDEX my_idx FOR (n:Person) ON (n.name, n.bio)"#)
+            .unwrap()
+            .parse()
+            .unwrap();
         if let Statement::CreateFulltextIndex(cfi) = stmt {
             assert_eq!(cfi.name, "my_idx");
             assert_eq!(cfi.label, "Person");
@@ -6916,45 +7124,39 @@ mod tests {
     #[test]
     fn test_starts_with_operator() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE n.name STARTS WITH "Ali" RETURN n.name"#,
         )
         .unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
     fn test_ends_with_operator() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE n.name ENDS WITH "ice" RETURN n.name"#,
         )
         .unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
     fn test_starts_with_case_insensitive() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE n.name STARTS WITH "ali" RETURN n.name"#,
@@ -6966,11 +7168,7 @@ mod tests {
     #[test]
     fn test_ends_with_case_insensitive() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE n.name ENDS WITH "ICE" RETURN n.name"#,
@@ -6983,11 +7181,7 @@ mod tests {
     fn test_is_normalized() {
         let mut graph = Graph::new();
         // NFC normalized string (precomposed)
-        execute(
-            &mut graph,
-            "CREATE (n:Text {value: \"\u{00e9}\"})",
-        )
-        .unwrap();
+        execute(&mut graph, "CREATE (n:Text {value: \"\u{00e9}\"})").unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Text) WHERE n.value IS NORMALIZED RETURN n.value"#,
@@ -7000,11 +7194,7 @@ mod tests {
     fn test_is_not_normalized() {
         let mut graph = Graph::new();
         // NFD string (decomposed: e + combining acute accent)
-        execute(
-            &mut graph,
-            "CREATE (n:Text {value: \"e\u{0301}\"})",
-        )
-        .unwrap();
+        execute(&mut graph, "CREATE (n:Text {value: \"e\u{0301}\"})").unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Text) WHERE n.value IS NORMALIZED RETURN n.value"#,
@@ -7018,11 +7208,7 @@ mod tests {
         // WHERE clause errors are treated as non-matching (unwrap_or(false)),
         // so type mismatches result in 0 rows rather than errors.
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {age: 30})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {age: 30})"#).unwrap();
         let result = execute(
             &mut graph,
             r#"MATCH (n:Person) WHERE n.age STARTS WITH "3" RETURN n"#,
@@ -7052,27 +7238,24 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "  hello  "})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN trim(n.val)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN trim(n.val)"#).unwrap();
         assert_eq!(result.columns, vec!["trim(n.val)"]);
-        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello".to_string())
+        );
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN ltrim(n.val)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("hello  ".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN ltrim(n.val)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello  ".to_string())
+        );
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN rtrim(n.val)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("  hello".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN rtrim(n.val)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("  hello".to_string())
+        );
     }
 
     #[test]
@@ -7080,19 +7263,17 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "Hello World"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toLower(n.val)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("hello world".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toLower(n.val)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello world".to_string())
+        );
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toUpper(n.val)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("HELLO WORLD".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toUpper(n.val)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("HELLO WORLD".to_string())
+        );
     }
 
     #[test]
@@ -7100,12 +7281,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "abcde"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN reverse(n.val)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("edcba".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN reverse(n.val)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("edcba".to_string())
+        );
     }
 
     #[test]
@@ -7114,20 +7294,18 @@ mod tests {
         execute(&mut graph, r#"CREATE (n:T {val: "hello world"})"#).unwrap();
 
         // 2引数: start から末尾まで
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN substring(n.val, 6)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("world".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN substring(n.val, 6)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("world".to_string())
+        );
 
         // 3引数: start から len 文字
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN substring(n.val, 0, 5)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN substring(n.val, 0, 5)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello".to_string())
+        );
     }
 
     #[test]
@@ -7135,19 +7313,17 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "hello world"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN left(n.val, 5)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN left(n.val, 5)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello".to_string())
+        );
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN right(n.val, 5)"#,
-        )
-        .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("world".to_string()));
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN right(n.val, 5)"#).unwrap();
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("world".to_string())
+        );
     }
 
     #[test]
@@ -7155,11 +7331,7 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "a,b,c"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN split(n.val, ",")"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN split(n.val, ",")"#).unwrap();
         assert_eq!(
             result.rows[0].columns[0],
             Value::List(vec![
@@ -7180,7 +7352,10 @@ mod tests {
             r#"MATCH (n:T) RETURN replace(n.val, "world", "rust")"#,
         )
         .unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::String("hello rust".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello rust".to_string())
+        );
     }
 
     #[test]
@@ -7192,32 +7367,16 @@ mod tests {
         )
         .unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toString(n.i)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toString(n.i)"#).unwrap();
         assert_eq!(result.rows[0].columns[0], Value::String("42".to_string()));
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toString(n.f)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toString(n.f)"#).unwrap();
         assert_eq!(result.rows[0].columns[0], Value::String("3.14".to_string()));
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toString(n.b)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toString(n.b)"#).unwrap();
         assert_eq!(result.rows[0].columns[0], Value::String("true".to_string()));
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN toString(n.s)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN toString(n.s)"#).unwrap();
         assert_eq!(result.rows[0].columns[0], Value::String("hi".to_string()));
     }
 
@@ -7226,11 +7385,7 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:T {val: "hello"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:T) RETURN size(n.val)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:T) RETURN size(n.val)"#).unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
     }
 
@@ -7239,8 +7394,16 @@ mod tests {
         let mut graph = Graph::new();
         // Test negative int and float
         execute(&mut graph, "CREATE (n:T)").unwrap();
-        graph.get_node_mut(0).unwrap().properties.insert("i".to_string(), PropertyValue::Int(-5));
-        graph.get_node_mut(0).unwrap().properties.insert("f".to_string(), PropertyValue::Float(-3.14));
+        graph
+            .get_node_mut(0)
+            .unwrap()
+            .properties
+            .insert("i".to_string(), PropertyValue::Int(-5));
+        graph
+            .get_node_mut(0)
+            .unwrap()
+            .properties
+            .insert("f".to_string(), PropertyValue::Float(-3.14));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN abs(n.i)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
@@ -7259,7 +7422,11 @@ mod tests {
     fn test_ceil_floor() {
         let mut graph = Graph::new();
         execute(&mut graph, "CREATE (n:T {f: 3.2, i: 5})").unwrap();
-        graph.get_node_mut(0).unwrap().properties.insert("g".to_string(), PropertyValue::Float(-2.7));
+        graph
+            .get_node_mut(0)
+            .unwrap()
+            .properties
+            .insert("g".to_string(), PropertyValue::Float(-2.7));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN ceil(n.f)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(4));
@@ -7306,8 +7473,16 @@ mod tests {
     fn test_sign() {
         let mut graph = Graph::new();
         execute(&mut graph, "CREATE (n:T {pos: 5, zero: 0, fpos: 2.5})").unwrap();
-        graph.get_node_mut(0).unwrap().properties.insert("neg".to_string(), PropertyValue::Int(-3));
-        graph.get_node_mut(0).unwrap().properties.insert("fneg".to_string(), PropertyValue::Float(-1.5));
+        graph
+            .get_node_mut(0)
+            .unwrap()
+            .properties
+            .insert("neg".to_string(), PropertyValue::Int(-3));
+        graph
+            .get_node_mut(0)
+            .unwrap()
+            .properties
+            .insert("fneg".to_string(), PropertyValue::Float(-1.5));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.pos)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(1));
@@ -7333,7 +7508,11 @@ mod tests {
         let result = execute(&mut graph, "MATCH (n:T) RETURN rand()").unwrap();
         match &result.rows[0].columns[0] {
             Value::Float(f) => {
-                assert!(*f >= 0.0 && *f < 1.0, "rand() should be in [0.0, 1.0), got {}", f);
+                assert!(
+                    *f >= 0.0 && *f < 1.0,
+                    "rand() should be in [0.0, 1.0), got {}",
+                    f
+                );
             }
             other => panic!("Expected Float, got {:?}", other),
         }
@@ -7356,7 +7535,11 @@ mod tests {
     #[test]
     fn test_log_log10_sqrt() {
         let mut graph = Graph::new();
-        execute(&mut graph, "CREATE (n:T {val: 100, fval: 2.718281828459045})").unwrap();
+        execute(
+            &mut graph,
+            "CREATE (n:T {val: 100, fval: 2.718281828459045})",
+        )
+        .unwrap();
 
         // log(e) ≈ 1.0
         let result = execute(&mut graph, "MATCH (n:T) RETURN log(n.fval)").unwrap();
@@ -7383,7 +7566,10 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Float(std::f64::consts::E));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN pi()").unwrap();
-        assert_eq!(result.rows[0].columns[0], Value::Float(std::f64::consts::PI));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::Float(std::f64::consts::PI)
+        );
     }
 
     // ========== Metadata function tests ==========
@@ -7425,7 +7611,11 @@ mod tests {
         .unwrap();
 
         // Node element ID
-        let result = execute(&mut graph, "MATCH (n:Person) RETURN elementId(n) ORDER BY id(n)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN elementId(n) ORDER BY id(n)",
+        )
+        .unwrap();
         match &result.rows[0].columns[0] {
             Value::String(s) => assert!(s.starts_with("node:")),
             other => panic!("expected String starting with 'node:', got {:?}", other),
@@ -7442,15 +7632,14 @@ mod tests {
     #[test]
     fn test_type_function() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (a:Person)-[:KNOWS]->(b:Person)"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (a:Person)-[:KNOWS]->(b:Person)"#).unwrap();
 
         let result = execute(&mut graph, "MATCH (a)-[r:KNOWS]->(b) RETURN type(r)").unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("KNOWS".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("KNOWS".to_string())
+        );
     }
 
     #[test]
@@ -7466,7 +7655,9 @@ mod tests {
         let result = execute(&mut graph, "MATCH (a)-[r:KNOWS]->(b) RETURN startNode(r)").unwrap();
         assert_eq!(result.rows.len(), 1);
         match &result.rows[0].columns[0] {
-            Value::NodeData { label, properties, .. } => {
+            Value::NodeData {
+                label, properties, ..
+            } => {
                 assert_eq!(label, "Person");
                 assert_eq!(
                     properties.get("name"),
@@ -7479,7 +7670,9 @@ mod tests {
         // endNode
         let result = execute(&mut graph, "MATCH (a)-[r:KNOWS]->(b) RETURN endNode(r)").unwrap();
         match &result.rows[0].columns[0] {
-            Value::NodeData { label, properties, .. } => {
+            Value::NodeData {
+                label, properties, ..
+            } => {
                 assert_eq!(label, "Person");
                 assert_eq!(
                     properties.get("name"),
@@ -7506,11 +7699,7 @@ mod tests {
     #[test]
     fn test_properties_keys() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice", age: 30})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap();
 
         // properties - returns list of [key, value] pairs
         let result = execute(&mut graph, "MATCH (n:Person) RETURN properties(n)").unwrap();
@@ -7555,7 +7744,11 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Int(99));
 
         // coalesce with all nulls
-        let result = execute(&mut graph, "MATCH (n:T) RETURN coalesce(n.missing, n.also_missing)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN coalesce(n.missing, n.also_missing)",
+        )
+        .unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Null);
     }
 
@@ -7653,11 +7846,7 @@ mod tests {
     #[test]
     fn test_in_operator() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Item {val: 2})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Item {val: 2})"#).unwrap();
         let result = execute(
             &mut graph,
             "MATCH (n:Item) WHERE n.val IN [1, 2, 3] RETURN n.val",
@@ -7685,11 +7874,7 @@ mod tests {
     #[test]
     fn test_list_concatenation() {
         let mut graph = Graph::new();
-        let result = execute(
-            &mut graph,
-            "UNWIND [1, 2] + [3, 4] AS x RETURN x",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "UNWIND [1, 2] + [3, 4] AS x RETURN x").unwrap();
         assert_eq!(result.row_count(), 4);
         assert_eq!(result.rows[0].columns[0], Value::Int(1));
         assert_eq!(result.rows[3].columns[0], Value::Int(4));
@@ -7713,11 +7898,7 @@ mod tests {
     fn test_size_list() {
         let mut graph = Graph::new();
         execute(&mut graph, "CREATE (n:T)").unwrap();
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN size([1, 2, 3])",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN size([1, 2, 3])").unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(3));
     }
@@ -7726,11 +7907,7 @@ mod tests {
     fn test_reverse_list() {
         let mut graph = Graph::new();
         execute(&mut graph, "CREATE (n:T)").unwrap();
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN reverse([1, 2, 3])",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN reverse([1, 2, 3])").unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(
             result.rows[0].columns[0],
@@ -7903,11 +8080,7 @@ mod tests {
         execute(&mut graph, r#"CREATE (n:City {name: "Kyoto"})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:City {name: "Osaka"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            "MATCH (n:City) RETURN COUNT(DISTINCT n.name)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:City) RETURN COUNT(DISTINCT n.name)").unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(3));
     }
@@ -7947,11 +8120,7 @@ mod tests {
         execute(&mut graph, r#"CREATE (n:Tag {name: "python"})"#).unwrap();
         execute(&mut graph, r#"CREATE (n:Tag {name: "rust"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            "MATCH (n:Tag) RETURN COLLECT(DISTINCT n.name)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:Tag) RETURN COLLECT(DISTINCT n.name)").unwrap();
         assert_eq!(result.row_count(), 1);
         // Should be a list with 2 distinct values
         if let Value::List(items) = &result.rows[0].columns[0] {
@@ -8046,12 +8215,11 @@ mod tests {
         let mut graph = Graph::new();
         execute(&mut graph, r#"CREATE (n:Person {name: "Dave", age: 20})"#).unwrap();
 
-        let stmt = Parser::new(
-            r#"MATCH (n:Person {name: "Dave"}) SET n.age = $new_age RETURN n.age"#,
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt =
+            Parser::new(r#"MATCH (n:Person {name: "Dave"}) SET n.age = $new_age RETURN n.age"#)
+                .unwrap()
+                .parse()
+                .unwrap();
 
         let mut params = HashMap::new();
         params.insert("new_age".to_string(), Value::Int(21));
@@ -8082,6 +8250,98 @@ mod tests {
         let _ = result;
     }
 
+    // ========== SKIP/LIMIT parameter tests ==========
+
+    #[test]
+    fn test_limit_with_param() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Carol"})"#).unwrap();
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n.name LIMIT $count")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("count".to_string(), Value::Int(2));
+
+        let result = Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_skip_with_param() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Carol"})"#).unwrap();
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n.name SKIP $offset")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("offset".to_string(), Value::Int(2));
+
+        let result = Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[test]
+    fn test_skip_and_limit_with_params() {
+        let mut graph = Graph::new();
+        for i in 1..=5i64 {
+            execute(
+                &mut graph,
+                &format!(r#"CREATE (n:Item {{val: {}}})"#, i),
+            )
+            .unwrap();
+        }
+
+        let stmt =
+            Parser::new("MATCH (n:Item) RETURN n.val ORDER BY n.val SKIP $offset LIMIT $count")
+                .unwrap()
+                .parse()
+                .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("offset".to_string(), Value::Int(1));
+        params.insert("count".to_string(), Value::Int(2));
+
+        let result = Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        // Items: 1,2,3,4,5 -> skip 1 -> 2,3,4,5 -> limit 2 -> 2,3
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2));
+        assert_eq!(result.rows[1].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_limit_with_param_undefined_error() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+
+        let stmt = Parser::new("MATCH (n:Person) RETURN n.name LIMIT $missing")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let result = Executor::new(&mut graph).execute_with_params(stmt, HashMap::new());
+        // $missing is not defined: should return an error
+        assert!(result.is_err());
+    }
+
     // ========== Subquery tests ==========
 
     #[test]
@@ -8101,7 +8361,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
@@ -8131,11 +8394,7 @@ mod tests {
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
         )
         .unwrap();
-        execute(
-            &mut graph,
-            r#"CREATE (c:Person {name: "Charlie"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (c:Person {name: "Charlie"})"#).unwrap();
 
         // Only Alice has KNOWS relationship
         let result = execute(
@@ -8145,7 +8404,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
@@ -8161,11 +8423,7 @@ mod tests {
             r#"CREATE (:Person {name: "Alice"})-[:KNOWS]->(:Person {name: "Carol"})"#,
         )
         .unwrap();
-        execute(
-            &mut graph,
-            r#"CREATE (:Person {name: "Dave"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Dave"})"#).unwrap();
 
         // People with more than 0 KNOWS connections (Alice instances have 1 each)
         let result = execute(
@@ -8234,11 +8492,7 @@ mod tests {
     #[test]
     fn test_collect_subquery_empty() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Alice"})"#).unwrap();
 
         // COLLECT on empty pattern match returns empty list
         let result = execute(
@@ -8333,18 +8587,17 @@ mod tests {
 
         // Only Alice knows someone in Tokyo
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 
     #[test]
     fn test_count_subquery_return_value() {
         let mut graph = Graph::new();
         // Person with no friends
-        execute(
-            &mut graph,
-            r#"CREATE (:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Alice"})"#).unwrap();
 
         let result = execute(
             &mut graph,
@@ -8528,11 +8781,7 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
 
         // all() on empty list → true (vacuously true)
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN all(x IN [] WHERE x > 0)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN all(x IN [] WHERE x > 0)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Bool(true));
     }
 
@@ -8559,11 +8808,7 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
 
         // any() on empty list → false
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN any(x IN [] WHERE x > 0)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN any(x IN [] WHERE x > 0)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
     }
 
@@ -8590,11 +8835,7 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
 
         // none() on empty list → true
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN none(x IN [] WHERE x > 0)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN none(x IN [] WHERE x > 0)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Bool(true));
     }
 
@@ -8621,11 +8862,7 @@ mod tests {
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
 
         // single() on empty list → false
-        let result = execute(
-            &mut graph,
-            "MATCH (n:T) RETURN single(x IN [] WHERE x = 1)",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN single(x IN [] WHERE x = 1)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Bool(false));
 
         // single(x IN [1,2,3] WHERE x > 5) → false (zero satisfy)
@@ -8647,11 +8884,7 @@ mod tests {
         )
         .unwrap();
         // Create a node without email property
-        execute(
-            &mut graph,
-            r#"CREATE (:Person {name: "Bob"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Bob"})"#).unwrap();
 
         // nodes with email should be found by exists(n.email)
         let result = execute(

@@ -147,10 +147,10 @@ pub struct WithClause {
     pub items: Vec<WithItem>,
     /// ORDER BY句
     pub order_by: Option<OrderByClause>,
-    /// SKIP句
-    pub skip: Option<u64>,
-    /// LIMIT句
-    pub limit: Option<u64>,
+    /// SKIP句（整数リテラルまたはパラメータ式）
+    pub skip: Option<Expression>,
+    /// LIMIT句（整数リテラルまたはパラメータ式）
+    pub limit: Option<Expression>,
 }
 
 /// WITH項目
@@ -262,10 +262,10 @@ pub struct ReturnClause {
     pub items: Vec<ReturnItem>,
     /// ORDER BY句
     pub order_by: Option<OrderByClause>,
-    /// SKIP句
-    pub skip: Option<u64>,
-    /// LIMIT句
-    pub limit: Option<u64>,
+    /// SKIP句（整数リテラルまたはパラメータ式）
+    pub skip: Option<Expression>,
+    /// LIMIT句（整数リテラルまたはパラメータ式）
+    pub limit: Option<Expression>,
 }
 
 /// ORDER BY句

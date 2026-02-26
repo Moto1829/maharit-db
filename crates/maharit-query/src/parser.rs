@@ -82,9 +82,9 @@ impl Parser {
             Some(TokenKind::Alter) => return self.parse_alter_user(),
             Some(TokenKind::Show) => return self.parse_show(),
             Some(_) => {
-                return Err(
-                    self.unexpected_token("CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, EXPLAIN, or PROFILE"),
-                )
+                return Err(self.unexpected_token(
+                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, EXPLAIN, or PROFILE",
+                ));
             }
             None => return Err(ParseError::UnexpectedEof),
         };
@@ -465,7 +465,7 @@ impl Parser {
         // SKIP (optional)
         let skip = if self.check(TokenKind::Skip) {
             self.advance();
-            Some(self.parse_positive_int()?)
+            Some(self.parse_skip_limit_expr()?)
         } else {
             None
         };
@@ -473,7 +473,7 @@ impl Parser {
         // LIMIT (optional)
         let limit = if self.check(TokenKind::Limit) {
             self.advance();
-            Some(self.parse_positive_int()?)
+            Some(self.parse_skip_limit_expr()?)
         } else {
             None
         };
@@ -605,7 +605,7 @@ impl Parser {
         // SKIP (optional)
         let skip = if self.check(TokenKind::Skip) {
             self.advance();
-            Some(self.parse_positive_int()?)
+            Some(self.parse_skip_limit_expr()?)
         } else {
             None
         };
@@ -613,7 +613,7 @@ impl Parser {
         // LIMIT (optional)
         let limit = if self.check(TokenKind::Limit) {
             self.advance();
-            Some(self.parse_positive_int()?)
+            Some(self.parse_skip_limit_expr()?)
         } else {
             None
         };
@@ -686,13 +686,18 @@ impl Parser {
         })
     }
 
-    fn parse_positive_int(&mut self) -> Result<u64, ParseError> {
+    /// SKIP / LIMIT の値をパースする。整数リテラルまたは $param 形式を受け付ける。
+    fn parse_skip_limit_expr(&mut self) -> Result<Expression, ParseError> {
         match self.peek_kind().cloned() {
             Some(TokenKind::Int(n)) if n >= 0 => {
                 self.advance();
-                Ok(n as u64)
+                Ok(Expression::Literal(Literal::Int(n)))
             }
-            _ => Err(self.unexpected_token("positive integer")),
+            Some(TokenKind::Parameter(name)) => {
+                self.advance();
+                Ok(Expression::Parameter(name))
+            }
+            _ => Err(self.unexpected_token("positive integer or $parameter")),
         }
     }
 
@@ -748,19 +753,25 @@ impl Parser {
                     self.advance(); // consume '{'
                     let subquery = self.parse_subquery_pattern()?;
                     self.expect(TokenKind::RBrace)?;
-                    return Ok(ReturnItem::Expr(Expression::ExistsSubquery(Box::new(subquery))));
+                    return Ok(ReturnItem::Expr(Expression::ExistsSubquery(Box::new(
+                        subquery,
+                    ))));
                 }
                 "COUNT" => {
                     self.advance(); // consume '{'
                     let subquery = self.parse_subquery_pattern()?;
                     self.expect(TokenKind::RBrace)?;
-                    return Ok(ReturnItem::Expr(Expression::CountSubquery(Box::new(subquery))));
+                    return Ok(ReturnItem::Expr(Expression::CountSubquery(Box::new(
+                        subquery,
+                    ))));
                 }
                 "COLLECT" => {
                     self.advance(); // consume '{'
                     let body = self.parse_collect_subquery_body()?;
                     self.expect(TokenKind::RBrace)?;
-                    return Ok(ReturnItem::Expr(Expression::CollectSubquery(Box::new(body))));
+                    return Ok(ReturnItem::Expr(Expression::CollectSubquery(Box::new(
+                        body,
+                    ))));
                 }
                 _ => {}
             }
@@ -960,7 +971,8 @@ impl Parser {
                 )));
             }
             // Variable name pattern functions (node/edge metadata)
-            "id" | "elementid" | "type" | "startnode" | "endnode" | "labels" | "properties" | "keys" => {
+            "id" | "elementid" | "type" | "startnode" | "endnode" | "labels" | "properties"
+            | "keys" => {
                 let var = self.expect_ident()?;
                 self.expect(TokenKind::RParen)?;
                 let scalar = match func_name.to_lowercase().as_str() {
@@ -1610,12 +1622,14 @@ impl Parser {
 
         self.expect(TokenKind::RParen)?;
 
-        Ok(Statement::CreateFulltextIndex(CreateFulltextIndexStatement {
-            name,
-            label,
-            variable,
-            properties,
-        }))
+        Ok(Statement::CreateFulltextIndex(
+            CreateFulltextIndexStatement {
+                name,
+                label,
+                variable,
+                properties,
+            },
+        ))
     }
 
     /// DROP FULLTEXT INDEX name
@@ -1625,7 +1639,9 @@ impl Parser {
         self.expect(TokenKind::Index)?;
         let name = self.expect_ident()?;
 
-        Ok(Statement::DropFulltextIndex(DropFulltextIndexStatement { name }))
+        Ok(Statement::DropFulltextIndex(DropFulltextIndexStatement {
+            name,
+        }))
     }
 
     // ========== User Management ==========
@@ -2142,11 +2158,7 @@ impl Parser {
                 self.advance(); // second dot
                 let end = self.parse_expression()?;
                 self.expect(TokenKind::RBracket)?;
-                expr = Expression::ListSlice(
-                    Box::new(expr),
-                    Box::new(start),
-                    Box::new(end),
-                );
+                expr = Expression::ListSlice(Box::new(expr), Box::new(start), Box::new(end));
             } else {
                 self.expect(TokenKind::RBracket)?;
                 expr = Expression::IndexAccess(Box::new(expr), Box::new(start));
@@ -2988,10 +3000,9 @@ mod tests {
     #[test]
     fn test_case_when_searched() {
         // Searched CASE: CASE WHEN condition THEN result ... END
-        let stmt = parse(
-            "MATCH (n:Person) WHERE CASE WHEN n.age < 20 THEN true ELSE false END RETURN n",
-        )
-        .unwrap();
+        let stmt =
+            parse("MATCH (n:Person) WHERE CASE WHEN n.age < 20 THEN true ELSE false END RETURN n")
+                .unwrap();
 
         if let Statement::Match(m) = stmt {
             assert!(m.segments[0].where_clause.is_some());
@@ -3096,8 +3107,7 @@ mod tests {
 
     #[test]
     fn test_with_order_by() {
-        let stmt =
-            parse("MATCH (n:Person) WITH n ORDER BY n.age RETURN n").unwrap();
+        let stmt = parse("MATCH (n:Person) WITH n ORDER BY n.age RETURN n").unwrap();
 
         if let Statement::Match(m) = stmt {
             let with = m.segments[0].with_clause.as_ref().unwrap();
@@ -3115,7 +3125,10 @@ mod tests {
 
         if let Statement::Match(m) = stmt {
             let with = m.segments[0].with_clause.as_ref().unwrap();
-            assert_eq!(with.limit, Some(10));
+            assert_eq!(
+                with.limit,
+                Some(Expression::Literal(Literal::Int(10)))
+            );
         } else {
             panic!("expected MATCH statement");
         }
@@ -3127,7 +3140,10 @@ mod tests {
 
         if let Statement::Match(m) = stmt {
             let with = m.segments[0].with_clause.as_ref().unwrap();
-            assert_eq!(with.skip, Some(5));
+            assert_eq!(
+                with.skip,
+                Some(Expression::Literal(Literal::Int(5)))
+            );
         } else {
             panic!("expected MATCH statement");
         }
@@ -3151,9 +3167,10 @@ mod tests {
 
     #[test]
     fn test_with_where() {
-        let stmt =
-            parse("MATCH (n:Person) WITH n.city AS city, COUNT(*) AS count WHERE count > 5 RETURN city")
-                .unwrap();
+        let stmt = parse(
+            "MATCH (n:Person) WITH n.city AS city, COUNT(*) AS count WHERE count > 5 RETURN city",
+        )
+        .unwrap();
 
         if let Statement::Match(m) = stmt {
             // First segment has MATCH and WITH
@@ -3169,10 +3186,7 @@ mod tests {
 
     #[test]
     fn test_multiple_with() {
-        let stmt = parse(
-            "MATCH (n:Person) WITH n.city AS city WITH city RETURN city",
-        )
-        .unwrap();
+        let stmt = parse("MATCH (n:Person) WITH n.city AS city WITH city RETURN city").unwrap();
 
         if let Statement::Match(m) = stmt {
             // MATCH + WITH creates 1 segment, second WITH creates another
@@ -3214,10 +3228,8 @@ mod tests {
 
     #[test]
     fn test_union_parse() {
-        let stmt = parse(
-            "MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name",
-        )
-        .unwrap();
+        let stmt =
+            parse("MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name").unwrap();
 
         if let Statement::Union(u) = stmt {
             assert_eq!(u.queries.len(), 2);
@@ -3229,10 +3241,9 @@ mod tests {
 
     #[test]
     fn test_union_all_parse() {
-        let stmt = parse(
-            "MATCH (n:Person) RETURN n.name UNION ALL MATCH (n:Company) RETURN n.name",
-        )
-        .unwrap();
+        let stmt =
+            parse("MATCH (n:Person) RETURN n.name UNION ALL MATCH (n:Company) RETURN n.name")
+                .unwrap();
 
         if let Statement::Union(u) = stmt {
             assert_eq!(u.queries.len(), 2);
@@ -3292,10 +3303,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_set_standalone() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31 RETURN n"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31 RETURN n"#).unwrap();
 
         if let Statement::MatchSet(ms) = stmt {
             assert_eq!(ms.set_clause.items.len(), 1);
@@ -3307,10 +3315,9 @@ mod tests {
 
     #[test]
     fn test_parse_match_set_multiple() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31, n.city = "Tokyo" RETURN n"#,
-        )
-        .unwrap();
+        let stmt =
+            parse(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31, n.city = "Tokyo" RETURN n"#)
+                .unwrap();
 
         if let Statement::MatchSet(ms) = stmt {
             assert_eq!(ms.set_clause.items.len(), 2);
@@ -3321,10 +3328,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_set_no_return() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#).unwrap();
 
         if let Statement::MatchSet(ms) = stmt {
             assert!(ms.return_clause.is_none());
@@ -3351,10 +3355,7 @@ mod tests {
 
     #[test]
     fn test_parse_merge_with_on_create_set() {
-        let stmt = parse(
-            r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MERGE (n:Person {name: "Alice"}) ON CREATE SET n.age = 25"#).unwrap();
 
         if let Statement::Merge(m) = stmt {
             assert!(m.on_create_set.is_some());
@@ -3396,10 +3397,7 @@ mod tests {
 
     #[test]
     fn test_parse_merge_with_return() {
-        let stmt = parse(
-            r#"MERGE (n:Person {name: "Alice"}) RETURN n"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MERGE (n:Person {name: "Alice"}) RETURN n"#).unwrap();
 
         if let Statement::Merge(m) = stmt {
             assert!(m.return_clause.is_some());
@@ -3412,14 +3410,14 @@ mod tests {
 
     #[test]
     fn test_parse_match_remove_property() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age RETURN n"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age RETURN n"#).unwrap();
 
         if let Statement::MatchRemove(mr) = stmt {
             assert_eq!(mr.remove_clause.items.len(), 1);
-            assert!(matches!(mr.remove_clause.items[0], RemoveItem::Property(_, _)));
+            assert!(matches!(
+                mr.remove_clause.items[0],
+                RemoveItem::Property(_, _)
+            ));
             assert!(mr.return_clause.is_some());
         } else {
             panic!("expected MatchRemove statement, got {:?}", stmt);
@@ -3428,10 +3426,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_remove_label() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) REMOVE n:Person RETURN n"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MATCH (n:Person {name: "Alice"}) REMOVE n:Person RETURN n"#).unwrap();
 
         if let Statement::MatchRemove(mr) = stmt {
             assert_eq!(mr.remove_clause.items.len(), 1);
@@ -3448,10 +3443,8 @@ mod tests {
 
     #[test]
     fn test_parse_match_remove_multiple() {
-        let stmt = parse(
-            r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age, n.city RETURN n"#,
-        )
-        .unwrap();
+        let stmt =
+            parse(r#"MATCH (n:Person {name: "Alice"}) REMOVE n.age, n.city RETURN n"#).unwrap();
 
         if let Statement::MatchRemove(mr) = stmt {
             assert_eq!(mr.remove_clause.items.len(), 2);
@@ -3537,23 +3530,32 @@ mod tests {
         let stmt = parse(
             r#"MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->(f:Person) WHERE f.name = "Bob" } RETURN p.name"#,
         );
-        assert!(stmt.is_ok(), "Failed to parse EXISTS subquery with WHERE: {:?}", stmt);
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse EXISTS subquery with WHERE: {:?}",
+            stmt
+        );
     }
 
     #[test]
     fn test_parse_count_subquery_in_where() {
-        let stmt = parse(
-            r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 5 RETURN p.name"#,
+        let stmt =
+            parse(r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 5 RETURN p.name"#);
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse COUNT subquery in WHERE: {:?}",
+            stmt
         );
-        assert!(stmt.is_ok(), "Failed to parse COUNT subquery in WHERE: {:?}", stmt);
     }
 
     #[test]
     fn test_parse_count_subquery_in_return() {
-        let stmt = parse(
-            r#"MATCH (p:Person) RETURN COUNT { MATCH (p)-[:KNOWS]->() }"#,
+        let stmt = parse(r#"MATCH (p:Person) RETURN COUNT { MATCH (p)-[:KNOWS]->() }"#);
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse COUNT subquery in RETURN: {:?}",
+            stmt
         );
-        assert!(stmt.is_ok(), "Failed to parse COUNT subquery in RETURN: {:?}", stmt);
     }
 
     #[test]
@@ -3575,7 +3577,11 @@ mod tests {
                }
                RETURN p.name, friend_count"#,
         );
-        assert!(stmt.is_ok(), "Failed to parse CALL subquery with WITH: {:?}", stmt);
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse CALL subquery with WITH: {:?}",
+            stmt
+        );
     }
 
     #[test]
@@ -3588,7 +3594,11 @@ mod tests {
                }
                RETURN p.name, total"#,
         );
-        assert!(stmt.is_ok(), "Failed to parse CALL subquery without WITH: {:?}", stmt);
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse CALL subquery without WITH: {:?}",
+            stmt
+        );
     }
 
     #[test]
@@ -3624,7 +3634,10 @@ mod tests {
         match stmt {
             Statement::Match(m) => {
                 let segment = &m.segments[0];
-                let where_expr = segment.where_clause.as_ref().expect("Expected WHERE clause");
+                let where_expr = segment
+                    .where_clause
+                    .as_ref()
+                    .expect("Expected WHERE clause");
                 assert!(
                     matches!(where_expr, Expression::ExistsSubquery(_)),
                     "Expected ExistsSubquery expression, got {:?}",
@@ -3637,15 +3650,17 @@ mod tests {
 
     #[test]
     fn test_parse_count_subquery_ast_structure() {
-        let stmt = parse(
-            r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 0 RETURN p.name"#,
-        )
-        .unwrap();
+        let stmt =
+            parse(r#"MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]->() } > 0 RETURN p.name"#)
+                .unwrap();
 
         match stmt {
             Statement::Match(m) => {
                 let segment = &m.segments[0];
-                let where_expr = segment.where_clause.as_ref().expect("Expected WHERE clause");
+                let where_expr = segment
+                    .where_clause
+                    .as_ref()
+                    .expect("Expected WHERE clause");
                 // The WHERE clause is: COUNT{...} > 0, which is a BinaryOp
                 assert!(
                     matches!(where_expr, Expression::BinaryOp(_, _, _)),
@@ -3686,8 +3701,8 @@ mod tests {
 
     #[test]
     fn test_foreach_create() {
-        let stmt = parse(r#"FOREACH (name IN ['Alice', 'Bob'] | CREATE (:Person {name: name}))"#)
-            .unwrap();
+        let stmt =
+            parse(r#"FOREACH (name IN ['Alice', 'Bob'] | CREATE (:Person {name: name}))"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "name");
@@ -3700,10 +3715,7 @@ mod tests {
 
     #[test]
     fn test_foreach_set() {
-        let stmt = parse(
-            r#"FOREACH (n IN [1, 2, 3] | SET n.visited = true)"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"FOREACH (n IN [1, 2, 3] | SET n.visited = true)"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "n");
@@ -3716,10 +3728,7 @@ mod tests {
 
     #[test]
     fn test_foreach_remove() {
-        let stmt = parse(
-            r#"FOREACH (n IN [1] | REMOVE n.prop)"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"FOREACH (n IN [1] | REMOVE n.prop)"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "n");
@@ -3732,10 +3741,7 @@ mod tests {
 
     #[test]
     fn test_foreach_delete() {
-        let stmt = parse(
-            r#"FOREACH (n IN [1] | DELETE n)"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"FOREACH (n IN [1] | DELETE n)"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "n");
@@ -3748,10 +3754,7 @@ mod tests {
 
     #[test]
     fn test_foreach_merge() {
-        let stmt = parse(
-            r#"FOREACH (name IN ['Alice'] | MERGE (:Person {name: name}))"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"FOREACH (name IN ['Alice'] | MERGE (:Person {name: name}))"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "name");
@@ -3787,10 +3790,7 @@ mod tests {
 
     #[test]
     fn test_foreach_with_literal_list() {
-        let stmt = parse(
-            r#"FOREACH (x IN [1, 2, 3] | CREATE (:Item {value: x}))"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"FOREACH (x IN [1, 2, 3] | CREATE (:Item {value: x}))"#).unwrap();
         match stmt {
             Statement::Foreach(f) => {
                 assert_eq!(f.variable, "x");
@@ -3805,16 +3805,16 @@ mod tests {
 
     #[test]
     fn test_match_foreach_parse() {
-        let stmt = parse(
-            r#"MATCH (n:Person) FOREACH (x IN [1] | SET n.updated = true)"#,
-        )
-        .unwrap();
+        let stmt = parse(r#"MATCH (n:Person) FOREACH (x IN [1] | SET n.updated = true)"#).unwrap();
         match stmt {
             Statement::MatchForeach(mf) => {
                 assert_eq!(mf.segments.len(), 1);
                 assert_eq!(mf.foreach_clause.variable, "x");
                 assert_eq!(mf.foreach_clause.clauses.len(), 1);
-                assert!(matches!(mf.foreach_clause.clauses[0], ForeachClause::Set(_)));
+                assert!(matches!(
+                    mf.foreach_clause.clauses[0],
+                    ForeachClause::Set(_)
+                ));
             }
             _ => panic!("Expected MatchForeach statement"),
         }

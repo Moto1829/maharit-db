@@ -4,8 +4,8 @@
 パラメータ化されたクエリの実行をサポートする。SQLインジェクション対策やクエリキャッシュの効率化に寄与する。
 
 ## ステータス: 完了
-## 実装日: 2026-02-25
-## テスト数: 5件追加（maharit-query 合計 315件）
+## 実装日: 2026-02-26
+## テスト数: 9件追加（maharit-query 合計 371件）
 
 ## 実装内容
 
@@ -22,7 +22,7 @@
 ### パラメータの利用箇所
 - [x] WHERE句: WHERE n.name = $name
 - [x] プロパティ: ({name: $name})
-- [ ] SKIP / LIMIT: SKIP $offset LIMIT $count（未実装）
+- [x] SKIP / LIMIT: SKIP $offset LIMIT $count
 - [x] SET句: SET n.name = $name
 
 ### クエリキャッシュとの統合
