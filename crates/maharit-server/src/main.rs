@@ -3,6 +3,7 @@ pub mod http_server;
 pub mod logging;
 pub mod metrics;
 mod repl;
+pub mod replication;
 pub mod tcp_server;
 pub mod tls;
 
