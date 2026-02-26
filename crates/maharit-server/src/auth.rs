@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -123,13 +124,77 @@ pub enum AuthError {
 
     #[error("Cannot delete the last admin user")]
     CannotDeleteLastAdmin,
+
+    #[error("Persistence error: {0}")]
+    PersistenceError(String),
 }
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/// On-disk representation of a single user.
+/// Stores the raw hash and salt so that passwords can be verified after reload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedUser {
+    username: String,
+    password_hash: String,
+    salt: String,
+    role: Role,
+    created_at: u64,
+    active: bool,
+}
+
+impl From<&User> for PersistedUser {
+    fn from(u: &User) -> Self {
+        Self {
+            username: u.username.clone(),
+            password_hash: u.password_hash.clone(),
+            salt: u.salt.clone(),
+            role: u.role,
+            created_at: u.created_at,
+            active: u.active,
+        }
+    }
+}
+
+impl From<PersistedUser> for User {
+    fn from(p: PersistedUser) -> Self {
+        Self {
+            username: p.username,
+            password_hash: p.password_hash,
+            salt: p.salt,
+            role: p.role,
+            created_at: p.created_at,
+            active: p.active,
+        }
+    }
+}
+
+/// Top-level envelope stored in `users.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedUsers {
+    /// Schema version — increment when the format changes.
+    version: u32,
+    users: Vec<PersistedUser>,
+}
+
+impl PersistedUsers {
+    const CURRENT_VERSION: u32 = 1;
+}
+
+// ---------------------------------------------------------------------------
+// AuthManager
+// ---------------------------------------------------------------------------
 
 /// Central authentication and authorization manager
 pub struct AuthManager {
     users: HashMap<String, User>,
     sessions: HashMap<String, Session>,
     session_timeout: Duration,
+    /// Optional path for automatic persistence.  When `Some`, every mutating
+    /// operation saves the user list to this file.
+    save_path: Option<String>,
 }
 
 impl AuthManager {
@@ -140,6 +205,7 @@ impl AuthManager {
             users: HashMap::new(),
             sessions: HashMap::new(),
             session_timeout: Duration::from_secs(30 * 60), // 30 minutes
+            save_path: None,
         };
 
         // Create default admin user
@@ -156,6 +222,79 @@ impl AuthManager {
         manager
     }
 
+    /// Attach a save path so that every mutating operation persists user data.
+    pub fn with_save_path(mut self, path: impl Into<String>) -> Self {
+        self.save_path = Some(path.into());
+        self
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistence
+    // -----------------------------------------------------------------------
+
+    /// Load an `AuthManager` from a JSON file previously written by
+    /// [`save_to_file`].  If the file does not exist a fresh manager with the
+    /// default admin account is returned.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::PersistenceError`] when the file exists but cannot
+    /// be read or parsed.
+    pub fn load_from_file(path: &str) -> Result<Self, AuthError> {
+        if !std::path::Path::new(path).exists() {
+            return Ok(Self::new());
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| AuthError::PersistenceError(format!("read {}: {}", path, e)))?;
+
+        let persisted: PersistedUsers = serde_json::from_str(&content)
+            .map_err(|e| AuthError::PersistenceError(format!("parse {}: {}", path, e)))?;
+
+        let mut users = HashMap::new();
+        for pu in persisted.users {
+            let u = User::from(pu);
+            users.insert(u.username.clone(), u);
+        }
+
+        Ok(Self {
+            users,
+            sessions: HashMap::new(),
+            session_timeout: Duration::from_secs(30 * 60),
+            save_path: Some(path.to_string()),
+        })
+    }
+
+    /// Persist the current user list to `path` in JSON format.
+    ///
+    /// # Errors
+    /// Returns [`AuthError::PersistenceError`] on I/O or serialisation errors.
+    pub fn save_to_file(&self, path: &str) -> Result<(), AuthError> {
+        let persisted = PersistedUsers {
+            version: PersistedUsers::CURRENT_VERSION,
+            users: self.users.values().map(PersistedUser::from).collect(),
+        };
+
+        let json = serde_json::to_string_pretty(&persisted)
+            .map_err(|e| AuthError::PersistenceError(format!("serialize: {}", e)))?;
+
+        std::fs::write(path, json)
+            .map_err(|e| AuthError::PersistenceError(format!("write {}: {}", path, e)))?;
+
+        Ok(())
+    }
+
+    /// Save to the configured `save_path` if one has been set.  Errors are
+    /// silently ignored to avoid disrupting callers.
+    fn auto_save(&self) {
+        if let Some(ref path) = self.save_path {
+            let _ = self.save_to_file(path);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // User management
+    // -----------------------------------------------------------------------
+
     /// Create a new user account
     pub fn create_user(
         &mut self,
@@ -169,6 +308,7 @@ impl AuthManager {
 
         let user = User::new(username.to_string(), password, role);
         self.users.insert(username.to_string(), user);
+        self.auto_save();
         Ok(())
     }
 
@@ -199,6 +339,7 @@ impl AuthManager {
         self.sessions
             .retain(|_, session| session.username != username);
 
+        self.auto_save();
         Ok(())
     }
 
@@ -223,6 +364,7 @@ impl AuthManager {
         }
 
         self.users.get_mut(username).unwrap().role = role;
+        self.auto_save();
         Ok(())
     }
 
@@ -234,6 +376,7 @@ impl AuthManager {
             .ok_or_else(|| AuthError::UserNotFound(username.to_string()))?;
 
         user.update_password(password);
+        self.auto_save();
         Ok(())
     }
 
@@ -321,13 +464,16 @@ impl Default for AuthManager {
     }
 }
 
-/// Generate a random salt using system time and a counter
+// ---------------------------------------------------------------------------
+// Crypto helpers
+// ---------------------------------------------------------------------------
+
+static SALT_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a random salt using system time and an atomic counter
 fn generate_salt() -> String {
-    static mut COUNTER: u64 = 0;
-    let counter = unsafe {
-        COUNTER += 1;
-        COUNTER
-    };
+    let counter = SALT_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -374,11 +520,7 @@ fn fnv1a_64(data: &[u8], seed: u64) -> u64 {
 
 /// Generate a session token
 fn generate_token() -> String {
-    static mut COUNTER: u64 = 0;
-    let counter = unsafe {
-        COUNTER += 1;
-        COUNTER
-    };
+    let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -390,9 +532,26 @@ fn generate_token() -> String {
     format!("{:016x}-{:016x}", random_part, timestamp as u64)
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Helper method for testing (allows cloning AuthManager)
+    impl AuthManager {
+        #[cfg(test)]
+        fn clone_for_test(&self) -> Self {
+            Self {
+                users: self.users.clone(),
+                sessions: HashMap::new(),
+                session_timeout: self.session_timeout,
+                save_path: None,
+            }
+        }
+    }
 
     #[test]
     fn test_default_admin_user_creation() {
@@ -610,15 +769,138 @@ mod tests {
         assert!(usernames.contains(&"user2"));
     }
 
-    // Helper method for testing (allows cloning AuthManager)
-    impl AuthManager {
-        #[cfg(test)]
-        fn clone_for_test(&self) -> Self {
-            Self {
-                users: self.users.clone(),
-                sessions: HashMap::new(),
-                session_timeout: self.session_timeout,
-            }
+    // -----------------------------------------------------------------------
+    // Persistence tests
+    // -----------------------------------------------------------------------
+
+    /// Returns a temporary file path that is cleaned up on drop.
+    struct TempFile(String);
+
+    impl TempFile {
+        fn new(name: &str) -> Self {
+            let path = format!("/tmp/maharit_auth_test_{}_{}", name, std::process::id());
+            TempFile(path)
         }
+        fn path(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_save_and_load_users() {
+        let tmp = TempFile::new("save_load");
+        let path = tmp.path();
+
+        // Create manager, add a user, save
+        let mut manager = AuthManager::new();
+        manager
+            .create_user("persisted_user", "mypassword", Role::ReadWrite)
+            .unwrap();
+        manager.save_to_file(path).unwrap();
+
+        // Load into a fresh manager
+        let loaded = AuthManager::load_from_file(path).unwrap();
+        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+
+        assert!(usernames.contains(&"admin"));
+        assert!(usernames.contains(&"persisted_user"));
+        assert_eq!(loaded.list_users().len(), 2);
+    }
+
+    #[test]
+    fn test_loaded_users_can_authenticate() {
+        let tmp = TempFile::new("auth_after_load");
+        let path = tmp.path();
+
+        // Save
+        let mut manager = AuthManager::new();
+        manager
+            .create_user("harry", "hunter2", Role::ReadOnly)
+            .unwrap();
+        manager.save_to_file(path).unwrap();
+
+        // Load and authenticate
+        let mut loaded = AuthManager::load_from_file(path).unwrap();
+        assert!(loaded.authenticate("harry", "hunter2").is_ok());
+        assert_eq!(
+            loaded.authenticate("harry", "wrong"),
+            Err(AuthError::InvalidCredentials)
+        );
+    }
+
+    #[test]
+    fn test_load_from_nonexistent_file_returns_default() {
+        let manager = AuthManager::load_from_file("/tmp/maharit_does_not_exist_xyz.json").unwrap();
+        // Default manager has only the admin user
+        assert_eq!(manager.list_users().len(), 1);
+        assert_eq!(manager.list_users()[0].username, "admin");
+    }
+
+    #[test]
+    fn test_auto_save_on_create_user() {
+        let tmp = TempFile::new("auto_save_create");
+        let path = tmp.path().to_string();
+
+        let mut manager = AuthManager::new().with_save_path(path.clone());
+        // create_user should trigger auto_save
+        manager.create_user("iris", "pass", Role::ReadOnly).unwrap();
+
+        // The file must exist now
+        assert!(std::path::Path::new(&path).exists());
+
+        // Loading it must include iris
+        let loaded = AuthManager::load_from_file(&path).unwrap();
+        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+        assert!(usernames.contains(&"iris"));
+    }
+
+    #[test]
+    fn test_auto_save_on_drop_user() {
+        let tmp = TempFile::new("auto_save_drop");
+        let path = tmp.path().to_string();
+
+        let mut manager = AuthManager::new().with_save_path(path.clone());
+        manager.create_user("jack", "pass", Role::ReadOnly).unwrap();
+        // Add a second admin so we can drop jack without issue
+        manager.create_user("admin2", "pass", Role::Admin).unwrap();
+
+        // Drop jack
+        manager.drop_user("jack").unwrap();
+
+        // Reload and verify jack is gone
+        let loaded = AuthManager::load_from_file(&path).unwrap();
+        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+        assert!(!usernames.contains(&"jack"));
+        assert!(usernames.contains(&"admin"));
+        assert!(usernames.contains(&"admin2"));
+    }
+
+    #[test]
+    fn test_persisted_users_schema_version() {
+        let tmp = TempFile::new("schema_version");
+        let path = tmp.path();
+
+        let manager = AuthManager::new();
+        manager.save_to_file(path).unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["version"], 1u32);
+    }
+
+    #[test]
+    fn test_load_from_invalid_json_returns_error() {
+        let tmp = TempFile::new("invalid_json");
+        let path = tmp.path();
+        std::fs::write(path, "not json at all").unwrap();
+
+        let result = AuthManager::load_from_file(path);
+        assert!(matches!(result, Err(AuthError::PersistenceError(_))));
     }
 }
