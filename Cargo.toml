@@ -39,6 +39,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 unicode-normalization = "0.1"
+toml = "0.8"
 
 [package]
 name = "maharit-db"

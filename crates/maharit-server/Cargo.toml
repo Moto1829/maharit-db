@@ -24,3 +24,4 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 webpki-roots.workspace = true
+toml.workspace = true

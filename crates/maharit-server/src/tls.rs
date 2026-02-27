@@ -5,8 +5,10 @@
 //! - Client TLS configuration with optional certificate verification
 //! - Protocol version selection (TLS 1.2 or 1.3)
 //! - Environment variable configuration support
+//! - TOML configuration file support via [`TlsConfig::from_toml_file`]
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use serde::Deserialize;
 use std::io::BufReader;
 use std::sync::Arc;
 use thiserror::Error;
@@ -31,6 +33,70 @@ pub enum TlsError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("TOML parse error: {0}")]
+    TomlParse(String),
+}
+
+// ---------------------------------------------------------------------------
+// TOML configuration types
+// ---------------------------------------------------------------------------
+
+/// Intermediate deserialization target for the `[tls]` section of a TOML
+/// configuration file.
+///
+/// ```toml
+/// [tls]
+/// enabled   = true
+/// cert_file = "/etc/maharit/server.crt"
+/// key_file  = "/etc/maharit/server.key"
+/// min_version = "1.2"   # "1.2" or "1.3"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsFileConfig {
+    /// Whether TLS is enabled.  When `false` the entire section is ignored.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Path to the PEM-encoded certificate file.
+    pub cert_file: String,
+    /// Path to the PEM-encoded private key file.
+    pub key_file: String,
+    /// Minimum TLS protocol version.  Accepted values: `"1.2"`, `"1.3"`.
+    /// Defaults to `None` (rustls default, which is TLS 1.2).
+    #[serde(default)]
+    pub min_version: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl TlsFileConfig {
+    /// Convert the minimum version string to a [`ProtocolVersion`].
+    ///
+    /// Returns `None` when `min_version` is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TlsError::ConfigError`] when the value is set but not one of
+    /// `"1.2"` or `"1.3"`.
+    pub fn protocol_version(&self) -> Result<Option<ProtocolVersion>, TlsError> {
+        match self.min_version.as_deref() {
+            None => Ok(None),
+            Some("1.2") => Ok(Some(ProtocolVersion::Tls12)),
+            Some("1.3") => Ok(Some(ProtocolVersion::Tls13)),
+            Some(other) => Err(TlsError::ConfigError(format!(
+                "unsupported min_version \"{other}\": expected \"1.2\" or \"1.3\""
+            ))),
+        }
+    }
+}
+
+/// Wrapper used to deserialize a TOML file that contains a top-level `[tls]`
+/// section.
+#[derive(Debug, Deserialize)]
+struct TlsConfigFile {
+    tls: TlsFileConfig,
 }
 
 /// TLS protocol version
@@ -127,6 +193,66 @@ impl TlsConfig {
         let cert_path = std::env::var("MAHARIT_TLS_CERT").ok()?;
         let key_path = std::env::var("MAHARIT_TLS_KEY").ok()?;
         Some(Self::new(&cert_path, &key_path))
+    }
+
+    /// Load TLS configuration from a TOML file.
+    ///
+    /// The file must contain a `[tls]` section.  If `enabled = false` the
+    /// method returns `None`.  If `enabled` is omitted it defaults to `true`.
+    ///
+    /// ```toml
+    /// [tls]
+    /// enabled     = true
+    /// cert_file   = "/etc/maharit/server.crt"
+    /// key_file    = "/etc/maharit/server.key"
+    /// min_version = "1.2"
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be read.
+    /// - The TOML cannot be parsed.
+    /// - `min_version` contains an unrecognised value.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use maharit_server::tls::TlsConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(config) = TlsConfig::from_toml_file("/etc/maharit/config.toml")? {
+    ///     let server_config = config.load_server_config()?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_toml_file(path: &str) -> Result<Option<Self>, TlsError> {
+        let content = std::fs::read_to_string(path)?;
+        let wrapper: TlsConfigFile = toml::from_str(&content)
+            .map_err(|e| TlsError::TomlParse(e.to_string()))?;
+        Self::from_file_config(wrapper.tls)
+    }
+
+    /// Build a [`TlsConfig`] from a deserialized [`TlsFileConfig`].
+    ///
+    /// Returns `None` when `file_config.enabled` is `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `min_version` contains an unrecognised value.
+    pub fn from_file_config(file_config: TlsFileConfig) -> Result<Option<Self>, TlsError> {
+        if !file_config.enabled {
+            return Ok(None);
+        }
+
+        let mut config = Self::new(&file_config.cert_file, &file_config.key_file);
+
+        if let Some(version) = file_config.protocol_version()? {
+            config = config.with_min_protocol(version);
+        }
+
+        Ok(Some(config))
     }
 
     /// Load server configuration for rustls
@@ -558,5 +684,180 @@ mod tests {
 
         // Verify they return different protocol versions
         assert_ne!(v12.version, v13.version);
+    }
+
+    // -----------------------------------------------------------------------
+    // TOML config tests
+    // -----------------------------------------------------------------------
+
+    use std::io::Write;
+
+    fn write_toml(contents: &str) -> (tempfile_path::TempPath, String) {
+        // We don't have tempfile in dependencies, so we write to std::env::temp_dir().
+        let path = std::env::temp_dir().join(format!(
+            "maharit_tls_test_{}.toml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        let path_str = path.to_str().unwrap().to_string();
+        (tempfile_path::TempPath(path), path_str)
+    }
+
+    // Minimal RAII guard to delete the temp file when the test finishes.
+    mod tempfile_path {
+        pub struct TempPath(pub std::path::PathBuf);
+        impl Drop for TempPath {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_from_toml_file_basic() {
+        let toml = r#"
+[tls]
+enabled   = true
+cert_file = "/etc/maharit/server.crt"
+key_file  = "/etc/maharit/server.key"
+"#;
+        let (_guard, path) = write_toml(toml);
+        let result = TlsConfig::from_toml_file(&path).unwrap();
+        let config = result.expect("should return Some when enabled = true");
+
+        assert_eq!(config.cert_path, "/etc/maharit/server.crt");
+        assert_eq!(config.key_path, "/etc/maharit/server.key");
+        assert!(config.min_protocol_version.is_none());
+    }
+
+    #[test]
+    fn test_from_toml_file_with_min_version_12() {
+        let toml = r#"
+[tls]
+cert_file   = "/path/to/cert.pem"
+key_file    = "/path/to/key.pem"
+min_version = "1.2"
+"#;
+        let (_guard, path) = write_toml(toml);
+        let config = TlsConfig::from_toml_file(&path).unwrap().unwrap();
+        assert_eq!(config.min_protocol_version, Some(ProtocolVersion::Tls12));
+    }
+
+    #[test]
+    fn test_from_toml_file_with_min_version_13() {
+        let toml = r#"
+[tls]
+cert_file   = "/path/to/cert.pem"
+key_file    = "/path/to/key.pem"
+min_version = "1.3"
+"#;
+        let (_guard, path) = write_toml(toml);
+        let config = TlsConfig::from_toml_file(&path).unwrap().unwrap();
+        assert_eq!(config.min_protocol_version, Some(ProtocolVersion::Tls13));
+    }
+
+    #[test]
+    fn test_from_toml_file_disabled_returns_none() {
+        let toml = r#"
+[tls]
+enabled   = false
+cert_file = "/path/to/cert.pem"
+key_file  = "/path/to/key.pem"
+"#;
+        let (_guard, path) = write_toml(toml);
+        let result = TlsConfig::from_toml_file(&path).unwrap();
+        assert!(result.is_none(), "enabled = false should return None");
+    }
+
+    #[test]
+    fn test_from_toml_file_invalid_min_version() {
+        let toml = r#"
+[tls]
+cert_file   = "/path/to/cert.pem"
+key_file    = "/path/to/key.pem"
+min_version = "1.4"
+"#;
+        let (_guard, path) = write_toml(toml);
+        let result = TlsConfig::from_toml_file(&path);
+        assert!(result.is_err(), "invalid min_version should return an error");
+        match result.unwrap_err() {
+            TlsError::ConfigError(msg) => {
+                assert!(msg.contains("1.4"), "error should mention the bad value: {msg}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_toml_file_not_found() {
+        let result = TlsConfig::from_toml_file("/nonexistent/path/config.toml");
+        assert!(result.is_err());
+        // Should be an IO error (file not found)
+        assert!(matches!(result.unwrap_err(), TlsError::Io(_)));
+    }
+
+    #[test]
+    fn test_from_toml_file_parse_error() {
+        let toml = "this is not valid toml ][[]";
+        let (_guard, path) = write_toml(toml);
+        let result = TlsConfig::from_toml_file(&path);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TlsError::TomlParse(_)));
+    }
+
+    #[test]
+    fn test_tls_file_config_protocol_version() {
+        let mut cfg = TlsFileConfig {
+            enabled: true,
+            cert_file: "a".to_string(),
+            key_file: "b".to_string(),
+            min_version: None,
+        };
+        assert_eq!(cfg.protocol_version().unwrap(), None);
+
+        cfg.min_version = Some("1.2".to_string());
+        assert_eq!(cfg.protocol_version().unwrap(), Some(ProtocolVersion::Tls12));
+
+        cfg.min_version = Some("1.3".to_string());
+        assert_eq!(cfg.protocol_version().unwrap(), Some(ProtocolVersion::Tls13));
+
+        cfg.min_version = Some("1.4".to_string());
+        assert!(cfg.protocol_version().is_err());
+    }
+
+    #[test]
+    fn test_tls_error_toml_parse_display() {
+        let err = TlsError::TomlParse("missing field".to_string());
+        assert_eq!(err.to_string(), "TOML parse error: missing field");
+    }
+
+    #[test]
+    fn test_from_file_config_disabled() {
+        let file_cfg = TlsFileConfig {
+            enabled: false,
+            cert_file: "/a/b.pem".to_string(),
+            key_file: "/a/k.pem".to_string(),
+            min_version: None,
+        };
+        let result = TlsConfig::from_file_config(file_cfg).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_file_config_enabled() {
+        let file_cfg = TlsFileConfig {
+            enabled: true,
+            cert_file: "/a/b.pem".to_string(),
+            key_file: "/a/k.pem".to_string(),
+            min_version: Some("1.3".to_string()),
+        };
+        let result = TlsConfig::from_file_config(file_cfg).unwrap().unwrap();
+        assert_eq!(result.cert_path, "/a/b.pem");
+        assert_eq!(result.key_path, "/a/k.pem");
+        assert_eq!(result.min_protocol_version, Some(ProtocolVersion::Tls13));
     }
 }

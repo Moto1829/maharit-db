@@ -3,6 +3,7 @@
 //! This module provides thread-safe metrics tracking for queries, errors, latencies,
 //! and resource counts. Metrics can be exported in Prometheus text format.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -245,6 +246,11 @@ pub struct Metrics {
     total_connections: AtomicU64,
     /// Time when the metrics collector was created.
     start_time: Instant,
+    /// Custom labels appended to every Prometheus metric line.
+    ///
+    /// For example `{"env": "production", "region": "ap-northeast-1"}` produces
+    /// `maharit_queries_total{type="create",env="production",region="ap-northeast-1"} 0`.
+    custom_labels: Vec<(String, String)>,
 }
 
 impl Default for Metrics {
@@ -261,6 +267,40 @@ impl Metrics {
 
     /// Create a new metrics collector with a custom number of latency samples.
     pub fn with_latency_samples(max_samples: usize) -> Self {
+        Self::with_labels_and_samples(HashMap::new(), max_samples)
+    }
+
+    /// Create a new metrics collector with custom labels applied to all Prometheus output.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - Key/value pairs to attach to every exported metric line.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use maharit_server::metrics::Metrics;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut labels = HashMap::new();
+    /// labels.insert("env".to_string(), "production".to_string());
+    /// labels.insert("region".to_string(), "ap-northeast-1".to_string());
+    ///
+    /// let metrics = Metrics::with_labels(labels);
+    /// let output = metrics.to_prometheus();
+    /// assert!(output.contains("env=\"production\""));
+    /// assert!(output.contains("region=\"ap-northeast-1\""));
+    /// ```
+    pub fn with_labels(labels: HashMap<String, String>) -> Self {
+        Self::with_labels_and_samples(labels, 10000)
+    }
+
+    /// Create a new metrics collector with custom labels and a specific latency sample count.
+    pub fn with_labels_and_samples(labels: HashMap<String, String>, max_samples: usize) -> Self {
+        // Sort labels for deterministic output in tests.
+        let mut custom_labels: Vec<(String, String)> = labels.into_iter().collect();
+        custom_labels.sort_by(|a, b| a.0.cmp(&b.0));
+
         Self {
             query_counts: [
                 AtomicU64::new(0),
@@ -281,6 +321,7 @@ impl Metrics {
             current_connections: AtomicI64::new(0),
             total_connections: AtomicU64::new(0),
             start_time: Instant::now(),
+            custom_labels,
         }
     }
 
@@ -389,8 +430,18 @@ impl Metrics {
     }
 
     /// Export metrics in Prometheus text format.
+    ///
+    /// Custom labels configured via [`Metrics::with_labels`] are injected into
+    /// every metric line.  For example, with `{"env": "production"}`:
+    ///
+    /// ```text
+    /// maharit_queries_total{type="create",env="production"} 0
+    /// maharit_errors_total{env="production"} 0
+    /// ```
     pub fn to_prometheus(&self) -> String {
         let mut output = String::new();
+        let extra = self.extra_labels_suffix();
+        let standalone = self.labels_block();
 
         // Query counts by type
         output.push_str("# HELP maharit_queries_total Total number of queries executed\n");
@@ -398,49 +449,57 @@ impl Metrics {
         for query_type in QueryType::ALL {
             let count = self.query_count(query_type);
             output.push_str(&format!(
-                "maharit_queries_total{{type=\"{}\"}} {}\n",
+                "maharit_queries_total{{type=\"{}\"{extra}}} {count}\n",
                 query_type.as_str(),
-                count
             ));
         }
 
         // Error count
         output.push_str("# HELP maharit_errors_total Total number of errors\n");
         output.push_str("# TYPE maharit_errors_total counter\n");
-        output.push_str(&format!("maharit_errors_total {}\n", self.error_count()));
+        output.push_str(&format!(
+            "maharit_errors_total{standalone} {}\n",
+            self.error_count()
+        ));
 
         // Latency percentiles
         let percentiles = self.latency_percentiles();
         output.push_str("# HELP maharit_query_latency_microseconds Query latency percentiles\n");
         output.push_str("# TYPE maharit_query_latency_microseconds summary\n");
         output.push_str(&format!(
-            "maharit_query_latency_microseconds{{quantile=\"0.5\"}} {}\n",
+            "maharit_query_latency_microseconds{{quantile=\"0.5\"{extra}}} {}\n",
             percentiles.p50
         ));
         output.push_str(&format!(
-            "maharit_query_latency_microseconds{{quantile=\"0.95\"}} {}\n",
+            "maharit_query_latency_microseconds{{quantile=\"0.95\"{extra}}} {}\n",
             percentiles.p95
         ));
         output.push_str(&format!(
-            "maharit_query_latency_microseconds{{quantile=\"0.99\"}} {}\n",
+            "maharit_query_latency_microseconds{{quantile=\"0.99\"{extra}}} {}\n",
             percentiles.p99
         ));
 
         // Node count
         output.push_str("# HELP maharit_nodes_total Current number of nodes\n");
         output.push_str("# TYPE maharit_nodes_total gauge\n");
-        output.push_str(&format!("maharit_nodes_total {}\n", self.node_count()));
+        output.push_str(&format!(
+            "maharit_nodes_total{standalone} {}\n",
+            self.node_count()
+        ));
 
         // Edge count
         output.push_str("# HELP maharit_edges_total Current number of edges\n");
         output.push_str("# TYPE maharit_edges_total gauge\n");
-        output.push_str(&format!("maharit_edges_total {}\n", self.edge_count()));
+        output.push_str(&format!(
+            "maharit_edges_total{standalone} {}\n",
+            self.edge_count()
+        ));
 
         // Current connections
         output.push_str("# HELP maharit_connections_current Current number of connections\n");
         output.push_str("# TYPE maharit_connections_current gauge\n");
         output.push_str(&format!(
-            "maharit_connections_current {}\n",
+            "maharit_connections_current{standalone} {}\n",
             self.current_connections()
         ));
 
@@ -448,7 +507,7 @@ impl Metrics {
         output.push_str("# HELP maharit_connections_total Total number of connections\n");
         output.push_str("# TYPE maharit_connections_total counter\n");
         output.push_str(&format!(
-            "maharit_connections_total {}\n",
+            "maharit_connections_total{standalone} {}\n",
             self.total_connections()
         ));
 
@@ -456,15 +515,46 @@ impl Metrics {
         let memory = memory_usage_bytes();
         output.push_str("# HELP maharit_memory_usage_bytes Current process memory usage (RSS)\n");
         output.push_str("# TYPE maharit_memory_usage_bytes gauge\n");
-        output.push_str(&format!("maharit_memory_usage_bytes {}\n", memory));
+        output.push_str(&format!(
+            "maharit_memory_usage_bytes{standalone} {memory}\n"
+        ));
 
         // Uptime
         let uptime = self.start_time.elapsed().as_secs();
         output.push_str("# HELP maharit_uptime_seconds Server uptime in seconds\n");
         output.push_str("# TYPE maharit_uptime_seconds gauge\n");
-        output.push_str(&format!("maharit_uptime_seconds {}\n", uptime));
+        output.push_str(&format!("maharit_uptime_seconds{standalone} {uptime}\n"));
 
         output
+    }
+
+    /// Build a Prometheus label string from the custom labels.
+    ///
+    /// Returns an empty string when there are no custom labels, or a comma-prefixed
+    /// fragment like `,env="production",region="ap-northeast-1"` that can be inserted
+    /// inside `{}` alongside existing labels.
+    fn extra_labels_suffix(&self) -> String {
+        if self.custom_labels.is_empty() {
+            return String::new();
+        }
+        self.custom_labels
+            .iter()
+            .map(|(k, v)| format!(",{}=\"{}\"", k, v))
+            .collect()
+    }
+
+    /// Build a standalone Prometheus label set string (including the braces) from the
+    /// custom labels.  Returns an empty string when no labels are defined.
+    fn labels_block(&self) -> String {
+        if self.custom_labels.is_empty() {
+            return String::new();
+        }
+        let inner: Vec<String> = self
+            .custom_labels
+            .iter()
+            .map(|(k, v)| format!("{}=\"{}\"", k, v))
+            .collect();
+        format!("{{{}}}", inner.join(","))
     }
 
     /// Reset all metrics to zero. Useful for testing.
@@ -730,5 +820,75 @@ mod tests {
 
         assert_eq!(metrics.total_query_count(), 10);
         assert_eq!(metrics.error_count(), 10);
+    }
+
+    #[test]
+    fn test_custom_labels_in_prometheus_output() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "production".to_string());
+        labels.insert("region".to_string(), "ap-northeast-1".to_string());
+
+        let metrics = Metrics::with_labels(labels);
+        metrics.record_query(QueryType::Create, Duration::from_micros(100));
+        metrics.record_error();
+        metrics.set_node_count(42);
+
+        let output = metrics.to_prometheus();
+
+        // Labels must appear in type-labelled metrics (extra suffix inside braces)
+        assert!(
+            output.contains("maharit_queries_total{type=\"create\",env=\"production\",region=\"ap-northeast-1\"} 1"),
+            "query counter missing custom labels: {output}"
+        );
+
+        // Labels must appear in single-value metrics (standalone block)
+        assert!(
+            output.contains("maharit_errors_total{env=\"production\",region=\"ap-northeast-1\"} 1"),
+            "error counter missing custom labels: {output}"
+        );
+        assert!(
+            output.contains("maharit_nodes_total{env=\"production\",region=\"ap-northeast-1\"} 42"),
+            "nodes gauge missing custom labels: {output}"
+        );
+        assert!(
+            output.contains("maharit_memory_usage_bytes{env=\"production\",region=\"ap-northeast-1\"}"),
+            "memory gauge missing custom labels: {output}"
+        );
+        assert!(
+            output.contains("maharit_uptime_seconds{env=\"production\",region=\"ap-northeast-1\"}"),
+            "uptime gauge missing custom labels: {output}"
+        );
+    }
+
+    #[test]
+    fn test_no_labels_output_unchanged() {
+        // Metrics without custom labels must produce the same format as before.
+        let metrics = Metrics::new();
+        metrics.record_query(QueryType::Create, Duration::from_micros(100));
+        metrics.record_error();
+        metrics.set_node_count(1000);
+
+        let output = metrics.to_prometheus();
+
+        assert!(output.contains("maharit_queries_total{type=\"create\"} 1"));
+        assert!(output.contains("maharit_errors_total 1"));
+        assert!(output.contains("maharit_nodes_total 1000"));
+    }
+
+    #[test]
+    fn test_with_labels_and_samples() {
+        let mut labels = HashMap::new();
+        labels.insert("dc".to_string(), "us-east-1".to_string());
+
+        let metrics = Metrics::with_labels_and_samples(labels, 50);
+        for _ in 0..60 {
+            metrics.record_query(QueryType::Match, Duration::from_micros(100));
+        }
+        // Ring buffer should wrap around without panicking.
+        let percentiles = metrics.latency_percentiles();
+        assert!(percentiles.p50 >= 100);
+
+        let output = metrics.to_prometheus();
+        assert!(output.contains("dc=\"us-east-1\""));
     }
 }
