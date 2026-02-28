@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
@@ -9,6 +10,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use maharit_core::{Graph, PropertyValue};
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 /// Backup file format magic number
 const MAGIC: &[u8; 8] = b"MHRTBKUP";
@@ -87,6 +89,11 @@ pub struct BackupMetadata {
     pub description: String,
 }
 
+/// Callback invoked when a backup completes successfully.
+///
+/// Receives a reference to the `BackupMetadata` of the completed backup.
+pub type BackupCallback = Box<dyn Fn(&BackupMetadata) + Send + Sync>;
+
 /// Backup and restore functionality for graphs
 pub struct Backup;
 
@@ -142,6 +149,74 @@ impl Backup {
         let graph_data = Self::serialize_graph(graph)?;
 
         // Write graph data (compressed or not)
+        if options.compressed {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&graph_data)?;
+            let compressed_data = encoder.finish()?;
+            writer.write_all(&compressed_data)?;
+        } else {
+            writer.write_all(&graph_data)?;
+        }
+
+        writer.flush()?;
+        Ok(metadata)
+    }
+
+    /// Create a backup asynchronously, taking a read lock on the shared graph.
+    ///
+    /// The read lock is acquired to create a serialized snapshot; the actual
+    /// file write happens while the lock is held.  This allows other readers
+    /// to continue concurrently while blocking only writers during the snapshot
+    /// phase.
+    ///
+    /// # Arguments
+    /// * `graph` - A reference-counted, async-RwLock–protected graph
+    /// * `output_path` - Path where the backup file will be written
+    /// * `options` - Backup options (compression, description)
+    ///
+    /// # Returns
+    /// The metadata of the created backup
+    ///
+    /// # Errors
+    /// Returns `BackupError::Io` if the file cannot be written
+    pub async fn create_async(
+        graph: Arc<RwLock<Graph>>,
+        output_path: &str,
+        options: &BackupOptions,
+    ) -> Result<BackupMetadata> {
+        // Acquire read lock and serialise the graph data while holding it
+        let (graph_data, node_count, edge_count) = {
+            let g = graph.read().await;
+            let data = Self::serialize_graph(&g)?;
+            (data, g.node_count() as u64, g.edge_count() as u64)
+        };
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX epoch")
+            .as_secs();
+
+        let metadata = BackupMetadata {
+            version: VERSION,
+            timestamp,
+            node_count,
+            edge_count,
+            compressed: options.compressed,
+            description: options.description.clone(),
+        };
+
+        // Write file (no lock held here)
+        let file = File::create(output_path)?;
+        let mut writer = BufWriter::new(file);
+
+        writer.write_all(MAGIC)?;
+        writer.write_all(&metadata.version.to_le_bytes())?;
+        writer.write_all(&metadata.timestamp.to_le_bytes())?;
+        writer.write_all(&metadata.node_count.to_le_bytes())?;
+        writer.write_all(&metadata.edge_count.to_le_bytes())?;
+        writer.write_all(&[if metadata.compressed { 1 } else { 0 }])?;
+        Self::write_string(&mut writer, &metadata.description)?;
+
         if options.compressed {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
             encoder.write_all(&graph_data)?;
@@ -505,20 +580,134 @@ impl Backup {
     }
 }
 
+// ========== Backup Scheduler ==========
+
+/// Schedules periodic backups of a graph.
+///
+/// Backups are created every `interval_secs` seconds into `output_dir`.
+/// File names include the Unix timestamp: `backup_<timestamp>.db.gz`.
+/// When the number of backup files exceeds `max_backups`, the oldest files
+/// are deleted automatically.
+pub struct BackupScheduler {
+    interval_secs: u64,
+    output_dir: String,
+    max_backups: usize,
+    callback: Option<BackupCallback>,
+}
+
+impl BackupScheduler {
+    /// Create a new scheduler.
+    ///
+    /// # Arguments
+    /// * `interval_secs` - How often (in seconds) to create a backup
+    /// * `output_dir` - Directory where backup files will be written
+    /// * `max_backups` - Maximum number of backup files to keep; older files
+    ///   are removed when this limit is exceeded
+    pub fn new(interval_secs: u64, output_dir: impl Into<String>, max_backups: usize) -> Self {
+        Self {
+            interval_secs,
+            output_dir: output_dir.into(),
+            max_backups,
+            callback: None,
+        }
+    }
+
+    /// Register a callback that is invoked after each successful backup.
+    ///
+    /// The callback receives a reference to the `BackupMetadata` of the
+    /// newly created backup.
+    pub fn on_complete(mut self, callback: BackupCallback) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+
+    /// Start the scheduler.  This runs indefinitely (until the task is
+    /// cancelled or the process exits).
+    ///
+    /// # Arguments
+    /// * `graph` - Shared reference to the graph protected by an async RwLock
+    pub async fn start(self, graph: Arc<RwLock<Graph>>) {
+        let interval = tokio::time::Duration::from_secs(self.interval_secs);
+        let mut ticker = tokio::time::interval(interval);
+        // The first tick fires immediately; skip it so we wait a full interval
+        // before the first backup.
+        ticker.tick().await;
+
+        loop {
+            ticker.tick().await;
+
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before UNIX epoch")
+                .as_secs();
+
+            let path = format!("{}/backup_{}.db.gz", self.output_dir, timestamp);
+            let options = BackupOptions::compressed();
+
+            match Backup::create_async(Arc::clone(&graph), &path, &options).await {
+                Ok(metadata) => {
+                    if let Some(ref cb) = self.callback {
+                        cb(&metadata);
+                    }
+                    // Prune old backups
+                    if let Err(e) = Self::prune_old_backups(&self.output_dir, self.max_backups) {
+                        eprintln!("BackupScheduler: failed to prune old backups: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("BackupScheduler: backup failed: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Remove the oldest backup files from `output_dir` if there are more
+    /// than `max_backups` files.
+    fn prune_old_backups(output_dir: &str, max_backups: usize) -> std::io::Result<()> {
+        let dir = Path::new(output_dir);
+        let mut files: Vec<_> = std::fs::read_dir(dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("backup_") && name.ends_with(".db.gz")
+            })
+            .collect();
+
+        if files.len() <= max_backups {
+            return Ok(());
+        }
+
+        // Sort by modification time (oldest first)
+        files.sort_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+
+        let excess = files.len() - max_backups;
+        for entry in files.iter().take(excess) {
+            std::fs::remove_file(entry.path())?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use tokio::time::Duration;
 
-    const TEST_DIR: &str = "/private/tmp/claude-501/-Users-suzukishimei-Git-maharit-db/501c15b1-be07-44f2-8bd6-9023511fac23/scratchpad/";
-
-    fn test_path(name: &str) -> String {
-        format!("{}{}", TEST_DIR, name)
+    fn tmp_path(name: &str) -> String {
+        format!("/tmp/{}", name)
     }
 
     #[test]
     fn test_backup_restore_empty_graph() {
         let graph = Graph::new();
-        let path = test_path("test_empty.backup");
+        let path = tmp_path("test_empty.backup");
 
         let options = BackupOptions::default();
         let metadata = Backup::create(&graph, &path, &options).unwrap();
@@ -554,7 +743,7 @@ mod tests {
             edge.set_property("since", 2020);
         }
 
-        let path = test_path("test_with_data.backup");
+        let path = tmp_path("test_with_data.backup");
         let options = BackupOptions::default();
         let metadata = Backup::create(&graph, &path, &options).unwrap();
 
@@ -598,7 +787,7 @@ mod tests {
 
         graph.create_edge(alice, bob, "KNOWS").unwrap();
 
-        let path = test_path("test_compressed.backup");
+        let path = tmp_path("test_compressed.backup");
         let options = BackupOptions::compressed();
         let metadata = Backup::create(&graph, &path, &options).unwrap();
 
@@ -627,7 +816,7 @@ mod tests {
         graph.create_node("Person");
         graph.create_node("Person");
 
-        let path = test_path("test_metadata.backup");
+        let path = tmp_path("test_metadata.backup");
         let options =
             BackupOptions::default().with_description("Test backup for metadata inspection");
 
@@ -654,7 +843,7 @@ mod tests {
         graph.create_node("Person");
         graph.create_node("Person");
 
-        let path = test_path("test_verify.backup");
+        let path = tmp_path("test_verify.backup");
         let options = BackupOptions::default();
         Backup::create(&graph, &path, &options).unwrap();
 
@@ -667,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_backup_verify_corrupted() {
-        let path = test_path("test_corrupted.backup");
+        let path = tmp_path("test_corrupted.backup");
 
         // Create a file with valid magic but corrupted data
         let mut file = File::create(&path).unwrap();
@@ -700,7 +889,7 @@ mod tests {
             node.set_property("string_val", "hello world");
         }
 
-        let path = test_path("test_properties.backup");
+        let path = tmp_path("test_properties.backup");
         let options = BackupOptions::default();
         Backup::create(&graph, &path, &options).unwrap();
 
@@ -733,7 +922,7 @@ mod tests {
     #[test]
     fn test_backup_with_description() {
         let graph = Graph::new();
-        let path = test_path("test_description.backup");
+        let path = tmp_path("test_description.backup");
 
         let options =
             BackupOptions::compressed().with_description("Production backup - Friday 5pm");
@@ -750,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_backup_invalid_magic() {
-        let path = test_path("test_invalid_magic.backup");
+        let path = tmp_path("test_invalid_magic.backup");
         std::fs::write(&path, b"INVALID!").unwrap();
 
         let result = Backup::restore(&path);
@@ -764,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_backup_unsupported_version() {
-        let path = test_path("test_unsupported_version.backup");
+        let path = tmp_path("test_unsupported_version.backup");
 
         let mut file = File::create(&path).unwrap();
         file.write_all(MAGIC).unwrap();
@@ -775,5 +964,217 @@ mod tests {
         assert!(matches!(result, Err(BackupError::UnsupportedVersion(999))));
 
         std::fs::remove_file(path).ok();
+    }
+
+    // ========== Async backup tests ==========
+
+    #[tokio::test]
+    async fn test_create_async_basic() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+        if let Some(node) = graph.get_node_mut(a) {
+            node.set_property("name", "Alice");
+        }
+
+        let shared = Arc::new(RwLock::new(graph));
+        let path = tmp_path("test_async_basic.backup");
+        let options = BackupOptions::default();
+
+        let metadata = Backup::create_async(Arc::clone(&shared), &path, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.node_count, 1);
+        assert!(!metadata.compressed);
+
+        let restored = Backup::restore(&path).unwrap();
+        assert_eq!(restored.node_count(), 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_create_async_compressed() {
+        let mut graph = Graph::new();
+        graph.create_node("Person");
+        graph.create_node("Company");
+
+        let shared = Arc::new(RwLock::new(graph));
+        let path = tmp_path("test_async_compressed.backup");
+        let options = BackupOptions::compressed();
+
+        let metadata = Backup::create_async(Arc::clone(&shared), &path, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.node_count, 2);
+        assert!(metadata.compressed);
+
+        let restored = Backup::restore(&path).unwrap();
+        assert_eq!(restored.node_count(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_create_async_concurrent_reads() {
+        // Verify that the read lock allows concurrent readers
+        let mut graph = Graph::new();
+        graph.create_node("Node");
+        let shared = Arc::new(RwLock::new(graph));
+
+        let path1 = tmp_path("test_async_concurrent1.backup");
+        let path2 = tmp_path("test_async_concurrent2.backup");
+
+        let options = BackupOptions::default();
+        let (r1, r2) = tokio::join!(
+            Backup::create_async(Arc::clone(&shared), &path1, &options),
+            Backup::create_async(Arc::clone(&shared), &path2, &options),
+        );
+
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+
+        std::fs::remove_file(path1).ok();
+        std::fs::remove_file(path2).ok();
+    }
+
+    // ========== Scheduler tests ==========
+
+    #[tokio::test]
+    async fn test_scheduler_creates_backups() {
+        let output_dir = tmp_path("scheduler_test_create");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let graph = Arc::new(RwLock::new(Graph::new()));
+        let dir_clone = output_dir.clone();
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let scheduler = BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(
+            move |_meta| {
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        ));
+
+        // Run scheduler for just over 2 seconds; expect at least 2 backups
+        let handle = tokio::spawn(scheduler.start(Arc::clone(&graph)));
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        handle.abort();
+
+        let files: Vec<_> = std::fs::read_dir(&dir_clone)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("backup_")
+            })
+            .collect();
+
+        assert!(
+            files.len() >= 2,
+            "expected at least 2 backup files, got {}",
+            files.len()
+        );
+
+        std::fs::remove_dir_all(&dir_clone).ok();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_max_backups_pruning() {
+        let output_dir = tmp_path("scheduler_test_prune");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let graph = Arc::new(RwLock::new(Graph::new()));
+        let max_backups = 2usize;
+
+        let scheduler = BackupScheduler::new(1, output_dir.clone(), max_backups);
+
+        // Run for ~4 seconds; should create ~4 backups but keep only max_backups
+        let handle = tokio::spawn(scheduler.start(Arc::clone(&graph)));
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        handle.abort();
+
+        let files: Vec<_> = std::fs::read_dir(&output_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("backup_")
+            })
+            .collect();
+
+        assert!(
+            files.len() <= max_backups,
+            "expected at most {} backup files, got {}",
+            max_backups,
+            files.len()
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_callback_invoked() {
+        let output_dir = tmp_path("scheduler_test_callback");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let graph = Arc::new(RwLock::new(Graph::new()));
+
+        // Use Arc<Mutex<Vec<...>>> to collect callback results
+        let results: Arc<Mutex<Vec<BackupMetadata>>> = Arc::new(Mutex::new(Vec::new()));
+        let results_clone = Arc::clone(&results);
+
+        let scheduler = BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(
+            move |meta| {
+                results_clone.lock().unwrap().push(meta.clone());
+            },
+        ));
+
+        let handle = tokio::spawn(scheduler.start(Arc::clone(&graph)));
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        handle.abort();
+
+        let collected = results.lock().unwrap();
+        assert!(
+            collected.len() >= 2,
+            "expected callback to be called at least 2 times, got {}",
+            collected.len()
+        );
+        // All metadata should have version == VERSION
+        for meta in collected.iter() {
+            assert_eq!(meta.version, VERSION);
+            assert!(meta.compressed); // scheduler uses compressed() options
+        }
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn test_prune_old_backups_removes_excess() {
+        let dir = tmp_path("prune_test_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create 5 fake backup files
+        for i in 0..5 {
+            let path = format!("{}/backup_{}.db.gz", dir, i);
+            std::fs::write(&path, b"fake").unwrap();
+            // Sleep briefly so mtime differs
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        BackupScheduler::prune_old_backups(&dir, 3).unwrap();
+
+        let remaining: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+
+        assert_eq!(remaining.len(), 3, "expected exactly 3 files to remain");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

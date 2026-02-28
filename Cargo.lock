@@ -379,6 +379,7 @@ dependencies = [
  "flate2",
  "maharit-core",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

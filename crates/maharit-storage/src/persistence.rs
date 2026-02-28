@@ -3,13 +3,15 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use maharit_core::{Graph, PropertyValue};
+use maharit_core::{Graph, IndexDefinition, PropertyIndex, PropertyValue};
 use thiserror::Error;
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
-/// フォーマットバージョン
-const VERSION: u32 = 1;
+/// フォーマットバージョン（インデックスセクション追加で v2）
+const VERSION: u32 = 2;
+/// 後方互換性のため v1 も読み込み可能にする
+const VERSION_V1: u32 = 1;
 
 /// 永続化エラー
 #[derive(Debug, Error)]
@@ -36,8 +38,18 @@ pub type Result<T> = std::result::Result<T, PersistenceError>;
 pub struct PersistentStorage;
 
 impl PersistentStorage {
-    /// グラフをファイルに保存
+    /// グラフをファイルに保存（インデックスなし）
     pub fn save(graph: &Graph, path: impl AsRef<Path>) -> Result<()> {
+        let empty_index = PropertyIndex::new();
+        Self::save_with_index(graph, &empty_index, path)
+    }
+
+    /// グラフとプロパティインデックスをファイルに保存
+    pub fn save_with_index(
+        graph: &Graph,
+        index: &PropertyIndex,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
 
@@ -67,12 +79,21 @@ impl PersistentStorage {
             Self::write_properties(&mut writer, &edge.properties)?;
         }
 
+        // インデックスセクションを書き込み
+        Self::write_index_section(&mut writer, index)?;
+
         writer.flush()?;
         Ok(())
     }
 
-    /// ファイルからグラフを読み込み
+    /// ファイルからグラフを読み込み（インデックスは無視）
     pub fn load(path: impl AsRef<Path>) -> Result<Graph> {
+        let (graph, _index) = Self::load_with_index(path)?;
+        Ok(graph)
+    }
+
+    /// ファイルからグラフとプロパティインデックスを読み込み
+    pub fn load_with_index(path: impl AsRef<Path>) -> Result<(Graph, PropertyIndex)> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
@@ -85,7 +106,7 @@ impl PersistentStorage {
 
         // バージョンを確認
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION {
+        if version != VERSION && version != VERSION_V1 {
             return Err(PersistenceError::UnsupportedVersion(version));
         }
 
@@ -136,7 +157,53 @@ impl PersistentStorage {
             }
         }
 
-        Ok(graph)
+        // インデックスセクションを読み込み（v2 以降のみ）
+        let index = if version >= VERSION {
+            Self::read_index_section(&mut reader)?
+        } else {
+            PropertyIndex::new()
+        };
+
+        Ok((graph, index))
+    }
+
+    // ========== Index section ==========
+
+    fn write_index_section<W: Write>(writer: &mut W, index: &PropertyIndex) -> Result<()> {
+        let definitions = index.list_indexes();
+        let count = definitions.len() as u32;
+        writer.write_all(&count.to_le_bytes())?;
+
+        for def in definitions {
+            Self::write_string(writer, &def.label)?;
+            Self::write_string(writer, &def.property)?;
+            // unique フラグを保存
+            writer.write_all(&[if def.unique { 1u8 } else { 0u8 }])?;
+        }
+
+        Ok(())
+    }
+
+    fn read_index_section<R: Read>(reader: &mut R) -> Result<PropertyIndex> {
+        let count = Self::read_u32(reader)? as usize;
+        let mut index = PropertyIndex::new();
+
+        for _ in 0..count {
+            let label = Self::read_string(reader)?;
+            let property = Self::read_string(reader)?;
+            let mut unique_flag = [0u8; 1];
+            reader.read_exact(&mut unique_flag)?;
+            let unique = unique_flag[0] != 0;
+
+            let def = if unique {
+                IndexDefinition::unique(label, property)
+            } else {
+                IndexDefinition::new(label, property)
+            };
+            index.create_index(def);
+        }
+
+        Ok(index)
     }
 
     // ========== Writer helpers ==========
@@ -265,7 +332,6 @@ impl PersistentStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn test_save_load_empty_graph() {
@@ -395,6 +461,88 @@ mod tests {
             node.properties.get("string_val"),
             Some(&PropertyValue::String("hello".to_string()))
         );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_save_load_with_index() {
+        let mut graph = Graph::new();
+        let alice = graph.create_node("Person");
+        if let Some(node) = graph.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("age", 30);
+        }
+
+        let mut index = PropertyIndex::new();
+        index.create_index(IndexDefinition::new("Person", "name"));
+        index.create_index(IndexDefinition::unique("Person", "email"));
+
+        let path = "/tmp/maharit_test_index.db";
+
+        PersistentStorage::save_with_index(&graph, &index, path).unwrap();
+        let (loaded_graph, loaded_index) = PersistentStorage::load_with_index(path).unwrap();
+
+        assert_eq!(loaded_graph.node_count(), 1);
+        assert!(loaded_index.has_index("Person", "name"));
+        assert!(loaded_index.has_index("Person", "email"));
+        assert!(!loaded_index.has_index("Person", "age"));
+
+        // unique フラグの確認
+        let defs = loaded_index.list_indexes();
+        let email_def = defs.iter().find(|d| d.property == "email").unwrap();
+        assert!(email_def.unique);
+        let name_def = defs.iter().find(|d| d.property == "name").unwrap();
+        assert!(!name_def.unique);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_save_load_multiple_indexes() {
+        let mut graph = Graph::new();
+        graph.create_node("Person");
+        graph.create_node("Company");
+
+        let mut index = PropertyIndex::new();
+        index.create_index(IndexDefinition::new("Person", "name"));
+        index.create_index(IndexDefinition::new("Person", "age"));
+        index.create_index(IndexDefinition::new("Company", "name"));
+        index.create_index(IndexDefinition::unique("Company", "ticker"));
+
+        let path = "/tmp/maharit_test_multi_index.db";
+
+        PersistentStorage::save_with_index(&graph, &index, path).unwrap();
+        let (loaded_graph, loaded_index) = PersistentStorage::load_with_index(path).unwrap();
+
+        assert_eq!(loaded_graph.node_count(), 2);
+        assert!(loaded_index.has_index("Person", "name"));
+        assert!(loaded_index.has_index("Person", "age"));
+        assert!(loaded_index.has_index("Company", "name"));
+        assert!(loaded_index.has_index("Company", "ticker"));
+        assert!(!loaded_index.has_index("Person", "ticker"));
+
+        let defs = loaded_index.list_indexes();
+        assert_eq!(defs.len(), 4);
+
+        let ticker_def = defs.iter().find(|d| d.property == "ticker").unwrap();
+        assert!(ticker_def.unique);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_save_without_index_load_with_index() {
+        // save() を使って保存した場合も load_with_index() で読める（空インデックスが返る）
+        let mut graph = Graph::new();
+        graph.create_node("Person");
+
+        let path = "/tmp/maharit_test_no_index.db";
+        PersistentStorage::save(&graph, path).unwrap();
+
+        let (loaded_graph, loaded_index) = PersistentStorage::load_with_index(path).unwrap();
+        assert_eq!(loaded_graph.node_count(), 1);
+        assert_eq!(loaded_index.list_indexes().len(), 0);
 
         std::fs::remove_file(path).ok();
     }

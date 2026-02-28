@@ -9,3 +9,7 @@ license.workspace = true
 maharit-core.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
