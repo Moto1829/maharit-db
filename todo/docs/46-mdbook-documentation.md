@@ -27,6 +27,7 @@ maharit-db の公式ドキュメントを mdBook で作成し、公開できる�
 - [ ] 述語関数（all, any, none, single, exists, isEmpty）
 - [ ] 集計関数（COUNT, SUM, AVG, MAX, MIN, COLLECT 等）
 - [ ] 全文検索（CONTAINS, フレーズ検索, ファジー検索）
+- [ ] 日本語全文検索（形態素解析）
 
 ### インデックス・制約
 - [ ] プロパティインデックスの作成・削除
@@ -37,9 +38,13 @@ maharit-db の公式ドキュメントを mdBook で作成し、公開できる�
 - [ ] サーバーの設定（TOML 設定ファイル）
 - [ ] TLS/SSL 設定
 - [ ] 認証・ロール管理（CREATE USER 等）
+- [ ] ラベル/プロパティ単位のアクセス制御
 - [ ] メトリクス・ヘルスチェック（Prometheus / /health）
+- [ ] OpenTelemetry トレーシング
 - [ ] バックアップ・リストア
 - [ ] スケジュールバックアップ
+- [ ] 増分バックアップ
+- [ ] ポイントインタイムリカバリ（WAL適用）
 
 ### 高度なトピック
 - [ ] トランザクション（BEGIN / COMMIT / ROLLBACK）
@@ -51,16 +56,21 @@ maharit-db の公式ドキュメントを mdBook で作成し、公開できる�
 ### API リファレンス
 - [ ] Rust クライアント（maharit-client）の使い方
 - [ ] TCP プロトコル仕様
+- [ ] Python クライアント（maharit-python）の使い方
+- [ ] Python クライアント: 同期 / 非同期 API
+- [ ] Python クライアント: pandas DataFrame 連携
 
 ### グラフアルゴリズム
 - [ ] 最短経路（shortest_path）
 - [ ] 全経路探索（all_paths）
 - [ ] PageRank / 中心性指標
 - [ ] 連結成分・強連結成分
+- [ ] ラベル伝播法（コミュニティ検出）
 
 ### 可視化
 - [ ] DOT 形式出力（Graphviz）
 - [ ] SVG エクスポート（力学モデルレイアウト）
+- [ ] WebSocket リアルタイム表示
 
 ## mdBook セットアップ
 - [ ] `docs/` ディレクトリに `book.toml` を作成
