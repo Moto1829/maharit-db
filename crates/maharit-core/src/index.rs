@@ -47,6 +47,45 @@ impl LabelIndex {
         }
     }
 
+    /// ノードのラベルを変更し、インデックスを更新する
+    ///
+    /// 旧ラベルのインデックスから削除し、新ラベルのインデックスへ追加する。
+    /// これにより、ラベル変更後に新ラベルで MATCH でき、旧ラベルでは MATCH できなくなる。
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - 更新対象のノードID
+    /// * `new_label` - 新しいラベル
+    ///
+    /// # Returns
+    ///
+    /// 変更前のラベル（存在していた場合は `Some(old_label)`、なければ `None`）
+    pub fn update_node_label(&mut self, node_id: NodeId, new_label: &str) -> Option<String> {
+        // 旧ラベルをインデックスから削除
+        let old_label = if let Some(old) = self.node_to_label.remove(&node_id) {
+            if let Some(nodes) = self.node_labels.get_mut(&old) {
+                nodes.remove(&node_id);
+                if nodes.is_empty() {
+                    self.node_labels.remove(&old);
+                }
+            }
+            Some(old)
+        } else {
+            None
+        };
+
+        // 新ラベルをインデックスに追加（空ラベルは無視）
+        if !new_label.is_empty() {
+            self.node_labels
+                .entry(new_label.to_string())
+                .or_default()
+                .insert(node_id);
+            self.node_to_label.insert(node_id, new_label.to_string());
+        }
+
+        old_label
+    }
+
     /// ラベルでノードを検索
     pub fn get_nodes_by_label(&self, label: &str) -> Vec<NodeId> {
         self.node_labels
@@ -259,5 +298,67 @@ mod tests {
 
         assert_eq!(index.indexed_node_count(), 0);
         assert_eq!(index.indexed_edge_count(), 0);
+    }
+
+    #[test]
+    fn test_update_node_label_new_label_queryable() {
+        // ラベル変更後、新ラベルで検索できること
+        let mut index = LabelIndex::new();
+        index.add_node(0, "Person");
+        index.add_node(1, "Person");
+
+        // ノード0のラベルを Person -> Employee に変更
+        let old_label = index.update_node_label(0, "Employee");
+        assert_eq!(old_label, Some("Person".to_string()));
+
+        // 新ラベル "Employee" で検索できる
+        let employees = index.get_nodes_by_label("Employee");
+        assert_eq!(employees.len(), 1);
+        assert!(employees.contains(&0));
+    }
+
+    #[test]
+    fn test_update_node_label_old_label_not_queryable() {
+        // ラベル変更後、旧ラベルでは検索できないこと
+        let mut index = LabelIndex::new();
+        index.add_node(0, "Person");
+        index.add_node(1, "Person");
+
+        // ノード0のラベルを Person -> Employee に変更
+        index.update_node_label(0, "Employee");
+
+        // 旧ラベル "Person" でノード0は見つからない
+        let persons = index.get_nodes_by_label("Person");
+        assert_eq!(persons.len(), 1);
+        assert!(!persons.contains(&0), "旧ラベルで変更したノードは見つからないべき");
+        assert!(persons.contains(&1), "旧ラベルを持つ他のノードは見つかるべき");
+    }
+
+    #[test]
+    fn test_update_node_label_removes_empty_old_label() {
+        // 旧ラベルのノードが0になった場合、ラベルエントリが削除される
+        let mut index = LabelIndex::new();
+        index.add_node(0, "Temp");
+
+        index.update_node_label(0, "Permanent");
+
+        // 旧ラベル "Temp" のノードは空になる
+        assert!(index.get_nodes_by_label("Temp").is_empty());
+        // 新ラベル "Permanent" は正常に機能する
+        assert_eq!(index.get_nodes_by_label("Permanent").len(), 1);
+    }
+
+    #[test]
+    fn test_update_node_label_returns_none_for_unregistered_node() {
+        // 未登録ノードの更新は None を返す
+        let mut index = LabelIndex::new();
+
+        let old_label = index.update_node_label(999, "NewLabel");
+        assert_eq!(old_label, None);
+
+        // 新ラベルは登録される
+        let nodes = index.get_nodes_by_label("NewLabel");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes.contains(&999));
     }
 }

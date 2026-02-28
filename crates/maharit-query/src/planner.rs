@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::ast::*;
-use maharit_core::Graph;
+use maharit_core::{Graph, PropertyValue};
 
 /// クエリ実行計画のノード
 #[derive(Debug, Clone)]
@@ -187,6 +187,185 @@ impl GraphStats {
     pub fn has_index(&self, label: &str, property: &str) -> bool {
         self.indexed_properties
             .contains(&(label.to_string(), property.to_string()))
+    }
+
+    /// プロパティ値のヒストグラムを構築する（等幅ヒストグラム）
+    ///
+    /// 指定したラベルとプロパティの数値（Integer/Float）について、
+    /// 値の最小・最大から範囲を等分してバケットに振り分ける。
+    ///
+    /// # Arguments
+    ///
+    /// * `graph` - 対象グラフ
+    /// * `label` - ノードラベル
+    /// * `property` - プロパティ名
+    /// * `bucket_count` - バケット数（0 の場合は `None` を返す）
+    ///
+    /// # Returns
+    ///
+    /// ヒストグラムが構築できた場合は `Some(PropertyHistogram)`、
+    /// 対象ノードが存在しない、または数値プロパティが見つからない場合は `None`。
+    pub fn build_histogram(
+        &self,
+        graph: &Graph,
+        label: &str,
+        property: &str,
+        bucket_count: usize,
+    ) -> Option<PropertyHistogram> {
+        if bucket_count == 0 {
+            return None;
+        }
+
+        // 対象ノードの数値プロパティ値を収集
+        let mut values: Vec<f64> = Vec::new();
+        let mut null_count: u64 = 0;
+        let mut distinct_set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        for node in graph.nodes() {
+            if node.label != label {
+                continue;
+            }
+
+            match node.get_property(property) {
+                None => {
+                    null_count += 1;
+                }
+                Some(PropertyValue::Int(v)) => {
+                    values.push(*v as f64);
+                    // Use bit-cast to u64 for use as hash key
+                    distinct_set.insert(*v as u64);
+                }
+                Some(PropertyValue::Float(v)) => {
+                    values.push(*v);
+                    distinct_set.insert(v.to_bits());
+                }
+                Some(_) => {
+                    // 数値以外のプロパティは null としてカウント
+                    null_count += 1;
+                }
+            }
+        }
+
+        if values.is_empty() {
+            return None;
+        }
+
+        let distinct_count = distinct_set.len() as u64;
+
+        // 最小・最大を求める
+        let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        // バケット数を実際の distinct 値数に制限
+        let actual_buckets = bucket_count.min(values.len());
+
+        // 等幅バケットを構築
+        let range = max_val - min_val;
+        let bucket_width = if range == 0.0 || actual_buckets <= 1 {
+            // 全値が同じ場合は1バケット
+            let mut buckets = vec![HistogramBucket {
+                lower: PropertyHistogramValue::Float(min_val),
+                upper: PropertyHistogramValue::Float(max_val),
+                count: values.len() as u64,
+            }];
+            // バケット数に合わせて空のバケットを追加
+            while buckets.len() < actual_buckets {
+                buckets.push(HistogramBucket {
+                    lower: PropertyHistogramValue::Float(max_val),
+                    upper: PropertyHistogramValue::Float(max_val),
+                    count: 0,
+                });
+            }
+            return Some(PropertyHistogram {
+                label: label.to_string(),
+                property: property.to_string(),
+                buckets,
+                null_count,
+                distinct_count,
+            });
+        } else {
+            range / actual_buckets as f64
+        };
+
+        let mut buckets: Vec<HistogramBucket> = (0..actual_buckets)
+            .map(|i| {
+                let lower = min_val + i as f64 * bucket_width;
+                let upper = if i + 1 == actual_buckets {
+                    max_val
+                } else {
+                    min_val + (i + 1) as f64 * bucket_width
+                };
+                HistogramBucket {
+                    lower: PropertyHistogramValue::Float(lower),
+                    upper: PropertyHistogramValue::Float(upper),
+                    count: 0,
+                }
+            })
+            .collect();
+
+        // 各値をバケットへ振り分け
+        for v in &values {
+            let idx = if *v >= max_val {
+                actual_buckets - 1
+            } else {
+                let raw = ((v - min_val) / bucket_width) as usize;
+                raw.min(actual_buckets - 1)
+            };
+            buckets[idx].count += 1;
+        }
+
+        Some(PropertyHistogram {
+            label: label.to_string(),
+            property: property.to_string(),
+            buckets,
+            null_count,
+            distinct_count,
+        })
+    }
+}
+
+/// プロパティ値のヒストグラムバケットの境界値
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyHistogramValue {
+    /// 整数値
+    Int(i64),
+    /// 浮動小数点値
+    Float(f64),
+}
+
+/// ヒストグラムの1バケット
+#[derive(Debug, Clone)]
+pub struct HistogramBucket {
+    /// バケットの下限値（inclusive）
+    pub lower: PropertyHistogramValue,
+    /// バケットの上限値（inclusive for last bucket, exclusive for others）
+    pub upper: PropertyHistogramValue,
+    /// このバケット内の値の個数
+    pub count: u64,
+}
+
+/// プロパティ値の分布を表すヒストグラム
+///
+/// 等幅ヒストグラム（equal-width histogram）を使用する。
+/// 数値（Integer/Float）プロパティのみ対応。
+#[derive(Debug, Clone)]
+pub struct PropertyHistogram {
+    /// 対象ノードラベル
+    pub label: String,
+    /// 対象プロパティ名
+    pub property: String,
+    /// ヒストグラムのバケット一覧
+    pub buckets: Vec<HistogramBucket>,
+    /// NULL値（プロパティが存在しない、または数値以外）の個数
+    pub null_count: u64,
+    /// 異なる値の個数
+    pub distinct_count: u64,
+}
+
+impl PropertyHistogram {
+    /// バケット内の合計件数を返す
+    pub fn total_count(&self) -> u64 {
+        self.buckets.iter().map(|b| b.count).sum()
     }
 }
 
@@ -1628,5 +1807,124 @@ mod tests {
             .estimated_cost;
 
         assert!(cost_pruned < cost_full);
+    }
+
+    // ============================================================================
+    // PropertyHistogram tests
+    // ============================================================================
+
+    fn make_histogram_graph() -> Graph {
+        let mut graph = Graph::new();
+
+        // 10ノード（label="Person"）、age プロパティ: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+        for i in 1..=10u32 {
+            let id = graph.create_node("Person");
+            let node = graph.get_node_mut(id).unwrap();
+            node.set_property("age", (i as i64) * 10);
+        }
+
+        // 別ラベルのノード（ヒストグラム対象外）
+        let company_id = graph.create_node("Company");
+        let company = graph.get_node_mut(company_id).unwrap();
+        company.set_property("age", 999i64);
+
+        // age プロパティなしのノード（null_count に加算される）
+        graph.create_node("Person");
+
+        graph
+    }
+
+    #[test]
+    fn test_histogram_bucket_count() {
+        let graph = make_histogram_graph();
+        let stats = GraphStats::from_graph(&graph);
+
+        let hist = stats.build_histogram(&graph, "Person", "age", 5);
+        assert!(hist.is_some(), "ヒストグラムが構築できるはず");
+        let hist = hist.unwrap();
+
+        assert_eq!(hist.buckets.len(), 5, "バケット数が指定通りであること");
+    }
+
+    #[test]
+    fn test_histogram_total_count_matches() {
+        let graph = make_histogram_graph();
+        let stats = GraphStats::from_graph(&graph);
+
+        // 10ノードが数値プロパティを持つ（Person ラベル）
+        // 1ノードは age なし（null_count）
+        let hist = stats
+            .build_histogram(&graph, "Person", "age", 5)
+            .unwrap();
+
+        let total = hist.total_count();
+        assert_eq!(total, 10, "全バケットの合計件数は数値プロパティ件数と一致するべき");
+        assert_eq!(hist.null_count, 1, "null_count はプロパティなしのノード数と一致するべき");
+    }
+
+    #[test]
+    fn test_histogram_distinct_count() {
+        let graph = make_histogram_graph();
+        let stats = GraphStats::from_graph(&graph);
+
+        let hist = stats
+            .build_histogram(&graph, "Person", "age", 5)
+            .unwrap();
+
+        // 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 の 10 種類
+        assert_eq!(hist.distinct_count, 10, "distinct_count が正しく計算されるべき");
+    }
+
+    #[test]
+    fn test_histogram_no_numeric_property_returns_none() {
+        let mut graph = Graph::new();
+        let id = graph.create_node("Person");
+        let node = graph.get_node_mut(id).unwrap();
+        node.set_property("name", "Alice");
+
+        let stats = GraphStats::from_graph(&graph);
+        let hist = stats.build_histogram(&graph, "Person", "age", 5);
+        assert!(
+            hist.is_none(),
+            "数値プロパティが存在しない場合は None を返すべき"
+        );
+    }
+
+    #[test]
+    fn test_histogram_zero_buckets_returns_none() {
+        let graph = make_histogram_graph();
+        let stats = GraphStats::from_graph(&graph);
+
+        let hist = stats.build_histogram(&graph, "Person", "age", 0);
+        assert!(hist.is_none(), "bucket_count=0 の場合は None を返すべき");
+    }
+
+    #[test]
+    fn test_histogram_no_matching_label_returns_none() {
+        let graph = make_histogram_graph();
+        let stats = GraphStats::from_graph(&graph);
+
+        let hist = stats.build_histogram(&graph, "NonExistent", "age", 5);
+        assert!(
+            hist.is_none(),
+            "存在しないラベルの場合は None を返すべき"
+        );
+    }
+
+    #[test]
+    fn test_histogram_single_value() {
+        // 全ノードが同じ値を持つ場合
+        let mut graph = Graph::new();
+        for _ in 0..5 {
+            let id = graph.create_node("Person");
+            let node = graph.get_node_mut(id).unwrap();
+            node.set_property("score", 42i64);
+        }
+
+        let stats = GraphStats::from_graph(&graph);
+        let hist = stats.build_histogram(&graph, "Person", "score", 3).unwrap();
+
+        assert_eq!(hist.total_count(), 5);
+        assert_eq!(hist.distinct_count, 1);
     }
 }

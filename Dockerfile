@@ -18,9 +18,10 @@ RUN cargo build --release --package maharit-server
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies (including wget for HEALTHCHECK)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -43,8 +44,17 @@ USER maharit
 # Data volume
 VOLUME ["/data"]
 
+# Expose TCP server port and metrics/health HTTP port
+EXPOSE 7687
+EXPOSE 9090
+
 # Environment variables
 ENV MAHARIT_DATA_DIR=/data
 
-# Default command (REPL mode)
-ENTRYPOINT ["/app/maharit"]
+# ヘルスチェック: /health エンドポイントに HTTP GET
+# /health エンドポイントは Task 25 (metrics) で実装済み (port 9090)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:9090/health || exit 1
+
+# Default command (server mode)
+CMD ["/app/maharit", "server"]

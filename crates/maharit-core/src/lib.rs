@@ -9,8 +9,8 @@ pub mod traversal;
 
 pub use algorithms::{
     DegreeCentrality, PageRankConfig, PageRankResult, betweenness_centrality, closeness_centrality,
-    connected_components, find_cycles, has_cycle, pagerank, strongly_connected_components,
-    topological_sort,
+    connected_components, find_cycles, has_cycle, label_propagation, pagerank,
+    strongly_connected_components, topological_sort,
 };
 pub use constraint::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType,

@@ -10,7 +10,8 @@
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use std::io::BufReader;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 /// TLS configuration errors
@@ -552,6 +553,134 @@ pub fn build_client_config(
     }
 }
 
+// ============================================================================
+// Certificate Auto-Reloader
+// ============================================================================
+
+/// TLS証明書ファイルの変更を監視し、変更があれば自動的に再ロードする。
+///
+/// `std::fs::metadata` を使ってファイルの `last_modified` タイムスタンプを
+/// `check_interval` ごとに確認する。変更が検出された場合、新しい [`TlsConfig`] を返す。
+///
+/// # Example
+///
+/// ```no_run
+/// use maharit_server::tls::CertificateReloader;
+/// use std::sync::Arc;
+/// use std::time::Duration;
+///
+/// # async fn example() {
+/// let reloader = Arc::new(CertificateReloader::new(
+///     "/path/to/cert.pem",
+///     "/path/to/key.pem",
+///     Duration::from_secs(30),
+/// ));
+///
+/// reloader.start_watching(|new_config| {
+///     println!("Certificate reloaded: {:?}", new_config.cert_path);
+/// }).await;
+/// # }
+/// ```
+pub struct CertificateReloader {
+    cert_path: String,
+    key_path: String,
+    check_interval: Duration,
+    /// 最後に確認したファイルの変更時刻（cert と key の両方を追跡）
+    last_modified: Mutex<Option<(SystemTime, SystemTime)>>,
+}
+
+impl CertificateReloader {
+    /// 新しい `CertificateReloader` を作成する。
+    ///
+    /// # Arguments
+    ///
+    /// * `cert_path` - PEM形式の証明書ファイルのパス
+    /// * `key_path` - PEM形式の秘密鍵ファイルのパス
+    /// * `check_interval` - ファイル変更チェックの間隔
+    pub fn new(cert_path: &str, key_path: &str, check_interval: Duration) -> Self {
+        Self {
+            cert_path: cert_path.to_string(),
+            key_path: key_path.to_string(),
+            check_interval,
+            last_modified: Mutex::new(None),
+        }
+    }
+
+    /// ファイルの変更タイムスタンプを取得する。
+    fn get_modified_times(&self) -> Option<(SystemTime, SystemTime)> {
+        let cert_meta = std::fs::metadata(&self.cert_path).ok()?;
+        let key_meta = std::fs::metadata(&self.key_path).ok()?;
+        let cert_time = cert_meta.modified().ok()?;
+        let key_time = key_meta.modified().ok()?;
+        Some((cert_time, key_time))
+    }
+
+    /// ファイルの変更を確認し、変更があれば新しい [`TlsConfig`] を返す。
+    ///
+    /// 初回呼び出し時は現在のタイムスタンプを記録して `None` を返す。
+    /// 以降の呼び出しでタイムスタンプが変化していた場合に `Some(TlsConfig)` を返す。
+    ///
+    /// # Returns
+    ///
+    /// * `Some(TlsConfig)` - ファイルが変更されていた場合（新しい設定）
+    /// * `None` - 変更がない場合、またはファイルが読めない場合
+    pub fn check_reload(&self) -> Option<TlsConfig> {
+        let current_times = self.get_modified_times()?;
+
+        let mut last = self.last_modified.lock().unwrap();
+
+        match *last {
+            None => {
+                // 初回: タイムスタンプを記録して None を返す
+                *last = Some(current_times);
+                None
+            }
+            Some(prev_times) => {
+                if current_times != prev_times {
+                    // ファイルが変更された: タイムスタンプを更新して新しい設定を返す
+                    *last = Some(current_times);
+                    Some(TlsConfig::new(&self.cert_path, &self.key_path))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// バックグラウンドで定期的にファイル変更を監視する（tokio::spawn）。
+    ///
+    /// `check_interval` ごとにファイルの変更をチェックし、変更があれば
+    /// `on_reload` コールバックを呼び出す。
+    ///
+    /// # Arguments
+    ///
+    /// * `on_reload` - 証明書が再ロードされた際に呼ばれるコールバック
+    ///
+    /// # Note
+    ///
+    /// この関数は非同期タスクを spawn して即座に返る。
+    /// タスクはプログラムが終了するまで動き続ける。
+    pub async fn start_watching(
+        self: Arc<Self>,
+        on_reload: impl Fn(TlsConfig) + Send + 'static,
+    ) {
+        // 初回チェックでベースラインのタイムスタンプを記録
+        self.check_reload();
+
+        let interval = self.check_interval;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+
+                if let Some(new_config) = self.check_reload() {
+                    on_reload(new_config);
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +988,122 @@ min_version = "1.4"
         assert_eq!(result.cert_path, "/a/b.pem");
         assert_eq!(result.key_path, "/a/k.pem");
         assert_eq!(result.min_protocol_version, Some(ProtocolVersion::Tls13));
+    }
+
+    // -----------------------------------------------------------------------
+    // CertificateReloader tests
+    // -----------------------------------------------------------------------
+
+    /// テスト用の一時ファイルを作成して、そのパスを返す RAII ガード
+    struct TempCertFile(std::path::PathBuf);
+
+    impl TempCertFile {
+        fn new(suffix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "maharit_cert_reload_test_{}{}.pem",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos(),
+                suffix,
+            ));
+            std::fs::write(&path, b"dummy cert content").unwrap();
+            Self(path)
+        }
+
+        fn path_str(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+
+        fn touch(&self) {
+            // ファイルを再書き込みして変更時刻を更新する
+            let content = std::fs::read(&self.0).unwrap();
+            std::fs::write(&self.0, content).unwrap();
+        }
+    }
+
+    impl Drop for TempCertFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_certificate_reloader_no_change_returns_none() {
+        // 変更なしでは check_reload() が None を返すこと
+        let cert = TempCertFile::new("cert");
+        let key = TempCertFile::new("key");
+
+        let reloader = CertificateReloader::new(
+            cert.path_str(),
+            key.path_str(),
+            Duration::from_secs(30),
+        );
+
+        // 初回呼び出し: ベースラインを設定
+        let first = reloader.check_reload();
+        assert!(first.is_none(), "初回呼び出しは None を返すべき");
+
+        // 変更なしで再呼び出し: None を返す
+        let second = reloader.check_reload();
+        assert!(second.is_none(), "変更がない場合は None を返すべき");
+    }
+
+    #[test]
+    fn test_certificate_reloader_file_change_returns_some() {
+        // ファイルタイムスタンプ更新後に Some(TlsConfig) を返すこと
+        let cert = TempCertFile::new("cert2");
+        let key = TempCertFile::new("key2");
+
+        let reloader = CertificateReloader::new(
+            cert.path_str(),
+            key.path_str(),
+            Duration::from_secs(30),
+        );
+
+        // 初回呼び出し: ベースラインを設定
+        reloader.check_reload();
+
+        // わずかに待ってからファイルを更新（一部のファイルシステムでは
+        // 変更時刻の精度が低いため、確実に変更を検出するために再書き込みする）
+        std::thread::sleep(Duration::from_millis(10));
+        cert.touch();
+
+        // 変更後は Some(TlsConfig) を返す
+        let result = reloader.check_reload();
+        assert!(
+            result.is_some(),
+            "ファイル変更後は Some(TlsConfig) を返すべき"
+        );
+
+        let config = result.unwrap();
+        assert_eq!(config.cert_path, cert.path_str());
+        assert_eq!(config.key_path, key.path_str());
+    }
+
+    #[test]
+    fn test_certificate_reloader_nonexistent_files_returns_none() {
+        // 存在しないファイルに対しては check_reload() が None を返す
+        let reloader = CertificateReloader::new(
+            "/nonexistent/cert.pem",
+            "/nonexistent/key.pem",
+            Duration::from_secs(30),
+        );
+
+        let result = reloader.check_reload();
+        assert!(result.is_none(), "存在しないファイルは None を返すべき");
+    }
+
+    #[test]
+    fn test_certificate_reloader_new_creates_correctly() {
+        let reloader = CertificateReloader::new(
+            "/path/to/cert.pem",
+            "/path/to/key.pem",
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(reloader.cert_path, "/path/to/cert.pem");
+        assert_eq!(reloader.key_path, "/path/to/key.pem");
+        assert_eq!(reloader.check_interval, Duration::from_secs(60));
     }
 }

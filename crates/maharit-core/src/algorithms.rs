@@ -301,6 +301,85 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
 // Community Detection
 // ============================================================================
 
+/// ラベル伝播法によるコミュニティ検出
+///
+/// 各ノードに最も多い隣接ノードのラベルを伝播させることで、
+/// コミュニティ（クラスター）を検出する。
+///
+/// # Arguments
+///
+/// * `graph` - 対象グラフ
+/// * `max_iterations` - 最大イテレーション数
+///
+/// # Returns
+///
+/// `HashMap<NodeId, CommunityId>` - 各ノードのコミュニティID
+///
+/// # Algorithm
+///
+/// 1. 初期化: 各ノードのコミュニティIDを自身のノードIDに設定
+/// 2. 各イテレーション:
+///    - 全ノードをノードID順に処理
+///    - 各ノードの隣接ノード（出辺・入辺両方）のコミュニティIDをカウント
+///    - 最多のコミュニティIDを自ノードのラベルとして採用（同数の場合は小さいIDを優先）
+/// 3. ラベルが変化しなくなるか `max_iterations` に達したら終了
+pub fn label_propagation(graph: &Graph, max_iterations: usize) -> HashMap<NodeId, u64> {
+    let mut labels: HashMap<NodeId, u64> = graph.nodes().map(|n| (n.id, n.id)).collect();
+
+    if labels.is_empty() {
+        return labels;
+    }
+
+    let mut node_ids: Vec<NodeId> = graph.nodes().map(|n| n.id).collect();
+    node_ids.sort_unstable();
+
+    for _ in 0..max_iterations {
+        let mut changed = false;
+
+        for &node_id in &node_ids {
+            // 隣接ノードのコミュニティIDをカウント（無向グラフとして扱う）
+            let mut label_counts: HashMap<u64, usize> = HashMap::new();
+
+            for edge in graph.get_outgoing_edges(node_id) {
+                if let Some(&neighbor_label) = labels.get(&edge.to) {
+                    *label_counts.entry(neighbor_label).or_insert(0) += 1;
+                }
+            }
+            for edge in graph.get_incoming_edges(node_id) {
+                if let Some(&neighbor_label) = labels.get(&edge.from) {
+                    *label_counts.entry(neighbor_label).or_insert(0) += 1;
+                }
+            }
+
+            if label_counts.is_empty() {
+                // 孤立ノードは自分のコミュニティに留まる
+                continue;
+            }
+
+            // 最多のラベルを選択。同数の場合は小さいIDを優先
+            let max_count = *label_counts.values().max().unwrap();
+            let best_label = label_counts
+                .iter()
+                .filter(|&(_, count)| *count == max_count)
+                .map(|(&label, _)| label)
+                .min()
+                .unwrap();
+
+            let current_label = labels[&node_id];
+            if best_label != current_label {
+                labels.insert(node_id, best_label);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    labels
+}
+
 /// Find connected components in the graph (treating as undirected)
 pub fn connected_components(graph: &Graph) -> Vec<HashSet<NodeId>> {
     let mut visited = HashSet::new();
@@ -719,5 +798,113 @@ mod tests {
         for &value in centrality.values() {
             assert!(value >= 0.0);
         }
+    }
+
+    // ============================================================================
+    // Label Propagation Tests
+    // ============================================================================
+
+    #[test]
+    fn test_label_propagation_isolated_node() {
+        // 孤立ノードは自分のコミュニティに所属する
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        // エッジなし（孤立ノード）
+
+        let communities = label_propagation(&graph, 10);
+
+        assert_eq!(communities.len(), 2);
+        // 各ノードは自分自身のコミュニティ（ID）に所属する
+        assert_eq!(communities[&a], a);
+        assert_eq!(communities[&b], b);
+    }
+
+    #[test]
+    fn test_label_propagation_complete_graph() {
+        // 完全グラフは1コミュニティになる
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+
+        graph.create_edge(a, b, "KNOWS").unwrap();
+        graph.create_edge(b, a, "KNOWS").unwrap();
+        graph.create_edge(b, c, "KNOWS").unwrap();
+        graph.create_edge(c, b, "KNOWS").unwrap();
+        graph.create_edge(a, c, "KNOWS").unwrap();
+        graph.create_edge(c, a, "KNOWS").unwrap();
+
+        let communities = label_propagation(&graph, 50);
+
+        // 全ノードが同じコミュニティに収束するはず
+        let unique_communities: std::collections::HashSet<u64> =
+            communities.values().copied().collect();
+        assert_eq!(unique_communities.len(), 1, "完全グラフは1コミュニティになるべき");
+    }
+
+    #[test]
+    fn test_label_propagation_two_clusters() {
+        // 2つのクラスターが正しく分離される
+        // クラスター1: A-B-C（互いに密接）
+        // クラスター2: D-E-F（互いに密接）
+        // A と D はエッジなし
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        let c = graph.create_node("C");
+        let d = graph.create_node("D");
+        let e = graph.create_node("E");
+        let f = graph.create_node("F");
+
+        // クラスター1内の接続
+        graph.create_edge(a, b, "KNOWS").unwrap();
+        graph.create_edge(b, a, "KNOWS").unwrap();
+        graph.create_edge(b, c, "KNOWS").unwrap();
+        graph.create_edge(c, b, "KNOWS").unwrap();
+        graph.create_edge(a, c, "KNOWS").unwrap();
+        graph.create_edge(c, a, "KNOWS").unwrap();
+
+        // クラスター2内の接続
+        graph.create_edge(d, e, "KNOWS").unwrap();
+        graph.create_edge(e, d, "KNOWS").unwrap();
+        graph.create_edge(e, f, "KNOWS").unwrap();
+        graph.create_edge(f, e, "KNOWS").unwrap();
+        graph.create_edge(d, f, "KNOWS").unwrap();
+        graph.create_edge(f, d, "KNOWS").unwrap();
+
+        let communities = label_propagation(&graph, 50);
+
+        // クラスター1内のノードは同じコミュニティ
+        let cluster1_label = communities[&a];
+        assert_eq!(communities[&b], cluster1_label);
+        assert_eq!(communities[&c], cluster1_label);
+
+        // クラスター2内のノードは同じコミュニティ
+        let cluster2_label = communities[&d];
+        assert_eq!(communities[&e], cluster2_label);
+        assert_eq!(communities[&f], cluster2_label);
+
+        // 2つのクラスターは異なるコミュニティ
+        assert_ne!(
+            cluster1_label, cluster2_label,
+            "2つのクラスターは分離されるべき"
+        );
+    }
+
+    #[test]
+    fn test_label_propagation_empty_graph() {
+        let graph = Graph::new();
+        let communities = label_propagation(&graph, 10);
+        assert!(communities.is_empty());
+    }
+
+    #[test]
+    fn test_label_propagation_single_node() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let communities = label_propagation(&graph, 10);
+        assert_eq!(communities.len(), 1);
+        assert_eq!(communities[&a], a);
     }
 }
