@@ -8,7 +8,7 @@
 ### オンラインバックアップ
 - [x] サーバー稼働中のバックアップ
 - [x] スナップショットの作成
-- [ ] 増分バックアップ（将来的）
+- [x] 増分バックアップ（IncrementalBackupMetadata / create_incremental / restore_incremental）
 
 ### バックアップ形式
 - [x] フルバックアップ（データファイル + WAL）
@@ -17,7 +17,7 @@
 
 ### リストア
 - [x] バックアップからの復元
-- [ ] ポイントインタイムリカバリ（WAL適用）
+- [x] ポイントインタイムリカバリ（WAL適用）（restore_to_point_in_time）
 - [x] 復元の検証
 
 ### CLIコマンド

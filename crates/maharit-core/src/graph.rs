@@ -94,6 +94,33 @@ impl Graph {
         id
     }
 
+    /// 指定したIDでノードを作成する（バックアップ/リストア専用）
+    ///
+    /// 指定した `id` が既に使用されている場合は既存ノードの ID を返す。
+    /// `next_node_id` は必要に応じて更新される。
+    pub fn create_node_with_id(&mut self, id: NodeId, label: impl Into<String>) -> NodeId {
+        if self.nodes.contains_key(&id) {
+            return id;
+        }
+
+        let node = Node {
+            id,
+            label: label.into(),
+            properties: HashMap::new(),
+        };
+
+        self.nodes.insert(id, node);
+        self.outgoing_edges.insert(id, Vec::new());
+        self.incoming_edges.insert(id, Vec::new());
+
+        // Keep next_node_id ahead of all assigned IDs.
+        if id >= self.next_node_id {
+            self.next_node_id = id + 1;
+        }
+
+        id
+    }
+
     /// ノードを取得
     pub fn get_node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(&id)

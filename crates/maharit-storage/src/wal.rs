@@ -137,13 +137,24 @@ impl Wal {
 
     /// レコードを追記
     pub fn append(&mut self, record_type: RecordType, payload: RecordPayload) -> Result<Lsn> {
-        self.current_lsn += 1;
-        let lsn = self.current_lsn;
-
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+        self.append_at(record_type, payload, timestamp)
+    }
+
+    /// テスト用: カスタムタイムスタンプでレコードを追記
+    ///
+    /// 本番コードでは `append` を使用すること。
+    pub fn append_at(
+        &mut self,
+        record_type: RecordType,
+        payload: RecordPayload,
+        timestamp: u64,
+    ) -> Result<Lsn> {
+        self.current_lsn += 1;
+        let lsn = self.current_lsn;
 
         let record = LogRecord {
             lsn,
@@ -283,6 +294,44 @@ impl Wal {
     }
 
     // ========== Internal methods ==========
+
+    /// Read all WAL records whose `timestamp` is strictly greater than
+    /// `after_timestamp`, in LSN order.  Returns the filtered records and the
+    /// optional LSN of the last checkpoint record encountered (regardless of
+    /// its timestamp).
+    ///
+    /// Pass `after_timestamp = 0` to retrieve every record in the log.
+    pub fn read_all_for_incremental(
+        &self,
+        after_timestamp: u64,
+    ) -> (Vec<LogRecord>, Option<Lsn>) {
+        let file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(_) => return (Vec::new(), None),
+        };
+        let mut reader = BufReader::new(file);
+
+        let mut matching_records = Vec::new();
+        let mut last_checkpoint_lsn = None;
+
+        loop {
+            match Self::read_record(&mut reader) {
+                Ok(Some(record)) => {
+                    if record.record_type == RecordType::Checkpoint {
+                        last_checkpoint_lsn = Some(record.lsn);
+                    }
+                    if record.timestamp > after_timestamp {
+                        matching_records.push(record);
+                    }
+                }
+                Ok(None) => break,
+                Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(_) => break,
+            }
+        }
+
+        (matching_records, last_checkpoint_lsn)
+    }
 
     /// Read all records and find the last checkpoint record's LSN
     fn read_all_records(&self) -> Result<(Vec<LogRecord>, Option<Lsn>)> {

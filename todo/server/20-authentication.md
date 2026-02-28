@@ -18,7 +18,7 @@ TCPサーバーへの接続時にユーザー認証と権限管理を行う機�
 ### 認可（ロールベースアクセス制御）
 - [x] ロールの定義（admin, read-write, read-only）
 - [x] クエリ種別ごとの権限チェック
-- [ ] ラベル/プロパティ単位のアクセス制御（将来的）
+- [x] ラベル/プロパティ単位のアクセス制御（AclManager: AclRule/AclSubject/AclResource/AclPermission）
 
 ### クエリ構文
 - [x] CREATE USER username SET PASSWORD 'pass' ROLE role

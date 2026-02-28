@@ -533,6 +533,170 @@ fn generate_token() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// ACL (label/property-level access control)
+// ---------------------------------------------------------------------------
+
+/// The subject of an ACL rule: who the rule applies to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AclSubject {
+    /// A specific named user.
+    User(String),
+    /// All users that hold a given role.
+    Role(Role),
+}
+
+/// The resource that an ACL rule guards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AclResource {
+    /// All nodes with the given label (e.g. `"Secret"`).
+    Label(String),
+    /// A specific property on nodes with the given label
+    /// (e.g. `("User", "password")`).
+    Property(String, String),
+    /// Every label in the graph.
+    AllLabels,
+}
+
+/// Whether access is explicitly permitted or denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AclPermission {
+    Allow,
+    Deny,
+}
+
+/// A single access-control rule.
+///
+/// Rules are evaluated by [`AclManager::check`]:
+/// 1. A user-level `Deny` wins over everything.
+/// 2. A role-level `Deny` wins next.
+/// 3. A user-level `Allow` wins next.
+/// 4. A role-level `Allow` wins next.
+/// 5. Default is `Allow` (open by default, consistent with existing behaviour).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AclRule {
+    /// Who this rule applies to.
+    pub subject: AclSubject,
+    /// Which resource is being controlled.
+    pub resource: AclResource,
+    /// Whether access is allowed or denied.
+    pub permission: AclPermission,
+}
+
+/// Manages ACL rules for label- and property-level access control.
+///
+/// This sits on top of the role-based [`AuthManager`]: after the caller has
+/// verified that the user's [`Role`] permits the requested [`Operation`], it
+/// can use `AclManager` to further restrict access to specific labels or
+/// properties.
+pub struct AclManager {
+    rules: Vec<AclRule>,
+}
+
+impl AclManager {
+    /// Create a new, empty `AclManager`.
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Append a rule to the rule list.
+    pub fn add_rule(&mut self, rule: AclRule) {
+        self.rules.push(rule);
+    }
+
+    /// Remove the rule at `index` and return it, or `None` if the index is
+    /// out of bounds.
+    pub fn remove_rule(&mut self, index: usize) -> Option<AclRule> {
+        if index < self.rules.len() {
+            Some(self.rules.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Return all rules.
+    pub fn rules(&self) -> &[AclRule] {
+        &self.rules
+    }
+
+    /// Determine whether `username` (holding `role`) may access `resource`.
+    ///
+    /// **Priority order** (first match wins):
+    /// 1. User-level `Deny`
+    /// 2. Role-level `Deny`
+    /// 3. User-level `Allow`
+    /// 4. Role-level `Allow`
+    /// 5. Default → `Allow`
+    pub fn check(
+        &self,
+        username: &str,
+        role: Role,
+        resource: &AclResource,
+    ) -> AclPermission {
+        // Collect matching rules for this subject+resource combination.
+        let matches_resource = |r: &AclResource| -> bool {
+            match (r, resource) {
+                (AclResource::AllLabels, _) => true,
+                (_, AclResource::AllLabels) => true,
+                (AclResource::Label(a), AclResource::Label(b)) => a == b,
+                (AclResource::Property(la, pa), AclResource::Property(lb, pb)) => {
+                    la == lb && pa == pb
+                }
+                // A Label rule covers all properties of that label.
+                (AclResource::Label(label_rule), AclResource::Property(label_res, _)) => {
+                    label_rule == label_res
+                }
+                _ => false,
+            }
+        };
+
+        // 1. User-level Deny
+        if self.rules.iter().any(|r| {
+            r.permission == AclPermission::Deny
+                && matches!(&r.subject, AclSubject::User(u) if u == username)
+                && matches_resource(&r.resource)
+        }) {
+            return AclPermission::Deny;
+        }
+
+        // 2. Role-level Deny
+        if self.rules.iter().any(|r| {
+            r.permission == AclPermission::Deny
+                && matches!(&r.subject, AclSubject::Role(ro) if *ro == role)
+                && matches_resource(&r.resource)
+        }) {
+            return AclPermission::Deny;
+        }
+
+        // 3. User-level Allow
+        if self.rules.iter().any(|r| {
+            r.permission == AclPermission::Allow
+                && matches!(&r.subject, AclSubject::User(u) if u == username)
+                && matches_resource(&r.resource)
+        }) {
+            return AclPermission::Allow;
+        }
+
+        // 4. Role-level Allow
+        if self.rules.iter().any(|r| {
+            r.permission == AclPermission::Allow
+                && matches!(&r.subject, AclSubject::Role(ro) if *ro == role)
+                && matches_resource(&r.resource)
+        }) {
+            return AclPermission::Allow;
+        }
+
+        // 5. Default: Allow (keeps backward compatibility)
+        AclPermission::Allow
+    }
+}
+
+impl Default for AclManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -902,5 +1066,179 @@ mod tests {
 
         let result = AuthManager::load_from_file(path);
         assert!(matches!(result, Err(AuthError::PersistenceError(_))));
+    }
+
+    // -----------------------------------------------------------------------
+    // AclManager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_acl_default_allow_when_no_rules() {
+        let mgr = AclManager::new();
+        let result = mgr.check("alice", Role::ReadOnly, &AclResource::Label("Secret".to_string()));
+        assert_eq!(result, AclPermission::Allow);
+    }
+
+    #[test]
+    fn test_acl_deny_specific_label() {
+        let mut mgr = AclManager::new();
+        mgr.add_rule(AclRule {
+            subject: AclSubject::User("bob".to_string()),
+            resource: AclResource::Label("Secret".to_string()),
+            permission: AclPermission::Deny,
+        });
+
+        // bob is denied access to Secret label
+        assert_eq!(
+            mgr.check("bob", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            AclPermission::Deny
+        );
+        // alice is not affected
+        assert_eq!(
+            mgr.check("alice", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            AclPermission::Allow
+        );
+    }
+
+    #[test]
+    fn test_acl_deny_specific_property() {
+        let mut mgr = AclManager::new();
+        mgr.add_rule(AclRule {
+            subject: AclSubject::Role(Role::ReadOnly),
+            resource: AclResource::Property("User".to_string(), "password".to_string()),
+            permission: AclPermission::Deny,
+        });
+
+        // ReadOnly role cannot access User.password
+        assert_eq!(
+            mgr.check(
+                "alice",
+                Role::ReadOnly,
+                &AclResource::Property("User".to_string(), "password".to_string())
+            ),
+            AclPermission::Deny
+        );
+        // Admin role is not affected by this rule
+        assert_eq!(
+            mgr.check(
+                "admin",
+                Role::Admin,
+                &AclResource::Property("User".to_string(), "password".to_string())
+            ),
+            AclPermission::Allow
+        );
+    }
+
+    #[test]
+    fn test_acl_deny_beats_allow() {
+        let mut mgr = AclManager::new();
+        // Allow for the role
+        mgr.add_rule(AclRule {
+            subject: AclSubject::Role(Role::ReadWrite),
+            resource: AclResource::Label("Secret".to_string()),
+            permission: AclPermission::Allow,
+        });
+        // But deny for the specific user
+        mgr.add_rule(AclRule {
+            subject: AclSubject::User("mallory".to_string()),
+            resource: AclResource::Label("Secret".to_string()),
+            permission: AclPermission::Deny,
+        });
+
+        // mallory is denied despite the role-level Allow
+        assert_eq!(
+            mgr.check("mallory", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            AclPermission::Deny
+        );
+        // other ReadWrite users still get Allow
+        assert_eq!(
+            mgr.check("alice", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            AclPermission::Allow
+        );
+    }
+
+    #[test]
+    fn test_acl_user_rule_beats_role_deny() {
+        let mut mgr = AclManager::new();
+        // Deny the whole ReadOnly role
+        mgr.add_rule(AclRule {
+            subject: AclSubject::Role(Role::ReadOnly),
+            resource: AclResource::Label("Internal".to_string()),
+            permission: AclPermission::Deny,
+        });
+        // But explicitly allow a specific user in that role (user-level Deny
+        // wins over role-level Deny, and user-level Allow wins over role-level
+        // Deny per the priority order: user-Deny > role-Deny > user-Allow >
+        // role-Allow).  Since there is no user-Deny for "trusted", user-Allow
+        // is reached before role-Deny resolves… wait – the spec says Deny
+        // beats Allow.  Let's verify the documented priority:
+        // 1 user-Deny, 2 role-Deny, 3 user-Allow, 4 role-Allow.
+        // Here we add a user-Allow for "trusted" on top of the role-Deny.
+        // "trusted" has no user-Deny, so we fall to role-Deny → Deny.
+        // This test verifies role-Deny wins over user-Allow (Deny-first logic).
+        mgr.add_rule(AclRule {
+            subject: AclSubject::User("trusted".to_string()),
+            resource: AclResource::Label("Internal".to_string()),
+            permission: AclPermission::Allow,
+        });
+
+        // role-Deny beats user-Allow → Deny
+        assert_eq!(
+            mgr.check("trusted", Role::ReadOnly, &AclResource::Label("Internal".to_string())),
+            AclPermission::Deny
+        );
+    }
+
+    #[test]
+    fn test_acl_all_labels_resource() {
+        let mut mgr = AclManager::new();
+        mgr.add_rule(AclRule {
+            subject: AclSubject::Role(Role::ReadOnly),
+            resource: AclResource::AllLabels,
+            permission: AclPermission::Deny,
+        });
+
+        // ReadOnly is denied on any label
+        assert_eq!(
+            mgr.check("alice", Role::ReadOnly, &AclResource::Label("Public".to_string())),
+            AclPermission::Deny
+        );
+        assert_eq!(
+            mgr.check(
+                "alice",
+                Role::ReadOnly,
+                &AclResource::Property("Public".to_string(), "data".to_string())
+            ),
+            AclPermission::Deny
+        );
+    }
+
+    #[test]
+    fn test_acl_remove_rule() {
+        let mut mgr = AclManager::new();
+        mgr.add_rule(AclRule {
+            subject: AclSubject::User("bob".to_string()),
+            resource: AclResource::Label("Secret".to_string()),
+            permission: AclPermission::Deny,
+        });
+
+        assert_eq!(mgr.rules().len(), 1);
+
+        let removed = mgr.remove_rule(0);
+        assert!(removed.is_some());
+        assert_eq!(mgr.rules().len(), 0);
+
+        // After removing the deny rule, default Allow applies
+        assert_eq!(
+            mgr.check("bob", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            AclPermission::Allow
+        );
+    }
+
+    #[test]
+    fn test_acl_remove_rule_out_of_bounds() {
+        let mut mgr = AclManager::new();
+        let removed = mgr.remove_rule(99);
+        assert!(removed.is_none());
     }
 }

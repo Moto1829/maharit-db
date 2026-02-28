@@ -6,7 +6,10 @@ mod wal;
 
 use maharit_core::Graph;
 
-pub use backup::{Backup, BackupCallback, BackupError, BackupMetadata, BackupOptions, BackupScheduler};
+pub use backup::{
+    Backup, BackupCallback, BackupError, BackupMetadata, BackupOptions, BackupScheduler,
+    IncrementalBackupMetadata,
+};
 pub use mvcc::{MvccManager, MvccSnapshot, NodeData, NodeVersion, PropertyValue as MvccPropertyValue, VersionedNode};
 pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -34,6 +34,9 @@ pub enum BackupError {
 
     #[error("graph error: {0}")]
     Graph(#[from] maharit_core::GraphError),
+
+    #[error("WAL error: {0}")]
+    Wal(String),
 }
 
 pub type Result<T> = std::result::Result<T, BackupError>;
@@ -577,6 +580,414 @@ impl Backup {
                 t
             ))),
         }
+    }
+}
+
+// ========== Incremental backup ==========
+
+/// Magic bytes for incremental backup files.
+const INCR_MAGIC: &[u8; 8] = b"MHRTINCR";
+/// Incremental backup format version.
+const INCR_VERSION: u32 = 1;
+
+/// Metadata describing an incremental backup.
+///
+/// An incremental backup records only the nodes and edges that were modified
+/// (or created) after `base_timestamp` and the IDs of anything that was
+/// deleted since that point.
+#[derive(Debug, Clone)]
+pub struct IncrementalBackupMetadata {
+    /// ID of the base full backup this increment builds on.
+    pub base_backup_id: String,
+    /// Unix timestamp (seconds) of the base backup.
+    pub base_timestamp: u64,
+    /// Unique ID for this incremental backup.
+    pub incremental_id: String,
+    /// Unix timestamp (seconds) when this incremental backup was created.
+    pub timestamp: u64,
+    /// Node IDs that were added or modified since the base backup.
+    pub changed_node_ids: Vec<u64>,
+    /// Edge IDs that were added or modified since the base backup.
+    pub changed_edge_ids: Vec<u64>,
+    /// Node IDs that were deleted since the base backup.
+    pub deleted_node_ids: Vec<u64>,
+    /// Edge IDs that were deleted since the base backup.
+    pub deleted_edge_ids: Vec<u64>,
+}
+
+impl Backup {
+    // ------------------------------------------------------------------
+    // Incremental backup
+    // ------------------------------------------------------------------
+
+    /// Create an incremental backup containing only the nodes and edges that
+    /// were recorded as changed in `wal_path` after `base_timestamp`.
+    ///
+    /// The WAL is scanned to discover which node/edge IDs were created,
+    /// modified, or deleted after the given timestamp.  For nodes/edges that
+    /// still exist in `graph` their full data is serialised into the output
+    /// file.  Deleted IDs are stored in the metadata so that
+    /// [`restore_incremental`] can remove them when applying the diff.
+    ///
+    /// # File format
+    /// `INCR_MAGIC | INCR_VERSION | base_backup_id_str | base_timestamp_u64 |
+    ///  incremental_id_str | timestamp_u64 |
+    ///  changed_node_count_u64 | [node_data]* |
+    ///  changed_edge_count_u64 | [edge_data]* |
+    ///  deleted_node_count_u64 | [node_id_u64]* |
+    ///  deleted_edge_count_u64 | [edge_id_u64]*`
+    pub fn create_incremental(
+        graph: &Graph,
+        base_backup_id: &str,
+        base_timestamp: u64,
+        wal_path: &str,
+        output_path: &str,
+        options: &BackupOptions,
+    ) -> Result<IncrementalBackupMetadata> {
+        use crate::wal::{RecordPayload, Wal};
+
+        // Scan WAL to find what changed after base_timestamp.
+        let wal = Wal::open(wal_path).map_err(|e| BackupError::Wal(e.to_string()))?;
+        let (all_records, _) = wal.read_all_for_incremental(base_timestamp);
+
+        let mut changed_nodes: HashSet<u64> = HashSet::new();
+        let mut changed_edges: HashSet<u64> = HashSet::new();
+        let mut deleted_nodes: HashSet<u64> = HashSet::new();
+        let mut deleted_edges: HashSet<u64> = HashSet::new();
+
+        for record in &all_records {
+            match &record.payload {
+                RecordPayload::CreateNode { node_id, .. }
+                | RecordPayload::SetNodeProperty { node_id, .. } => {
+                    changed_nodes.insert(*node_id);
+                }
+                RecordPayload::DeleteNode { node_id } => {
+                    changed_nodes.remove(node_id);
+                    deleted_nodes.insert(*node_id);
+                }
+                RecordPayload::CreateEdge { edge_id, .. }
+                | RecordPayload::SetEdgeProperty { edge_id, .. } => {
+                    changed_edges.insert(*edge_id);
+                }
+                RecordPayload::DeleteEdge { edge_id } => {
+                    changed_edges.remove(edge_id);
+                    deleted_edges.insert(*edge_id);
+                }
+                RecordPayload::Checkpoint { .. } => {}
+            }
+        }
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX epoch")
+            .as_secs();
+
+        let incremental_id = format!("incr-{}", timestamp);
+
+        // Collect changed node IDs that still exist in the graph.
+        let changed_node_ids: Vec<u64> = changed_nodes
+            .iter()
+            .filter(|&&id| graph.get_node(id).is_some())
+            .copied()
+            .collect();
+        let changed_edge_ids: Vec<u64> = changed_edges
+            .iter()
+            .filter(|&&id| graph.get_edge(id).is_some())
+            .copied()
+            .collect();
+        let deleted_node_ids: Vec<u64> = deleted_nodes.into_iter().collect();
+        let deleted_edge_ids: Vec<u64> = deleted_edges.into_iter().collect();
+
+        // Serialise to file.
+        let file = File::create(output_path)?;
+        let mut writer = BufWriter::new(file);
+
+        // Header
+        writer.write_all(INCR_MAGIC)?;
+        writer.write_all(&INCR_VERSION.to_le_bytes())?;
+        Self::write_string(&mut writer, base_backup_id)?;
+        writer.write_all(&base_timestamp.to_le_bytes())?;
+        Self::write_string(&mut writer, &incremental_id)?;
+        writer.write_all(&timestamp.to_le_bytes())?;
+
+        // Compress flag
+        writer.write_all(&[if options.compressed { 1 } else { 0 }])?;
+        Self::write_string(&mut writer, &options.description)?;
+
+        // Build the payload into a buffer (so it can be optionally compressed)
+        let mut payload: Vec<u8> = Vec::new();
+
+        // Changed nodes
+        Self::write_u64(&mut payload, changed_node_ids.len() as u64)?;
+        for &node_id in &changed_node_ids {
+            if let Some(node) = graph.get_node(node_id) {
+                Self::write_u64(&mut payload, node.id)?;
+                Self::write_string(&mut payload, &node.label)?;
+                Self::write_properties(&mut payload, &node.properties)?;
+            }
+        }
+
+        // Changed edges
+        Self::write_u64(&mut payload, changed_edge_ids.len() as u64)?;
+        for &edge_id in &changed_edge_ids {
+            if let Some(edge) = graph.get_edge(edge_id) {
+                Self::write_u64(&mut payload, edge.id)?;
+                Self::write_u64(&mut payload, edge.from)?;
+                Self::write_u64(&mut payload, edge.to)?;
+                Self::write_string(&mut payload, &edge.label)?;
+                Self::write_properties(&mut payload, &edge.properties)?;
+            }
+        }
+
+        // Deleted node IDs
+        Self::write_u64(&mut payload, deleted_node_ids.len() as u64)?;
+        for &id in &deleted_node_ids {
+            Self::write_u64(&mut payload, id)?;
+        }
+
+        // Deleted edge IDs
+        Self::write_u64(&mut payload, deleted_edge_ids.len() as u64)?;
+        for &id in &deleted_edge_ids {
+            Self::write_u64(&mut payload, id)?;
+        }
+
+        // Write payload (compressed or raw)
+        if options.compressed {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&payload)?;
+            let compressed = encoder.finish()?;
+            writer.write_all(&compressed)?;
+        } else {
+            writer.write_all(&payload)?;
+        }
+
+        writer.flush()?;
+
+        Ok(IncrementalBackupMetadata {
+            base_backup_id: base_backup_id.to_string(),
+            base_timestamp,
+            incremental_id,
+            timestamp,
+            changed_node_ids,
+            changed_edge_ids,
+            deleted_node_ids,
+            deleted_edge_ids,
+        })
+    }
+
+    /// Restore a graph by first loading `base_path` (full backup) and then
+    /// applying the changes recorded in `incremental_path`.
+    pub fn restore_incremental(
+        base_path: &str,
+        incremental_path: &str,
+    ) -> Result<Graph> {
+        // Load base backup
+        let mut graph = Self::restore(base_path)?;
+
+        // Parse incremental file
+        let file = File::open(incremental_path)?;
+        let mut reader = BufReader::new(file);
+
+        // Magic
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != INCR_MAGIC {
+            return Err(BackupError::CorruptedData(
+                "invalid incremental backup magic".to_string(),
+            ));
+        }
+
+        // Version
+        let version = Self::read_u32(&mut reader)?;
+        if version != INCR_VERSION {
+            return Err(BackupError::UnsupportedVersion(version));
+        }
+
+        // Metadata fields
+        let _base_backup_id = Self::read_string(&mut reader)?;
+        let _base_timestamp = Self::read_u64(&mut reader)?;
+        let _incremental_id = Self::read_string(&mut reader)?;
+        let _timestamp = Self::read_u64(&mut reader)?;
+
+        // Compressed flag + description
+        let mut flag = [0u8; 1];
+        reader.read_exact(&mut flag)?;
+        let compressed = flag[0] != 0;
+        let _description = Self::read_string(&mut reader)?;
+
+        // Decompress payload if needed
+        let payload_data: Vec<u8> = if compressed {
+            let mut decoder = GzDecoder::new(reader);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out)?;
+            out
+        } else {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out)?;
+            out
+        };
+
+        let mut cursor = std::io::Cursor::new(payload_data.as_slice());
+
+        // Apply changed nodes
+        let node_count = Self::read_u64(&mut cursor)?;
+        for _ in 0..node_count {
+            let old_id = Self::read_u64(&mut cursor)?;
+            let label = Self::read_string(&mut cursor)?;
+            let properties = Self::read_properties(&mut cursor)?;
+
+            // If the node already exists in the base graph, update it;
+            // otherwise create it (the WAL id might already be present if
+            // the base backup was taken from the same graph).
+            if graph.get_node(old_id).is_none() {
+                let new_id = graph.create_node_with_id(old_id, &label);
+                if let Some(node) = graph.get_node_mut(new_id) {
+                    for (k, v) in properties {
+                        node.set_property(k, v);
+                    }
+                }
+            } else if let Some(node) = graph.get_node_mut(old_id) {
+                node.label = label;
+                node.properties = properties;
+            }
+        }
+
+        // Apply changed edges
+        let edge_count = Self::read_u64(&mut cursor)?;
+        for _ in 0..edge_count {
+            let old_id = Self::read_u64(&mut cursor)?;
+            let from = Self::read_u64(&mut cursor)?;
+            let to = Self::read_u64(&mut cursor)?;
+            let label = Self::read_string(&mut cursor)?;
+            let properties = Self::read_properties(&mut cursor)?;
+
+            if graph.get_edge(old_id).is_none()
+                && graph.get_node(from).is_some()
+                && graph.get_node(to).is_some()
+            {
+                let new_eid = graph.create_edge(from, to, &label)?;
+                if let Some(edge) = graph.get_edge_mut(new_eid) {
+                    for (k, v) in properties {
+                        edge.set_property(k, v);
+                    }
+                }
+            } else if let Some(edge) = graph.get_edge_mut(old_id) {
+                edge.label = label;
+                edge.properties = properties;
+            }
+        }
+
+        // Apply deletions – nodes
+        let del_node_count = Self::read_u64(&mut cursor)?;
+        for _ in 0..del_node_count {
+            let node_id = Self::read_u64(&mut cursor)?;
+            graph.delete_node(node_id);
+        }
+
+        // Apply deletions – edges
+        let del_edge_count = Self::read_u64(&mut cursor)?;
+        for _ in 0..del_edge_count {
+            let edge_id = Self::read_u64(&mut cursor)?;
+            graph.delete_edge(edge_id);
+        }
+
+        Ok(graph)
+    }
+
+    // ------------------------------------------------------------------
+    // Point-in-time recovery (PITR)
+    // ------------------------------------------------------------------
+
+    /// Restore a graph from a full backup and replay WAL entries up to
+    /// (and including) `target_timestamp`.
+    ///
+    /// WAL entries with `timestamp <= target_timestamp` are applied in LSN
+    /// order.  Entries after the target are ignored.  If `target_timestamp`
+    /// exceeds the timestamp of the last WAL entry all entries are applied
+    /// (effectively restoring to the latest available state).
+    pub fn restore_to_point_in_time(
+        base_backup_path: &str,
+        wal_path: &str,
+        target_timestamp: u64,
+    ) -> Result<Graph> {
+        use crate::wal::{RecordPayload, Wal};
+
+        // Step 1: restore from full backup.
+        let mut graph = Self::restore(base_backup_path)?;
+
+        // Step 2: replay WAL entries up to target_timestamp.
+        let wal = Wal::open(wal_path).map_err(|e| BackupError::Wal(e.to_string()))?;
+        let (records, _) = wal.read_all_for_incremental(0); // 0 = all records
+
+        // id_map: maps WAL node_id → graph node_id (since graph.create_node
+        // may assign different IDs on restore).
+        let mut id_map: HashMap<u64, u64> = HashMap::new();
+
+        // Pre-populate id_map from nodes that are already in the restored
+        // graph so that property updates and edge creations can find them.
+        for node in graph.nodes() {
+            id_map.insert(node.id, node.id);
+        }
+
+        for record in records {
+            if record.timestamp > target_timestamp {
+                // All subsequent records have higher or equal LSN timestamps
+                // only when the WAL was written in order; we still continue
+                // iterating to be safe, but skip entries past the cutoff.
+                continue;
+            }
+
+            match &record.payload {
+                RecordPayload::CreateNode { node_id, label } => {
+                    let new_id = graph.create_node(label.as_str());
+                    id_map.insert(*node_id, new_id);
+                }
+                RecordPayload::DeleteNode { node_id } => {
+                    let actual = id_map.get(node_id).copied().unwrap_or(*node_id);
+                    graph.delete_node(actual);
+                    id_map.remove(node_id);
+                }
+                RecordPayload::CreateEdge {
+                    edge_id: _,
+                    from,
+                    to,
+                    label,
+                } => {
+                    let actual_from = id_map.get(from).copied().unwrap_or(*from);
+                    let actual_to = id_map.get(to).copied().unwrap_or(*to);
+                    if graph.get_node(actual_from).is_some()
+                        && graph.get_node(actual_to).is_some()
+                    {
+                        let _ = graph.create_edge(actual_from, actual_to, label.as_str());
+                    }
+                }
+                RecordPayload::DeleteEdge { edge_id } => {
+                    graph.delete_edge(*edge_id);
+                }
+                RecordPayload::SetNodeProperty {
+                    node_id,
+                    key,
+                    value,
+                } => {
+                    let actual = id_map.get(node_id).copied().unwrap_or(*node_id);
+                    if let Some(node) = graph.get_node_mut(actual) {
+                        node.set_property(key.clone(), value.clone());
+                    }
+                }
+                RecordPayload::SetEdgeProperty {
+                    edge_id,
+                    key,
+                    value,
+                } => {
+                    if let Some(edge) = graph.get_edge_mut(*edge_id) {
+                        edge.set_property(key.clone(), value.clone());
+                    }
+                }
+                RecordPayload::Checkpoint { .. } => {}
+            }
+        }
+
+        Ok(graph)
     }
 }
 
@@ -1176,5 +1587,271 @@ mod tests {
         assert_eq!(remaining.len(), 3, "expected exactly 3 files to remain");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ========== Incremental backup and PITR tests ==========
+
+    #[test]
+    fn test_incremental_backup_contains_only_changed_nodes() {
+        use crate::wal::{RecordPayload, RecordType, Wal};
+
+        let base_ts: u64 = 1_000_000;
+        let wal_path = tmp_path("incr_test_basic.wal");
+        let base_backup_path = tmp_path("incr_test_base.backup");
+        let incr_path = tmp_path("incr_test_delta.ibackup");
+
+        // Build a graph with node 0 (pre-existing) and node ids 10 and 11
+        // which come from the WAL.
+        let mut graph = Graph::new();
+        let old_node = graph.create_node("OldNode"); // id = 0, existed before base_ts
+        graph.create_node_with_id(10, "Thing");
+        if let Some(n) = graph.get_node_mut(10) {
+            n.set_property("value", 42i64);
+        }
+        graph.create_node_with_id(11, "Other");
+
+        // Create a base full backup.
+        Backup::create(&graph, &base_backup_path, &BackupOptions::default()).unwrap();
+
+        // Write a WAL with changes that happened AFTER base_ts.
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 10,
+                label: "Thing".to_string(),
+            },
+            base_ts + 1,
+        )
+        .unwrap();
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 11,
+                label: "Other".to_string(),
+            },
+            base_ts + 2,
+        )
+        .unwrap();
+        wal.sync().unwrap();
+
+        let meta = Backup::create_incremental(
+            &graph,
+            "base-001",
+            base_ts,
+            &wal_path,
+            &incr_path,
+            &BackupOptions::default(),
+        )
+        .unwrap();
+
+        // The incremental backup must contain nodes 10 and 11 but NOT old_node (0).
+        assert!(
+            meta.changed_node_ids.contains(&10),
+            "expected node 10 in changed list"
+        );
+        assert!(
+            meta.changed_node_ids.contains(&11),
+            "expected node 11 in changed list"
+        );
+        assert!(
+            !meta.changed_node_ids.contains(&old_node),
+            "old_node should NOT appear in incremental"
+        );
+        assert_eq!(meta.base_backup_id, "base-001");
+
+        std::fs::remove_file(&wal_path).ok();
+        std::fs::remove_file(&base_backup_path).ok();
+        std::fs::remove_file(&incr_path).ok();
+    }
+
+    #[test]
+    fn test_restore_incremental_matches_full_state() {
+        use crate::wal::{RecordPayload, RecordType, Wal};
+
+        let base_ts: u64 = 2_000_000;
+        let base_backup_path = tmp_path("incr_restore_base.backup");
+        let incr_path = tmp_path("incr_restore_delta.ibackup");
+        let wal_path = tmp_path("incr_restore.wal");
+
+        // Step 1: base graph (just one node).
+        let mut graph = Graph::new();
+        let base_node = graph.create_node("Base"); // id = 0
+        Backup::create(&graph, &base_backup_path, &BackupOptions::default()).unwrap();
+
+        // Step 2: more changes after base_ts (node 10 added, node 0 deleted).
+        graph.create_node_with_id(10, "NewNode");
+        if let Some(n) = graph.get_node_mut(10) {
+            n.set_property("x", 99i64);
+        }
+        graph.delete_node(base_node);
+
+        // Step 3: WAL reflecting those changes.
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 10,
+                label: "NewNode".to_string(),
+            },
+            base_ts + 1,
+        )
+        .unwrap();
+        wal.append_at(
+            RecordType::SetNodeProperty,
+            RecordPayload::SetNodeProperty {
+                node_id: 10,
+                key: "x".to_string(),
+                value: maharit_core::PropertyValue::Int(99),
+            },
+            base_ts + 2,
+        )
+        .unwrap();
+        wal.append_at(
+            RecordType::DeleteNode,
+            RecordPayload::DeleteNode { node_id: 0 },
+            base_ts + 3,
+        )
+        .unwrap();
+        wal.sync().unwrap();
+
+        // Step 4: create incremental backup.
+        Backup::create_incremental(
+            &graph,
+            "base-001",
+            base_ts,
+            &wal_path,
+            &incr_path,
+            &BackupOptions::default(),
+        )
+        .unwrap();
+
+        // Step 5: restore incremental and compare with the current graph.
+        let restored = Backup::restore_incremental(&base_backup_path, &incr_path).unwrap();
+
+        // The restored graph should match `graph` — one node (id 10), base_node deleted.
+        assert_eq!(
+            restored.node_count(),
+            graph.node_count(),
+            "node count mismatch after incremental restore"
+        );
+        assert!(
+            restored.get_node(base_node).is_none(),
+            "base_node should have been deleted"
+        );
+        assert!(
+            restored.get_node(10).is_some(),
+            "new node 10 should be present"
+        );
+        assert_eq!(
+            restored.get_node(10).unwrap().properties.get("x"),
+            Some(&maharit_core::PropertyValue::Int(99))
+        );
+
+        std::fs::remove_file(&base_backup_path).ok();
+        std::fs::remove_file(&incr_path).ok();
+        std::fs::remove_file(&wal_path).ok();
+    }
+
+    #[test]
+    fn test_pitr_restores_to_specific_timestamp() {
+        use crate::wal::{RecordPayload, RecordType, Wal};
+
+        let base_ts: u64 = 3_000_000;
+        let base_backup_path = tmp_path("pitr_base.backup");
+        let wal_path = tmp_path("pitr_test.wal");
+
+        // Base graph: empty.
+        let graph = Graph::new();
+        Backup::create(&graph, &base_backup_path, &BackupOptions::default()).unwrap();
+
+        // WAL: three operations at t+1, t+2, t+3.
+        let mut wal = Wal::open(&wal_path).unwrap();
+        // t+1: create node 0 "Alpha"
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 0,
+                label: "Alpha".to_string(),
+            },
+            base_ts + 1,
+        )
+        .unwrap();
+        // t+2: create node 1 "Beta"
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 1,
+                label: "Beta".to_string(),
+            },
+            base_ts + 2,
+        )
+        .unwrap();
+        // t+3: delete node 0
+        wal.append_at(
+            RecordType::DeleteNode,
+            RecordPayload::DeleteNode { node_id: 0 },
+            base_ts + 3,
+        )
+        .unwrap();
+        wal.sync().unwrap();
+
+        // PITR to t+2 (after Alpha and Beta created, before Alpha deleted).
+        let restored_t2 =
+            Backup::restore_to_point_in_time(&base_backup_path, &wal_path, base_ts + 2).unwrap();
+        assert_eq!(restored_t2.node_count(), 2, "expected both nodes at t+2");
+
+        // PITR to t+3 (Alpha should be gone).
+        let restored_t3 =
+            Backup::restore_to_point_in_time(&base_backup_path, &wal_path, base_ts + 3).unwrap();
+        assert_eq!(restored_t3.node_count(), 1, "expected only Beta at t+3");
+
+        // PITR to future timestamp (should give same as t+3, i.e. latest state).
+        let restored_future = Backup::restore_to_point_in_time(
+            &base_backup_path,
+            &wal_path,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            restored_future.node_count(),
+            1,
+            "future timestamp should give latest state"
+        );
+
+        std::fs::remove_file(&base_backup_path).ok();
+        std::fs::remove_file(&wal_path).ok();
+    }
+
+    #[test]
+    fn test_pitr_future_timestamp_gives_latest_state() {
+        use crate::wal::{RecordPayload, RecordType, Wal};
+
+        let base_ts: u64 = 4_000_000;
+        let base_backup_path = tmp_path("pitr_future_base.backup");
+        let wal_path = tmp_path("pitr_future.wal");
+
+        let graph = Graph::new();
+        Backup::create(&graph, &base_backup_path, &BackupOptions::default()).unwrap();
+
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append_at(
+            RecordType::CreateNode,
+            RecordPayload::CreateNode {
+                node_id: 0,
+                label: "Node".to_string(),
+            },
+            base_ts + 5,
+        )
+        .unwrap();
+        wal.sync().unwrap();
+
+        // Future timestamp: should include the node created at base_ts+5.
+        let restored =
+            Backup::restore_to_point_in_time(&base_backup_path, &wal_path, u64::MAX).unwrap();
+        assert_eq!(restored.node_count(), 1);
+
+        std::fs::remove_file(&base_backup_path).ok();
+        std::fs::remove_file(&wal_path).ok();
     }
 }
