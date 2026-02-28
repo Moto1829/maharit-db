@@ -7,6 +7,7 @@ mod repl;
 pub mod replication;
 pub mod tcp_server;
 pub mod tls;
+pub mod tracing_setup;
 
 use repl::Repl;
 use tcp_server::{ServerConfig, TcpServer};
