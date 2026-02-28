@@ -8,6 +8,7 @@ members = [
     "crates/maharit-io",
     "crates/maharit-viz",
     "crates/maharit-client",
+    "crates/maharit-cluster",
 ]
 
 [workspace.package]

@@ -312,6 +312,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maharit-cluster"
+version = "0.1.0"
+dependencies = [
+ "maharit-core",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "maharit-core"
 version = "0.1.0"
 dependencies = [
