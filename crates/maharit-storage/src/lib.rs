@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod mvcc;
 mod persistence;
 mod transaction;
 mod wal;
@@ -6,6 +7,7 @@ mod wal;
 use maharit_core::Graph;
 
 pub use backup::{Backup, BackupCallback, BackupError, BackupMetadata, BackupOptions, BackupScheduler};
+pub use mvcc::{MvccManager, MvccSnapshot, NodeData, NodeVersion, PropertyValue as MvccPropertyValue, VersionedNode};
 pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{
     LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,
