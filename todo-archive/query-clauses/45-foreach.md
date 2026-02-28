@@ -6,16 +6,16 @@
 ## 実装内容
 
 ### FOREACH構文
-- [ ] FOREACH (variable IN list | update_clauses)
-- [ ] ネストしたFOREACH
-- [ ] リスト式・パラメータとの組み合わせ
+- [x] FOREACH (variable IN list | update_clauses)
+- [x] ネストしたFOREACH
+- [x] リスト式・パラメータとの組み合わせ
 
 ### サポートする更新操作
-- [ ] FOREACH内でのCREATE
-- [ ] FOREACH内でのSET
-- [ ] FOREACH内でのREMOVE
-- [ ] FOREACH内でのDELETE
-- [ ] FOREACH内でのMERGE
+- [x] FOREACH内でのCREATE
+- [x] FOREACH内でのSET
+- [x] FOREACH内でのREMOVE
+- [x] FOREACH内でのDELETE
+- [x] FOREACH内でのMERGE
 
 ## クエリ例
 ```cypher

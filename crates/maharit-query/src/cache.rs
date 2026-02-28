@@ -280,6 +280,153 @@ fn normalize_query(query: &str) -> String {
     query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// パラメータ化クエリの AST キャッシュ。
+///
+/// クエリ文字列をキーとして、解析済みの [`Statement`] を保持する。
+/// パラメータ値が異なっていても同じクエリ文字列であれば AST を再利用できる。
+///
+/// LRU eviction policy を使用して最大サイズを超えた場合に古いエントリを削除する。
+///
+/// # Examples
+///
+/// ```rust
+/// use maharit_query::cache::AstCache;
+///
+/// let mut cache = AstCache::new(100);
+/// let stmt = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+///
+/// // 2回目はキャッシュヒット
+/// let stmt2 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+/// assert_eq!(cache.stats().hits, 1);
+/// ```
+#[derive(Debug)]
+pub struct AstCache {
+    cache: HashMap<String, AstCacheEntry>,
+    max_size: usize,
+    clock: u64,
+    total_hits: u64,
+    total_misses: u64,
+    parse_count: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AstCacheEntry {
+    statement: Statement,
+    last_accessed: u64,
+}
+
+impl AstCache {
+    /// 指定した最大サイズで新しい AstCache を作成する。
+    ///
+    /// `max_size` が 0 の場合、キャッシュは無効（エントリを保持しない）。
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            cache: HashMap::with_capacity(max_size.min(256)),
+            max_size,
+            clock: 0,
+            total_hits: 0,
+            total_misses: 0,
+            parse_count: 0,
+        }
+    }
+
+    /// クエリ文字列に対応する Statement を返す。キャッシュに存在する場合は再利用し、
+    /// 存在しない場合はパースしてキャッシュに追加する。
+    ///
+    /// # Errors
+    ///
+    /// クエリのパースに失敗した場合は [`ParseError`] を返す。
+    /// パースエラーはキャッシュされない。
+    pub fn get_or_parse(&mut self, query: &str) -> Result<Statement, ParseError> {
+        let key = normalize_query(query);
+
+        if let Some(entry) = self.cache.get_mut(&key) {
+            self.clock += 1;
+            entry.last_accessed = self.clock;
+            self.total_hits += 1;
+            return Ok(entry.statement.clone());
+        }
+
+        // キャッシュミス - パースを実行
+        self.total_misses += 1;
+        self.parse_count += 1;
+        let mut parser = Parser::new(query)?;
+        let statement = parser.parse()?;
+
+        if self.max_size > 0 {
+            if self.cache.len() >= self.max_size {
+                self.evict_lru();
+            }
+            self.clock += 1;
+            self.cache.insert(
+                key,
+                AstCacheEntry {
+                    statement: statement.clone(),
+                    last_accessed: self.clock,
+                },
+            );
+        }
+
+        Ok(statement)
+    }
+
+    /// キャッシュに指定クエリのエントリが存在するかどうかを確認する。
+    pub fn contains(&self, query: &str) -> bool {
+        let key = normalize_query(query);
+        self.cache.contains_key(&key)
+    }
+
+    /// 指定クエリのキャッシュエントリを無効化（削除）する。
+    pub fn invalidate(&mut self, query: &str) {
+        let key = normalize_query(query);
+        self.cache.remove(&key);
+    }
+
+    /// キャッシュ内の全エントリをクリアする。統計もリセットされる。
+    pub fn clear(&mut self) {
+        self.cache.clear();
+        self.total_hits = 0;
+        self.total_misses = 0;
+        self.parse_count = 0;
+        self.clock = 0;
+    }
+
+    /// キャッシュの統計情報を返す。
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            size: self.cache.len(),
+            capacity: self.max_size,
+            hits: self.total_hits,
+            misses: self.total_misses,
+        }
+    }
+
+    /// 実際にパースが実行された回数を返す。
+    ///
+    /// キャッシュヒット時はパースが実行されないため、この値は
+    /// `stats().misses` と等しくなる（clear() を呼んだ後も追跡は継続される）。
+    pub fn parse_count(&self) -> u64 {
+        self.parse_count
+    }
+
+    /// Least Recently Used なエントリを削除する。
+    fn evict_lru(&mut self) {
+        if self.cache.is_empty() {
+            return;
+        }
+
+        let lru_key = self
+            .cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_accessed)
+            .map(|(key, _)| key.clone());
+
+        if let Some(key) = lru_key {
+            self.cache.remove(&key);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +701,191 @@ mod tests {
             cache.get_or_parse(query).unwrap();
         }
         assert_eq!(cache.stats().hits, queries.len() as u64);
+    }
+
+    // ===== AstCache tests =====
+
+    #[test]
+    fn test_ast_cache_hit() {
+        let mut cache = AstCache::new(10);
+
+        let stmt1 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+        let stmt2 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+
+        // 同じ AST が返ること
+        assert_eq!(stmt1, stmt2);
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.size, 1);
+    }
+
+    #[test]
+    fn test_ast_cache_no_reparse_on_hit() {
+        let mut cache = AstCache::new(10);
+
+        // 最初の呼び出しはパース実行
+        cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(cache.parse_count(), 1);
+
+        // 2回目以降はパースしない
+        cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+        cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(cache.parse_count(), 1); // パース回数は変わらない
+    }
+
+    #[test]
+    fn test_ast_cache_miss_on_different_queries() {
+        let mut cache = AstCache::new(10);
+
+        cache.get_or_parse("CREATE (n:Person {name: 'Alice'})").unwrap();
+        cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.size, 2);
+        assert_eq!(cache.parse_count(), 2);
+    }
+
+    #[test]
+    fn test_ast_cache_clear_causes_miss() {
+        let mut cache = AstCache::new(10);
+
+        cache.get_or_parse("MATCH (n) RETURN n").unwrap();
+        assert_eq!(cache.stats().size, 1);
+
+        cache.clear();
+
+        assert_eq!(cache.stats().size, 0);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().misses, 0);
+        assert_eq!(cache.parse_count(), 0);
+
+        // クリア後は再パースが必要
+        cache.get_or_parse("MATCH (n) RETURN n").unwrap();
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.parse_count(), 1);
+    }
+
+    #[test]
+    fn test_ast_cache_parse_error_not_cached() {
+        let mut cache = AstCache::new(10);
+
+        let result = cache.get_or_parse("INVALID QUERY ???");
+        assert!(result.is_err());
+
+        // エラーはキャッシュされない
+        assert_eq!(cache.stats().size, 0);
+    }
+
+    #[test]
+    fn test_ast_cache_invalidate() {
+        let mut cache = AstCache::new(10);
+
+        cache.get_or_parse("MATCH (n) RETURN n").unwrap();
+        assert!(cache.contains("MATCH (n) RETURN n"));
+
+        cache.invalidate("MATCH (n) RETURN n");
+        assert!(!cache.contains("MATCH (n) RETURN n"));
+    }
+
+    #[test]
+    fn test_ast_cache_lru_eviction() {
+        let mut cache = AstCache::new(2);
+
+        cache.get_or_parse("CREATE (a:A)").unwrap();
+        cache.get_or_parse("CREATE (b:B)").unwrap();
+        assert_eq!(cache.stats().size, 2);
+
+        // a:A を最近アクセスとしてマーク
+        cache.get_or_parse("CREATE (a:A)").unwrap();
+
+        // c:C を追加 -> b:B が LRU として削除される
+        cache.get_or_parse("CREATE (c:C)").unwrap();
+
+        assert_eq!(cache.stats().size, 2);
+        assert!(cache.contains("CREATE (a:A)"));
+        assert!(!cache.contains("CREATE (b:B)"));
+        assert!(cache.contains("CREATE (c:C)"));
+    }
+
+    #[test]
+    fn test_ast_cache_whitespace_normalization() {
+        let mut cache = AstCache::new(10);
+
+        let stmt1 = cache.get_or_parse("MATCH  (n:Person)  RETURN  n").unwrap();
+        let stmt2 = cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
+
+        // 正規化後は同一キーとして扱われキャッシュヒットする
+        assert_eq!(stmt1, stmt2);
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 1);
+    }
+
+    #[test]
+    fn test_ast_cache_capacity_zero() {
+        let mut cache = AstCache::new(0);
+
+        // パースは成功するがキャッシュには保存されない
+        let stmt = cache.get_or_parse("MATCH (n) RETURN n").unwrap();
+        assert_eq!(cache.stats().size, 0);
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    // ===== execute_cached tests (integration) =====
+
+    #[test]
+    fn test_execute_cached_same_query_different_params() {
+        use crate::executor::{Executor, Value};
+        use maharit_core::Graph;
+        use std::collections::HashMap;
+
+        let mut graph = Graph::new();
+        let mut cache = AstCache::new(10);
+        let mut executor = Executor::new(&mut graph);
+
+        // 最初のパラメータでノード作成
+        let mut params1 = HashMap::new();
+        params1.insert("name".to_string(), Value::String("Alice".to_string()));
+        executor
+            .execute_cached(
+                "CREATE (n:Person {name: $name})",
+                params1,
+                &mut cache,
+            )
+            .unwrap();
+
+        // 同じクエリ文字列・異なるパラメータでノード作成（キャッシュヒット）
+        let mut params2 = HashMap::new();
+        params2.insert("name".to_string(), Value::String("Bob".to_string()));
+        executor
+            .execute_cached(
+                "CREATE (n:Person {name: $name})",
+                params2,
+                &mut cache,
+            )
+            .unwrap();
+
+        // 2回目はキャッシュヒット（パースが1回だけ実行される）
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.parse_count(), 1);
+    }
+
+    #[test]
+    fn test_execute_cached_invalid_query_returns_error() {
+        use crate::executor::{Executor, ExecuteError};
+        use maharit_core::Graph;
+        use std::collections::HashMap;
+
+        let mut graph = Graph::new();
+        let mut cache = AstCache::new(10);
+        let mut executor = Executor::new(&mut graph);
+
+        let result = executor.execute_cached("INVALID QUERY ???", HashMap::new(), &mut cache);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(ExecuteError::ParseError(_))));
     }
 }

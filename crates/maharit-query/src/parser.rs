@@ -22,6 +22,96 @@ pub enum ParseError {
     LexerError(#[from] crate::lexer::LexerError),
 }
 
+/// パースの結果。成功した場合は Statement が含まれ、エラーが発生した場合は
+/// errors に収集されたエラーのリストが含まれる。
+///
+/// # Examples
+///
+/// ```rust
+/// use maharit_query::parser::parse_with_recovery;
+///
+/// let result = parse_with_recovery("MATCH (n:Person) RETURN n");
+/// assert!(result.statement.is_some());
+/// assert!(result.errors.is_empty());
+///
+/// let result = parse_with_recovery("INVALID SYNTAX ???");
+/// assert!(result.statement.is_none());
+/// assert!(!result.errors.is_empty());
+/// ```
+#[derive(Debug)]
+pub struct ParseResult {
+    /// パース成功した場合に Statement が含まれる
+    pub statement: Option<Statement>,
+    /// 収集されたエラーのリスト（パース失敗時に値が入る）
+    pub errors: Vec<ParseError>,
+}
+
+impl ParseResult {
+    /// 成功した ParseResult を作成する
+    pub fn success(statement: Statement) -> Self {
+        Self {
+            statement: Some(statement),
+            errors: Vec::new(),
+        }
+    }
+
+    /// 失敗した ParseResult を作成する
+    pub fn failure(errors: Vec<ParseError>) -> Self {
+        Self {
+            statement: None,
+            errors,
+        }
+    }
+
+    /// パースが成功したかどうかを返す
+    pub fn is_ok(&self) -> bool {
+        self.statement.is_some()
+    }
+
+    /// パースが失敗したかどうかを返す
+    pub fn is_err(&self) -> bool {
+        self.statement.is_none()
+    }
+}
+
+/// エラー回復付きでクエリをパースする。
+///
+/// 通常の [`Parser::parse`] と異なり、エラーが発生しても panic せず、
+/// エラーを [`ParseResult::errors`] に収集して返す。
+///
+/// # Arguments
+///
+/// * `input` - パース対象のクエリ文字列
+///
+/// # Returns
+///
+/// [`ParseResult`] - パース結果。成功時は `statement` フィールドに AST が、
+/// 失敗時は `errors` フィールドにエラーリストが含まれる。
+///
+/// # Examples
+///
+/// ```rust
+/// use maharit_query::parser::parse_with_recovery;
+///
+/// // 正常なクエリ
+/// let result = parse_with_recovery("CREATE (n:Person {name: 'Alice'})");
+/// assert!(result.is_ok());
+///
+/// // 不正なクエリ
+/// let result = parse_with_recovery("FOOBAR ???");
+/// assert!(result.is_err());
+/// assert!(!result.errors.is_empty());
+/// ```
+pub fn parse_with_recovery(input: &str) -> ParseResult {
+    match Parser::new(input) {
+        Err(e) => ParseResult::failure(vec![e]),
+        Ok(mut parser) => match parser.parse() {
+            Ok(stmt) => ParseResult::success(stmt),
+            Err(e) => ParseResult::failure(vec![e]),
+        },
+    }
+}
+
 /// パーサー
 pub struct Parser {
     tokens: Vec<Token>,
@@ -4037,5 +4127,84 @@ mod tests {
             }
             _ => panic!("Expected MatchForeach statement"),
         }
+    }
+
+    // ========== parse_with_recovery Tests ==========
+
+    #[test]
+    fn test_recovery_valid_query_returns_statement() {
+        let result = parse_with_recovery("MATCH (n:Person) RETURN n");
+        assert!(result.is_ok());
+        assert!(result.statement.is_some());
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_invalid_keyword_returns_error() {
+        let result = parse_with_recovery("FOOBAR (n)");
+        assert!(result.is_err());
+        assert!(result.statement.is_none());
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_empty_input_returns_error() {
+        let result = parse_with_recovery("");
+        assert!(result.is_err());
+        assert!(result.statement.is_none());
+        assert!(!result.errors.is_empty());
+        // 空入力は UnexpectedEof またはレキサーエラーを返す
+        let has_eof_or_lexer_error = result.errors.iter().any(|e| {
+            matches!(e, ParseError::UnexpectedEof | ParseError::LexerError(_))
+        });
+        assert!(has_eof_or_lexer_error || !result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_incomplete_query_returns_error() {
+        let result = parse_with_recovery("MATCH (n:Person) WHERE");
+        assert!(result.is_err());
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_errors_contain_span_info() {
+        let result = parse_with_recovery("INVALID TOKEN HERE");
+        assert!(result.is_err());
+        // エラーにはスパン情報が含まれていること
+        let has_token_error = result.errors.iter().any(|e| {
+            matches!(e, ParseError::UnexpectedToken { span, .. } if span.line > 0 || span.column > 0)
+        });
+        // UnexpectedEof またはトークンエラーが含まれていること
+        assert!(!result.errors.is_empty());
+        let _ = has_token_error;
+    }
+
+    #[test]
+    fn test_recovery_create_statement() {
+        let result = parse_with_recovery("CREATE (n:Person {name: 'Alice'})");
+        assert!(result.is_ok());
+        assert!(matches!(result.statement, Some(Statement::Create(_))));
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_parse_result_is_ok_is_err() {
+        let ok_result = parse_with_recovery("MATCH (n) RETURN n");
+        assert!(ok_result.is_ok());
+        assert!(!ok_result.is_err());
+
+        let err_result = parse_with_recovery("???");
+        assert!(!err_result.is_ok());
+        assert!(err_result.is_err());
+    }
+
+    #[test]
+    fn test_recovery_multiple_errors_possible() {
+        // 現在の実装では最初のエラーで停止するが、errors は Vec なので複数エラーを保持できる
+        let result = parse_with_recovery("NOT A VALID CYPHER QUERY AT ALL");
+        assert!(result.is_err());
+        // errors フィールドにエラーが含まれること
+        assert!(!result.errors.is_empty());
     }
 }

@@ -8,6 +8,7 @@ use regex::Regex;
 use thiserror::Error;
 
 use crate::ast::*;
+use crate::cache::AstCache;
 
 /// Compute Levenshtein edit distance between two strings (used for fuzzy CONTAINS).
 fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -52,6 +53,9 @@ pub enum ExecuteError {
 
     #[error("fulltext error: {0}")]
     FulltextError(#[from] FulltextError),
+
+    #[error("parse error: {0}")]
+    ParseError(#[from] crate::parser::ParseError),
 }
 
 /// 実行結果の行
@@ -232,6 +236,45 @@ impl<'a> Executor<'a> {
         let result = self.execute(stmt);
         self.params = HashMap::new();
         result
+    }
+
+    /// AstCache を利用してクエリ文字列をパース・キャッシュし、パラメータ付きで実行する。
+    ///
+    /// 同じクエリ文字列を繰り返し実行する場合、2回目以降はパースをスキップして
+    /// キャッシュ済みの AST を再利用する。パラメータが異なっても同じ実行計画を使用できる。
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - 実行するクエリ文字列
+    /// * `params` - クエリパラメータ（`$param` 形式の変数に対応）
+    /// * `cache` - AST キャッシュ（複数回の呼び出し間で共有する）
+    ///
+    /// # Errors
+    ///
+    /// * [`ExecuteError::ParseError`] - クエリのパースに失敗した場合
+    /// * その他の [`ExecuteError`] - クエリの実行に失敗した場合
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut cache = AstCache::new(100);
+    /// let mut params = HashMap::new();
+    /// params.insert("name".to_string(), Value::String("Alice".to_string()));
+    ///
+    /// let result = executor.execute_cached(
+    ///     "MATCH (n:Person) WHERE n.name = $name RETURN n",
+    ///     params,
+    ///     &mut cache,
+    /// )?;
+    /// ```
+    pub fn execute_cached(
+        &mut self,
+        query: &str,
+        params: HashMap<String, Value>,
+        cache: &mut AstCache,
+    ) -> Result<ResultSet, ExecuteError> {
+        let stmt = cache.get_or_parse(query)?;
+        self.execute_with_params(stmt, params)
     }
 
     /// 制約マネージャーへの参照を取得
