@@ -1,0 +1,11 @@
+[book]
+title = "MaharitDB ドキュメント"
+authors = ["MaharitDB Contributors"]
+language = "ja"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/Moto1829/maharit-db"
+edit-url-template = "https://github.com/Moto1829/maharit-db/edit/main/docs/{path}"
