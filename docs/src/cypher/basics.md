@@ -23,6 +23,29 @@ MaharitDB は Neo4j の Cypher に近い構文のクエリ言語をサポート�
 (n:Person:Employee)
 ```
 
+### 複数ラベル
+
+ノードには複数のラベルを付与できます。ラベルはノードが属するカテゴリを表し、複数のカテゴリに同時に属することが可能です。
+
+```cypher
+-- 複数ラベルを持つノードを作成
+CREATE (n:Person:Employee {name: "Alice", department: "Engineering"})
+
+-- 複数ラベルでマッチ（AND 条件 — 両方のラベルを持つノードのみ）
+MATCH (n:Person:Employee) RETURN n.name
+
+-- 片方のラベルだけでマッチ
+MATCH (n:Employee) RETURN n.name
+```
+
+MATCH でラベルを複数指定した場合、**すべてのラベルを持つノード**のみが返ります（OR ではなく AND）。
+
+```cypher
+-- ラベルの一覧を取得
+MATCH (n:Person) RETURN n.name, labels(n)
+-- 結果: ["Person", "Employee"] のようなリスト
+```
+
 ## エッジ（リレーションシップ）のパターン
 
 エッジは角括弧 `[]` と矢印で表します。

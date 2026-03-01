@@ -206,3 +206,26 @@ MATCH (n:Person)
 WITH collect(n.name) AS all_names
 RETURN all_names[($page - 1) * $size .. $page * $size] AS page_names
 ```
+
+## ノード・グラフ関連のリスト関数
+
+### labels(node)
+
+ノードが持つラベルの一覧を文字列リストで返します。複数ラベルを持つノードでは全ラベルが含まれます。
+
+```cypher
+-- ノードのラベル一覧を取得
+MATCH (n:Person {name: "Alice"})
+RETURN labels(n)
+-- 結果: ["Person", "Employee"]  （複数ラベルの場合）
+
+-- ラベルを条件に使用
+MATCH (n)
+WHERE "Admin" IN labels(n)
+RETURN n.name
+
+-- ラベル数でフィルタ
+MATCH (n)
+WHERE size(labels(n)) > 1
+RETURN n.name, labels(n)
+```

@@ -23,14 +23,27 @@ SET r.since = 2022
 
 ### ラベルを追加する
 
+`SET n:Label` でノードにラベルを追加します。既存のラベルはそのまま保持されます。
+
 ```cypher
--- ラベルを追加
+-- ラベルを追加（既存ラベルは保持）
 MATCH (n:Person {name: "Alice"})
 SET n:Admin
+-- Alice は Person と Admin の両方のラベルを持つ
 
--- 複数のラベルを追加
+-- 一度に複数のラベルを追加
 MATCH (n:Person {name: "Alice"})
 SET n:Admin:Moderator
+-- Alice は Person・Admin・Moderator の3つのラベルを持つ
+```
+
+追加後のラベル一覧は `labels(n)` で確認できます。
+
+```cypher
+MATCH (n:Person {name: "Alice"})
+SET n:Admin
+RETURN n.name, labels(n)
+-- 結果: ["Person", "Admin"]
 ```
 
 ### マップでプロパティを一括設定
@@ -76,12 +89,15 @@ REMOVE n.flag1, n.flag2
 
 ### ラベルを削除する
 
+`REMOVE n:Label` で特定のラベルを削除します。他のラベルは保持されます。
+
 ```cypher
--- ラベルを削除
+-- ラベルを削除（他のラベルは保持）
 MATCH (n:Person:Temp {name: "Alice"})
 REMOVE n:Temp
+-- Alice は Person のみになる
 
--- 複数ラベルを削除
+-- 複数のラベルを同時に削除
 MATCH (n)
 WHERE n:Draft AND n:Review
 REMOVE n:Draft, n:Review
