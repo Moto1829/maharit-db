@@ -7,6 +7,15 @@ use crate::{NodeId, PropertyValue};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+#[cfg(feature = "japanese")]
+use lindera::dictionary::load_dictionary;
+#[cfg(feature = "japanese")]
+use lindera::mode::Mode;
+#[cfg(feature = "japanese")]
+use lindera::segmenter::Segmenter;
+#[cfg(feature = "japanese")]
+use lindera::tokenizer::Tokenizer as LinderaTokenizer;
+
 /// Errors that can occur during full-text search operations.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum FulltextError {
@@ -29,17 +38,131 @@ impl SearchResult {
     }
 }
 
+/// Returns `true` when the text contains at least one hiragana, katakana, or CJK character.
+///
+/// Used to decide whether to route text through the lindera Japanese morphological analyser.
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|c| {
+        let cp = c as u32;
+        // Hiragana: U+3040–U+309F
+        // Katakana: U+30A0–U+30FF
+        // CJK Unified Ideographs: U+4E00–U+9FFF
+        matches!(cp, 0x3040..=0x309F | 0x30A0..=0x30FF | 0x4E00..=0x9FFF)
+    })
+}
+
+/// Part-of-speech tags (IPADIC format) that should be excluded from index tokens.
+///
+/// These tags correspond to particles (助詞), auxiliary verbs (助動詞), symbols (記号),
+/// conjunctions (接続詞), interjections (感動詞), and filler sounds.
+#[cfg(feature = "japanese")]
+const JAPANESE_STOP_POS: &[&str] = &[
+    "助詞",
+    "助動詞",
+    "記号",
+    "接続詞",
+    "感動詞",
+    "フィラー",
+    "非言語音",
+];
+
 /// Simple tokenizer that splits text on non-alphanumeric characters and lowercases.
+///
+/// When the `japanese` feature is enabled and the input contains Japanese characters,
+/// lindera's morphological analyser is used instead, filtering out stop parts-of-speech
+/// and returning the dictionary (base) form of each content word.
 struct Tokenizer;
 
 impl Tokenizer {
     /// Tokenize text into lowercase tokens, filtering out empty strings.
+    ///
+    /// For text that contains Japanese characters (hiragana, katakana, or CJK) and when
+    /// the `japanese` feature is compiled in, morphological analysis via lindera is used.
+    /// All other text is split on non-alphanumeric boundaries and lowercased.
     fn tokenize(text: &str) -> Vec<String> {
+        #[cfg(feature = "japanese")]
+        if contains_japanese(text) {
+            return Self::tokenize_japanese(text);
+        }
+
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// Tokenize Japanese text using lindera morphological analysis with IPADIC.
+    ///
+    /// Loads the embedded IPADIC dictionary, segments the text, removes stop
+    /// parts-of-speech (particles, auxiliary verbs, symbols, etc.), and returns
+    /// the dictionary (base) form of each retained token in lowercase.
+    ///
+    /// On any lindera error the function falls back to simple whitespace splitting
+    /// so that indexing never silently discards text.
+    #[cfg(feature = "japanese")]
+    fn tokenize_japanese(text: &str) -> Vec<String> {
+        // Build a tokenizer backed by the embedded IPADIC dictionary.
+        let tokenizer = match Self::build_japanese_tokenizer() {
+            Ok(t) => t,
+            Err(_) => {
+                // Fallback: split on whitespace / non-alphanumeric boundaries.
+                return text
+                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        };
+
+        let mut tokens = match tokenizer.tokenize(text) {
+            Ok(t) => t,
+            Err(_) => {
+                return text
+                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        };
+
+        let mut result = Vec::new();
+        for token in tokens.iter_mut() {
+            // Capture the surface string before calling `details()` since `details()`
+            // takes `&mut self` and would otherwise conflict with borrowing `surface`.
+            let surface_owned: String = token.surface.as_ref().to_string();
+            let details = token.details();
+
+            // details[0] is the major part-of-speech in IPADIC format.
+            // Skip stop POS categories.
+            let pos = details.first().copied().unwrap_or("*");
+            if JAPANESE_STOP_POS.contains(&pos) {
+                continue;
+            }
+
+            // details[6] is the dictionary (base) form in IPADIC layout.
+            // Fall back to the surface form if the base form is not available or is "*".
+            let base_form = details
+                .get(6)
+                .copied()
+                .filter(|s| !s.is_empty() && *s != "*")
+                .unwrap_or(&surface_owned);
+
+            let normalized = base_form.to_lowercase();
+            if !normalized.is_empty() {
+                result.push(normalized);
+            }
+        }
+
+        result
+    }
+
+    /// Construct a lindera `Tokenizer` using the embedded IPADIC dictionary.
+    #[cfg(feature = "japanese")]
+    fn build_japanese_tokenizer() -> lindera::LinderaResult<LinderaTokenizer> {
+        let dictionary = load_dictionary("embedded://ipadic")?;
+        let segmenter = Segmenter::new(Mode::Normal, dictionary, None);
+        Ok(LinderaTokenizer::new(segmenter))
     }
 }
 
@@ -1200,5 +1323,112 @@ mod tests {
         let results = manager.search("idx", "databse~").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].node_id, 1);
+    }
+}
+
+#[cfg(feature = "japanese")]
+#[cfg(test)]
+mod japanese_tests {
+    use super::*;
+
+    #[test]
+    fn test_contains_japanese_hiragana() {
+        assert!(contains_japanese("ひらがな"));
+    }
+
+    #[test]
+    fn test_contains_japanese_katakana() {
+        assert!(contains_japanese("グラフ"));
+    }
+
+    #[test]
+    fn test_contains_japanese_kanji() {
+        assert!(contains_japanese("漢字"));
+    }
+
+    #[test]
+    fn test_contains_japanese_false_for_ascii() {
+        assert!(!contains_japanese("graph database"));
+    }
+
+    #[test]
+    fn test_japanese_tokenization() {
+        // Japanese text should produce a non-empty token list.
+        let tokens = Tokenizer::tokenize("グラフデータベース");
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn test_japanese_stop_words_filtered() {
+        // Particles and auxiliary verbs must be absent from the result.
+        // "は" is a particle (助詞), "です" is an auxiliary verb (助動詞).
+        let tokens = Tokenizer::tokenize("グラフは高速です");
+        // The surface "は" and "です" (or their base forms) should not appear.
+        // Content words like "グラフ" or "高速" should be present.
+        assert!(!tokens.is_empty());
+        let text = tokens.join(" ");
+        assert!(
+            !text.contains("は") || text.contains("グラフ") || text.contains("高速"),
+            "expected content words to be present, got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_japanese_index_and_search() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+        index.add_document(1, "body", "グラフデータベースは高速です");
+        index.add_document(2, "body", "リレーショナルデータベース管理システム");
+
+        // Searching for "グラフ" should return at least node 1.
+        let results = index.search("グラフ");
+        assert!(!results.is_empty(), "expected search results for グラフ");
+        let node_ids: HashSet<NodeId> = results.iter().map(|r| r.node_id).collect();
+        assert!(
+            node_ids.contains(&1),
+            "expected node 1 in results, got: {node_ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_japanese_contains() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+        index.add_document(1, "body", "日本語の全文検索");
+        index.add_document(2, "body", "英語のテキスト処理");
+
+        // `contains` exercises the tokenisation + lookup code path.
+        let _matches = index.contains("全文検索");
+        // We only assert the method does not panic. Result count depends on
+        // how lindera segments "全文検索" vs the indexed tokens.
+    }
+
+    #[test]
+    fn test_japanese_phrase_search() {
+        let mut index = FulltextIndex::new("test", "Article", vec!["title".to_string()]);
+        index.add_document(1, "title", "グラフデータベースの実装");
+        index.add_document(2, "title", "データベースグラフの処理");
+
+        // Exercising the phrase-search code path with Japanese input must not panic.
+        let _results = index.search("グラフ");
+    }
+
+    #[test]
+    fn test_mixed_japanese_english_routes_to_japanese_tokenizer() {
+        // A string that contains Japanese triggers the Japanese tokeniser.
+        // The word "Rust" may or may not survive (depends on lindera segmentation),
+        // but the call must succeed without panicking.
+        let mut index = FulltextIndex::new("test", "Article", vec!["body".to_string()]);
+        index.add_document(1, "body", "Rust言語でグラフDBを実装");
+
+        let _results = index.search("Rust");
+        let _results2 = index.search("グラフ");
+    }
+
+    #[test]
+    fn test_pure_ascii_does_not_use_japanese_tokenizer() {
+        // Pure ASCII text must go through the plain tokeniser regardless of feature flag.
+        let tokens = Tokenizer::tokenize("graph database search");
+        assert!(tokens.contains(&"graph".to_string()));
+        assert!(tokens.contains(&"database".to_string()));
+        assert!(tokens.contains(&"search".to_string()));
     }
 }

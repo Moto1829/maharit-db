@@ -5,5 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["japanese"]
+japanese = ["dep:lindera"]
+
 [dependencies]
 thiserror.workspace = true
+lindera = { version = "2.2", features = ["embed-ipadic"], optional = true }
