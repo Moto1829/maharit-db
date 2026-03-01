@@ -10,11 +10,36 @@ pub type EdgeId = u64;
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
-    pub label: String,
+    /// ノードが持つラベルのリスト（複数ラベル対応）
+    pub labels: Vec<String>,
     pub properties: HashMap<String, PropertyValue>,
 }
 
 impl Node {
+    /// 最初のラベルを返す後方互換ヘルパー。
+    /// ラベルがない場合は空文字列を返す。
+    pub fn primary_label(&self) -> &str {
+        self.labels.first().map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// 指定したラベルをノードが持つかを確認する
+    pub fn has_label(&self, label: &str) -> bool {
+        self.labels.iter().any(|l| l == label)
+    }
+
+    /// ラベルを追加する（重複は無視）
+    pub fn add_label(&mut self, label: impl Into<String>) {
+        let label = label.into();
+        if !label.is_empty() && !self.labels.contains(&label) {
+            self.labels.push(label);
+        }
+    }
+
+    /// ラベルを削除する
+    pub fn remove_label(&mut self, label: &str) {
+        self.labels.retain(|l| l != label);
+    }
+
     /// プロパティを設定
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) {
         self.properties.insert(key.into(), value.into());
@@ -76,14 +101,25 @@ impl Graph {
         Self::default()
     }
 
-    /// 新しいノードを作成して追加
+    /// 新しいノードを作成して追加（単一ラベル版、後方互換のため残す）
     pub fn create_node(&mut self, label: impl Into<String>) -> NodeId {
+        let label_str = label.into();
+        let labels = if label_str.is_empty() {
+            vec![]
+        } else {
+            vec![label_str]
+        };
+        self.create_node_with_labels(labels)
+    }
+
+    /// 複数ラベルを指定してノードを作成する
+    pub fn create_node_with_labels(&mut self, labels: Vec<String>) -> NodeId {
         let id = self.next_node_id;
         self.next_node_id += 1;
 
         let node = Node {
             id,
-            label: label.into(),
+            labels,
             properties: HashMap::new(),
         };
 
@@ -94,18 +130,29 @@ impl Graph {
         id
     }
 
-    /// 指定したIDでノードを作成する（バックアップ/リストア専用）
+    /// 指定したIDでノードを作成する（バックアップ/リストア専用、単一ラベル版）
     ///
     /// 指定した `id` が既に使用されている場合は既存ノードの ID を返す。
     /// `next_node_id` は必要に応じて更新される。
     pub fn create_node_with_id(&mut self, id: NodeId, label: impl Into<String>) -> NodeId {
+        let label_str = label.into();
+        let labels = if label_str.is_empty() {
+            vec![]
+        } else {
+            vec![label_str]
+        };
+        self.create_node_with_id_and_labels(id, labels)
+    }
+
+    /// 指定したIDと複数ラベルでノードを作成する（バックアップ/リストア専用）
+    pub fn create_node_with_id_and_labels(&mut self, id: NodeId, labels: Vec<String>) -> NodeId {
         if self.nodes.contains_key(&id) {
             return id;
         }
 
         let node = Node {
             id,
-            label: label.into(),
+            labels,
             properties: HashMap::new(),
         };
 
@@ -273,9 +320,12 @@ impl Graph {
         Traversal::new(self, start)
     }
 
-    /// ラベルでノードを検索
+    /// ラベルでノードを検索（指定ラベルを持つノードを全て返す）
     pub fn find_nodes_by_label(&self, label: &str) -> Vec<&Node> {
-        self.nodes.values().filter(|n| n.label == label).collect()
+        self.nodes
+            .values()
+            .filter(|n| n.has_label(label))
+            .collect()
     }
 
     /// ラベル（タイプ）でエッジを検索
@@ -300,7 +350,41 @@ mod tests {
         assert_eq!(graph.node_count(), 1);
 
         let node = graph.get_node(id).unwrap();
-        assert_eq!(node.label, "Person");
+        assert_eq!(node.primary_label(), "Person");
+        assert!(node.has_label("Person"));
+    }
+
+    #[test]
+    fn test_create_node_with_labels() {
+        let mut graph = Graph::new();
+        let id = graph.create_node_with_labels(vec![
+            "Person".to_string(),
+            "Employee".to_string(),
+        ]);
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.get_node(id).unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+        assert_eq!(node.primary_label(), "Person");
+        assert_eq!(node.labels.len(), 2);
+    }
+
+    #[test]
+    fn test_node_add_remove_label() {
+        let mut graph = Graph::new();
+        let id = graph.create_node("Person");
+
+        {
+            let node = graph.get_node_mut(id).unwrap();
+            node.add_label("Employee");
+            assert!(node.has_label("Employee"));
+            assert!(node.has_label("Person"));
+
+            node.remove_label("Person");
+            assert!(!node.has_label("Person"));
+            assert!(node.has_label("Employee"));
+        }
     }
 
     #[test]

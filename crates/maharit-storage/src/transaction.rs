@@ -67,7 +67,7 @@ enum UndoRecord {
     DeleteNode {
         #[allow(dead_code)] // Kept for potential future use (e.g., ID restoration)
         node_id: NodeId,
-        label: String,
+        labels: Vec<String>,
         properties: HashMap<String, PropertyValue>,
     },
     SetProperty {
@@ -230,10 +230,10 @@ impl TransactionManager {
                 }
                 UndoRecord::DeleteNode {
                     node_id: _,
-                    label,
+                    labels,
                     properties,
                 } => {
-                    let new_id = graph.create_node(label);
+                    let new_id = graph.create_node_with_labels(labels.clone());
                     if let Some(node) = graph.get_node_mut(new_id) {
                         for (key, value) in properties {
                             node.set_property(key.clone(), value.clone());
@@ -311,12 +311,12 @@ impl TransactionManager {
 
         // Save node state for undo
         if let Some(node) = graph.get_node(node_id) {
-            let label = node.label.clone();
+            let labels = node.labels.clone();
             let properties = node.properties.clone();
 
             tx.undo_log.push(UndoRecord::DeleteNode {
                 node_id,
-                label,
+                labels,
                 properties,
             });
         }

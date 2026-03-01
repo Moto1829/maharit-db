@@ -391,7 +391,8 @@ impl Backup {
         // Write nodes
         for node in graph.nodes() {
             Self::write_u64(&mut buffer, node.id)?;
-            Self::write_string(&mut buffer, &node.label)?;
+            // Store labels as colon-separated for backward compat
+            Self::write_string(&mut buffer, &node.labels.join(":"))?;
             Self::write_properties(&mut buffer, &node.properties)?;
         }
 
@@ -420,10 +421,15 @@ impl Backup {
         // Read nodes
         for _ in 0..node_count {
             let old_id = Self::read_u64(&mut reader)?;
-            let label = Self::read_string(&mut reader)?;
+            let labels_str = Self::read_string(&mut reader)?;
+            let labels: Vec<String> = if labels_str.is_empty() {
+                vec![]
+            } else {
+                labels_str.split(':').map(|s| s.to_string()).collect()
+            };
             let properties = Self::read_properties(&mut reader)?;
 
-            let new_id = graph.create_node(&label);
+            let new_id = graph.create_node_with_labels(labels);
             id_map.insert(old_id, new_id);
 
             if let Some(node) = graph.get_node_mut(new_id) {
@@ -722,7 +728,7 @@ impl Backup {
         for &node_id in &changed_node_ids {
             if let Some(node) = graph.get_node(node_id) {
                 Self::write_u64(&mut payload, node.id)?;
-                Self::write_string(&mut payload, &node.label)?;
+                Self::write_string(&mut payload, &node.labels.join(":"))?;
                 Self::write_properties(&mut payload, &node.properties)?;
             }
         }
@@ -833,21 +839,26 @@ impl Backup {
         let node_count = Self::read_u64(&mut cursor)?;
         for _ in 0..node_count {
             let old_id = Self::read_u64(&mut cursor)?;
-            let label = Self::read_string(&mut cursor)?;
+            let labels_str = Self::read_string(&mut cursor)?;
+            let labels: Vec<String> = if labels_str.is_empty() {
+                vec![]
+            } else {
+                labels_str.split(':').map(|s| s.to_string()).collect()
+            };
             let properties = Self::read_properties(&mut cursor)?;
 
             // If the node already exists in the base graph, update it;
             // otherwise create it (the WAL id might already be present if
             // the base backup was taken from the same graph).
             if graph.get_node(old_id).is_none() {
-                let new_id = graph.create_node_with_id(old_id, &label);
+                let new_id = graph.create_node_with_id_and_labels(old_id, labels);
                 if let Some(node) = graph.get_node_mut(new_id) {
                     for (k, v) in properties {
                         node.set_property(k, v);
                     }
                 }
             } else if let Some(node) = graph.get_node_mut(old_id) {
-                node.label = label;
+                node.labels = labels;
                 node.properties = properties;
             }
         }
@@ -1308,7 +1319,7 @@ mod tests {
         assert_eq!(restored.node_count(), 1);
 
         let node = restored.nodes().next().unwrap();
-        assert_eq!(node.label, "Test");
+        assert!(node.has_label("Test"));
         assert_eq!(node.properties.get("null_val"), Some(&PropertyValue::Null));
         assert_eq!(
             node.properties.get("bool_val"),

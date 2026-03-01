@@ -74,7 +74,17 @@ impl JsonImporter {
 
         // ノードをインポート
         for json_node in &json_graph.nodes {
-            let node_id = graph.create_node(&json_node.label);
+            // Labels may be stored as colon-separated string for multi-label support
+            let labels: Vec<String> = if json_node.label.is_empty() {
+                vec![]
+            } else {
+                json_node
+                    .label
+                    .split(':')
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+            let node_id = graph.create_node_with_labels(labels);
             id_map.insert(json_node.id.clone(), node_id);
 
             if let Some(node) = graph.get_node_mut(node_id) {
@@ -138,7 +148,16 @@ impl JsonImporter {
 
         // 最初にすべてのノードを作成
         for adj_node in &adj_graph.nodes {
-            let node_id = graph.create_node(&adj_node.label);
+            let labels: Vec<String> = if adj_node.label.is_empty() {
+                vec![]
+            } else {
+                adj_node
+                    .label
+                    .split(':')
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+            let node_id = graph.create_node_with_labels(labels);
             id_map.insert(adj_node.id.clone(), node_id);
 
             if let Some(node) = graph.get_node_mut(node_id) {
@@ -206,7 +225,8 @@ impl JsonExporter {
             .nodes()
             .map(|node| JsonNode {
                 id: node.id.to_string(),
-                label: node.label.clone(),
+                // Join labels as colon-separated for serialization
+                label: node.labels.join(":"),
                 properties: node
                     .properties
                     .iter()
@@ -278,7 +298,7 @@ impl JsonExporter {
 
                 AdjacencyNode {
                     id: node.id.to_string(),
-                    label: node.label.clone(),
+                    label: node.labels.join(":"),
                     properties: node
                         .properties
                         .iter()

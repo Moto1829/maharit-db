@@ -66,7 +66,9 @@ impl PersistentStorage {
         // ノードを書き込み
         for node in graph.nodes() {
             Self::write_u64(&mut writer, node.id)?;
-            Self::write_string(&mut writer, &node.label)?;
+            // Labels are stored as a colon-separated string for backward compatibility.
+            // E.g. "Person:Employee" for multi-label nodes.
+            Self::write_string(&mut writer, &node.labels.join(":"))?;
             Self::write_properties(&mut writer, &node.properties)?;
         }
 
@@ -120,10 +122,16 @@ impl PersistentStorage {
         // ノードを読み込み
         for _ in 0..node_count {
             let old_id = Self::read_u64(&mut reader)?;
-            let label = Self::read_string(&mut reader)?;
+            // Labels are stored as colon-separated string. Split to support multi-label nodes.
+            let labels_str = Self::read_string(&mut reader)?;
+            let labels: Vec<String> = if labels_str.is_empty() {
+                vec![]
+            } else {
+                labels_str.split(':').map(|s| s.to_string()).collect()
+            };
             let properties = Self::read_properties(&mut reader)?;
 
-            let new_id = graph.create_node(&label);
+            let new_id = graph.create_node_with_labels(labels);
             id_map.insert(old_id, new_id);
 
             if let Some(node) = graph.get_node_mut(new_id) {
@@ -365,7 +373,7 @@ mod tests {
         assert_eq!(loaded.node_count(), 1);
 
         let node = loaded.nodes().next().unwrap();
-        assert_eq!(node.label, "Person");
+        assert!(node.has_label("Person"));
         assert_eq!(
             node.properties.get("name"),
             Some(&PropertyValue::String("Alice".to_string()))

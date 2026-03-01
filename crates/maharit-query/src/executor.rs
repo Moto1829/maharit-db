@@ -99,7 +99,8 @@ pub enum Value {
     Node(NodeId),
     NodeData {
         id: NodeId,
-        label: String,
+        /// ノードが保持するラベルのリスト（複数ラベル対応）
+        labels: Vec<String>,
         properties: HashMap<String, PropertyValue>,
     },
     /// リスト値（可変長パスのエッジリストなど）
@@ -120,7 +121,13 @@ impl std::fmt::Display for Value {
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Node(id) => write!(f, "Node({})", id),
-            Value::NodeData { id, label, .. } => write!(f, "({}:{})", id, label),
+            Value::NodeData { id, labels, .. } => {
+                write!(f, "({}", id)?;
+                for lbl in labels {
+                    write!(f, ":{}", lbl)?;
+                }
+                write!(f, ")")
+            }
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -483,7 +490,9 @@ impl<'a> Executor<'a> {
         pattern: &NodePattern,
         bindings: &mut Bindings,
     ) -> Result<NodeId, ExecuteError> {
-        let label = pattern.label.clone().unwrap_or_default();
+        let labels = pattern.labels.clone();
+        // Use the first label for constraint validation (primary label)
+        let primary_label = labels.first().cloned().unwrap_or_default();
 
         // Evaluate property expressions
         let evaluated_props: Vec<(String, PropertyValue)> = pattern
@@ -498,11 +507,11 @@ impl<'a> Executor<'a> {
 
         let props: HashMap<String, PropertyValue> = evaluated_props.iter().cloned().collect();
 
-        // Validate constraints before creating
+        // Validate constraints before creating (using primary label)
         self.constraints
-            .validate_node_create(self.graph, &label, &props, None)?;
+            .validate_node_create(self.graph, &primary_label, &props, None)?;
 
-        let node_id = self.graph.create_node(label.clone());
+        let node_id = self.graph.create_node_with_labels(labels.clone());
 
         // Set properties
         if let Some(node) = self.graph.get_node_mut(node_id) {
@@ -511,8 +520,8 @@ impl<'a> Executor<'a> {
             }
         }
 
-        // Index in fulltext indexes
-        self.fulltext.index_node(node_id, &label, &props);
+        // Index in fulltext indexes (using primary label for now)
+        self.fulltext.index_node(node_id, &primary_label, &props);
 
         // Bind variable
         if let Some(var) = &pattern.variable {
@@ -896,17 +905,8 @@ impl<'a> Executor<'a> {
                         match binding_value {
                             BindingValue::Node(node_id) => {
                                 if let Some(node) = self.graph.get_node_mut(*node_id) {
-                                    // Append the new label if not already present.
-                                    // Labels are stored as colon-separated strings, e.g. "Person:Adult".
-                                    let already_has =
-                                        node.label.split(':').any(|l| l == new_label.as_str());
-                                    if !already_has {
-                                        if node.label.is_empty() {
-                                            node.label = new_label.clone();
-                                        } else {
-                                            node.label = format!("{}:{}", node.label, new_label);
-                                        }
-                                    }
+                                    // Add the new label if not already present (Vec-based).
+                                    node.add_label(new_label.clone());
                                 }
                             }
                             _ => {
@@ -1125,15 +1125,13 @@ impl<'a> Executor<'a> {
                             }
                         }
                     }
-                    RemoveItem::Label(var, _label) => {
+                    RemoveItem::Label(var, label) => {
                         let _binding_value = bindings
                             .get(var)
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-                        // Label removal: set label to empty string
-                        // (Full label management would require multi-label support)
                         if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
                             if let Some(node) = self.graph.get_node_mut(node_id) {
-                                node.label = String::new();
+                                node.remove_label(label);
                             }
                         }
                     }
@@ -1330,10 +1328,10 @@ impl<'a> Executor<'a> {
                         }
                     }
                 }
-                RemoveItem::Label(var, _label) => {
+                RemoveItem::Label(var, label) => {
                     if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
                         if let Some(node) = self.graph.get_node_mut(node_id) {
-                            node.label = String::new();
+                            node.remove_label(label);
                         }
                     } else {
                         return Err(ExecuteError::UndefinedVariable(var.clone()));
@@ -1511,7 +1509,7 @@ impl<'a> Executor<'a> {
         let node_ids: Vec<NodeId> = self
             .graph
             .nodes()
-            .filter(|n| n.label == cfi.label)
+            .filter(|n| n.has_label(&cfi.label))
             .map(|n| n.id)
             .collect();
 
@@ -2344,12 +2342,9 @@ impl<'a> Executor<'a> {
             None => return Ok(false),
         };
 
-        // Check label. Labels are stored as colon-separated strings to support
-        // multi-label nodes added via SET n:Label. A node matches if the
-        // pattern label is one of the node's labels.
-        if let Some(ref label) = pattern.label {
-            let has_label = node.label.split(':').any(|l| l == label.as_str());
-            if !has_label {
+        // Check labels. A node must have ALL labels specified in the pattern (AND condition).
+        for label in &pattern.labels {
+            if !node.has_label(label) {
                 return Ok(false);
             }
         }
@@ -2822,7 +2817,7 @@ impl<'a> Executor<'a> {
                             if let Some(node) = self.graph.get_node(*node_id) {
                                 Ok(Value::NodeData {
                                     id: *node_id,
-                                    label: node.label.clone(),
+                                    labels: node.labels.clone(),
                                     properties: node.properties.clone(),
                                 })
                             } else {
@@ -2870,7 +2865,7 @@ impl<'a> Executor<'a> {
                         if let Some(node) = self.graph.get_node(*node_id) {
                             return Ok(Value::NodeData {
                                 id: *node_id,
-                                label: node.label.clone(),
+                                labels: node.labels.clone(),
                                 properties: node.properties.clone(),
                             });
                         }
@@ -2903,7 +2898,7 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph.get_node(node_id) {
                                     Value::NodeData {
                                         id: node_id,
-                                        label: node.label.clone(),
+                                        labels: node.labels.clone(),
                                         properties: node.properties.clone(),
                                     }
                                 } else {
@@ -3368,7 +3363,7 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph.get_node(node_id) {
                                     Ok(Value::NodeData {
                                         id: node_id,
-                                        label: node.label.clone(),
+                                        labels: node.labels.clone(),
                                         properties: node.properties.clone(),
                                     })
                                 } else {
@@ -3395,7 +3390,7 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph.get_node(node_id) {
                                     Ok(Value::NodeData {
                                         id: node_id,
-                                        label: node.label.clone(),
+                                        labels: node.labels.clone(),
                                         properties: node.properties.clone(),
                                     })
                                 } else {
@@ -3418,12 +3413,10 @@ impl<'a> Executor<'a> {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph.get_node(*node_id) {
-                                // Labels are stored as colon-separated strings.
                                 let labels: Vec<Value> = node
-                                    .label
-                                    .split(':')
-                                    .filter(|l| !l.is_empty())
-                                    .map(|l| Value::String(l.to_string()))
+                                    .labels
+                                    .iter()
+                                    .map(|l| Value::String(l.clone()))
                                     .collect();
                                 Ok(Value::List(labels))
                             } else {
@@ -4679,7 +4672,7 @@ mod tests {
         assert_eq!(graph.node_count(), 1);
 
         let node = graph.nodes().next().unwrap();
-        assert_eq!(node.label, "Person");
+        assert!(node.has_label("Person"));
     }
 
     #[test]
@@ -6176,7 +6169,7 @@ mod tests {
 
         let car = graph
             .nodes()
-            .find(|n| n.label == "Car")
+            .find(|n| n.has_label("Car"))
             .expect("Car node should exist");
         assert_eq!(
             car.get_property("model"),
@@ -6338,9 +6331,8 @@ mod tests {
 
         let node = graph.nodes().next().unwrap();
         // Node should now be matchable by both Person and Adult labels
-        let labels: Vec<&str> = node.label.split(':').collect();
-        assert!(labels.contains(&"Person"));
-        assert!(labels.contains(&"Adult"));
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Adult"));
     }
 
     #[test]
@@ -6353,7 +6345,7 @@ mod tests {
         execute(&mut graph, r#"MATCH (n:Person) SET n:Adult"#).unwrap();
 
         let node = graph.nodes().next().unwrap();
-        let label_count = node.label.split(':').filter(|l| *l == "Adult").count();
+        let label_count = node.labels.iter().filter(|l| *l == "Adult").count();
         assert_eq!(label_count, 1, "Label 'Adult' should appear only once");
     }
 
@@ -6437,7 +6429,7 @@ mod tests {
 
         assert_eq!(graph.node_count(), 1);
         let node = graph.nodes().next().unwrap();
-        assert_eq!(node.label, "Person");
+        assert!(node.has_label("Person"));
         assert_eq!(
             node.get_property("name"),
             Some(&PropertyValue::String("Alice".to_string()))
@@ -6626,7 +6618,7 @@ mod tests {
         .unwrap();
 
         let node = graph.nodes().next().unwrap();
-        assert_eq!(node.label, "");
+        assert!(!node.has_label("Person"), "Person label should be removed");
     }
 
     // ========== UNWIND tests ==========
@@ -8427,9 +8419,9 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         match &result.rows[0].columns[0] {
             Value::NodeData {
-                label, properties, ..
+                labels, properties, ..
             } => {
-                assert_eq!(label, "Person");
+                assert!(labels.contains(&"Person".to_string()));
                 assert_eq!(
                     properties.get("name"),
                     Some(&PropertyValue::String("Alice".to_string()))
@@ -8442,9 +8434,9 @@ mod tests {
         let result = execute(&mut graph, "MATCH (a)-[r:KNOWS]->(b) RETURN endNode(r)").unwrap();
         match &result.rows[0].columns[0] {
             Value::NodeData {
-                label, properties, ..
+                labels, properties, ..
             } => {
-                assert_eq!(label, "Person");
+                assert!(labels.contains(&"Person".to_string()));
                 assert_eq!(
                     properties.get("name"),
                     Some(&PropertyValue::String("Bob".to_string()))
@@ -9724,5 +9716,165 @@ mod tests {
         .unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
+    }
+
+    // ========== Multiple Labels Tests ==========
+
+    #[test]
+    fn test_create_node_with_multiple_labels() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.nodes().next().unwrap();
+        assert!(node.has_label("Person"), "Should have Person label");
+        assert!(node.has_label("Employee"), "Should have Employee label");
+        assert_eq!(node.labels.len(), 2);
+    }
+
+    #[test]
+    fn test_match_multiple_labels_and_condition() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person:Employee {name: "Alice"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // Only Alice has both Person AND Employee
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person:Employee) RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_single_label_on_multilabel_node() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        // Node with multiple labels should match on any single label
+        let result1 =
+            execute(&mut graph, r#"MATCH (n:Person) RETURN n.name"#).unwrap();
+        assert_eq!(result1.row_count(), 1);
+
+        let result2 =
+            execute(&mut graph, r#"MATCH (n:Employee) RETURN n.name"#).unwrap();
+        assert_eq!(result2.row_count(), 1);
+    }
+
+    #[test]
+    fn test_set_label_on_multilabel_node() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        // Add two labels sequentially
+        execute(&mut graph, r#"MATCH (n:Person) SET n:Employee"#).unwrap();
+        execute(&mut graph, r#"MATCH (n:Person) SET n:Manager"#).unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+        assert!(node.has_label("Manager"));
+        assert_eq!(node.labels.len(), 3);
+    }
+
+    #[test]
+    fn test_remove_label_from_multilabel_node() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person:Employee:Manager {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        execute(
+            &mut graph,
+            r#"MATCH (n:Manager) REMOVE n:Manager"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert!(node.has_label("Person"), "Should still have Person");
+        assert!(node.has_label("Employee"), "Should still have Employee");
+        assert!(!node.has_label("Manager"), "Manager should be removed");
+        assert_eq!(node.labels.len(), 2);
+    }
+
+    #[test]
+    fn test_labels_function_multiple_labels() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) RETURN labels(n)"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        match &result.rows[0].columns[0] {
+            Value::List(labels) => {
+                assert!(labels.contains(&Value::String("Person".to_string())));
+                assert!(labels.contains(&Value::String("Employee".to_string())));
+                assert_eq!(labels.len(), 2);
+            }
+            other => panic!("Expected list of labels, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_match_three_labels() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (n:A:B:C {val: 42})"#,
+        )
+        .unwrap();
+
+        let node = graph.nodes().next().unwrap();
+        assert!(node.has_label("A"));
+        assert!(node.has_label("B"));
+        assert!(node.has_label("C"));
+        assert_eq!(node.labels.len(), 3);
+
+        // Matching with all three labels should work
+        let result = execute(&mut graph, r#"MATCH (n:A:B:C) RETURN n.val"#).unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(42));
+
+        // Matching with only two labels should also work
+        let result2 = execute(&mut graph, r#"MATCH (n:A:B) RETURN n.val"#).unwrap();
+        assert_eq!(result2.row_count(), 1);
+
+        // Matching with a non-existent combo should return nothing
+        let result3 = execute(&mut graph, r#"MATCH (n:A:D) RETURN n.val"#).unwrap();
+        assert_eq!(result3.row_count(), 0);
     }
 }

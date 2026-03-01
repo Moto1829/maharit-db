@@ -182,7 +182,7 @@ fn main() {
             println!(
                 "     Node {}: label={}, name={:?}",
                 node.id,
-                node.label,
+                node.labels.join(":"),
                 node.get_property("name")
             );
         }
@@ -243,7 +243,7 @@ fn main() {
             for node in graph.nodes() {
                 println!(
                     "     - {} ({})",
-                    node.label,
+                    node.labels.join(":"),
                     node.get_property("username").unwrap()
                 );
             }

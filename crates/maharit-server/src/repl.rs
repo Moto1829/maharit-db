@@ -214,8 +214,8 @@ impl Repl {
         println!("Nodes ({}):", self.graph.node_count());
         for node in self.graph.nodes() {
             print!("  ({}", node.id);
-            if !node.label.is_empty() {
-                print!(":{}", node.label);
+            if !node.labels.is_empty() {
+                print!("{}", node.labels.iter().map(|l| format!(":{}", l)).collect::<String>());
             }
             if !node.properties.is_empty() {
                 print!(" {{");

@@ -135,7 +135,10 @@ impl GraphStats {
     pub fn from_graph(graph: &Graph) -> Self {
         let mut label_counts: HashMap<String, u64> = HashMap::new();
         for node in graph.nodes() {
-            *label_counts.entry(node.label.clone()).or_insert(0) += 1;
+            // Count each label independently (a node with 2 labels contributes to both counts)
+            for label in &node.labels {
+                *label_counts.entry(label.clone()).or_insert(0) += 1;
+            }
         }
 
         Self {
@@ -222,7 +225,7 @@ impl GraphStats {
         let mut distinct_set: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         for node in graph.nodes() {
-            if node.label != label {
+            if !node.has_label(label) {
                 continue;
             }
 
@@ -516,11 +519,14 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
                 match pattern {
                     Pattern::Node(np) => {
                         let est = estimate_node_scan(np, node_count);
-                        let label_info = np
-                            .label
-                            .as_ref()
-                            .map(|l| format!(":{}", l))
-                            .unwrap_or_default();
+                        let label_info = if np.labels.is_empty() {
+                            String::new()
+                        } else {
+                            np.labels
+                                .iter()
+                                .map(|l| format!(":{}", l))
+                                .collect::<String>()
+                        };
                         nodes.push(PlanNode::new(
                             "NodeByLabelScan",
                             est,
@@ -747,7 +753,7 @@ fn plan_unwind(uw: &UnwindStatement) -> Vec<PlanNode> {
 }
 
 fn estimate_node_scan(np: &NodePattern, node_count: u64) -> u64 {
-    if np.label.is_some() {
+    if !np.labels.is_empty() {
         // With label filter, estimate ~10% of nodes
         (node_count / 10).max(1)
     } else {
@@ -756,7 +762,8 @@ fn estimate_node_scan(np: &NodePattern, node_count: u64) -> u64 {
 }
 
 fn estimate_node_scan_with_stats(np: &NodePattern, stats: &GraphStats) -> u64 {
-    if let Some(ref label) = np.label {
+    if let Some(label) = np.labels.first() {
+        // Use the first label for estimation (most selective)
         stats.estimate_label_count(label)
     } else {
         stats.node_count.max(1)
@@ -876,14 +883,18 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                 match pattern {
                     Pattern::Node(np) => {
                         let est = estimate_node_scan_with_stats(np, stats);
-                        let label_info = np
-                            .label
-                            .as_ref()
-                            .map(|l| format!(":{}", l))
-                            .unwrap_or_default();
+                        let label_info = if np.labels.is_empty() {
+                            String::new()
+                        } else {
+                            np.labels
+                                .iter()
+                                .map(|l| format!(":{}", l))
+                                .collect::<String>()
+                        };
 
-                        // Index selection: check if WHERE filters on an indexed property
-                        if let (Some(label), Some(where_expr)) = (&np.label, &segment.where_clause)
+                        // Index selection: use the first label for index lookup
+                        if let (Some(label), Some(where_expr)) =
+                            (np.labels.first(), &segment.where_clause)
                         {
                             let filter_type = classify_filter(where_expr);
                             match filter_type {
@@ -960,17 +971,16 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             let end_node = &pp.segments[0].node;
                             let est_end = estimate_node_scan_with_stats(end_node, stats);
 
-                            let start_label = pp
-                                .start
-                                .label
-                                .as_ref()
-                                .map(|l| format!(":{}", l))
-                                .unwrap_or_default();
-                            let end_label = end_node
-                                .label
-                                .as_ref()
-                                .map(|l| format!(":{}", l))
-                                .unwrap_or_default();
+                            let start_label = if pp.start.labels.is_empty() {
+                                String::new()
+                            } else {
+                                pp.start.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                            };
+                            let end_label = if end_node.labels.is_empty() {
+                                String::new()
+                            } else {
+                                end_node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                            };
                             let edge_info = pp.segments[0]
                                 .edge
                                 .edge_type
@@ -978,7 +988,7 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                                 .map(|t| format!(":{}", t))
                                 .unwrap_or_default();
 
-                            if est_end < est_start && end_node.label.is_some() {
+                            if est_end < est_start && !end_node.labels.is_empty() {
                                 // Reverse: scan end node first, expand backward
                                 nodes.push(PlanNode::new(
                                     "NodeByLabelScan",
@@ -1015,12 +1025,11 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             }
                         } else {
                             // Multi-segment path: use original ordering
-                            let start_label = pp
-                                .start
-                                .label
-                                .as_ref()
-                                .map(|l| format!(":{}", l))
-                                .unwrap_or_default();
+                            let start_label = if pp.start.labels.is_empty() {
+                                String::new()
+                            } else {
+                                pp.start.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                            };
                             nodes.push(PlanNode::new(
                                 "NodeByLabelScan",
                                 est_start,

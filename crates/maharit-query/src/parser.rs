@@ -639,9 +639,10 @@ impl Parser {
             let props = self.parse_properties()?;
             Ok(SetItem::MergeProperties(variable, props))
         } else if self.check(TokenKind::Colon) {
-            // n:NewLabel
+            // n:NewLabel1:NewLabel2:...
             self.advance(); // consume :
             let label = self.expect_ident()?;
+            // Only one label per AddLabel; additional colons parsed as separate items
             Ok(SetItem::AddLabel(variable, label))
         } else {
             // n.prop = value
@@ -2153,7 +2154,7 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
 
         let mut variable = None;
-        let mut label = None;
+        let mut labels = Vec::new();
         let mut properties = HashMap::new();
 
         // Variable name (optional)
@@ -2161,10 +2162,10 @@ impl Parser {
             variable = Some(self.expect_ident()?);
         }
 
-        // Label (optional)
-        if self.check(TokenKind::Colon) {
+        // Labels (optional, multiple allowed: :Label1:Label2)
+        while self.check(TokenKind::Colon) {
             self.advance();
-            label = Some(self.expect_ident()?);
+            labels.push(self.expect_ident()?);
         }
 
         // Properties (optional)
@@ -2176,7 +2177,7 @@ impl Parser {
 
         Ok(NodePattern {
             variable,
-            label,
+            labels,
             properties,
         })
     }
@@ -2800,7 +2801,7 @@ mod tests {
             assert_eq!(create.patterns.len(), 1);
             if let Pattern::Node(node) = &create.patterns[0] {
                 assert_eq!(node.variable, Some("n".to_string()));
-                assert_eq!(node.label, None);
+                assert!(node.labels.is_empty());
             } else {
                 panic!("expected node pattern");
             }
@@ -2816,7 +2817,23 @@ mod tests {
         if let Statement::Create(create) = stmt {
             if let Pattern::Node(node) = &create.patterns[0] {
                 assert_eq!(node.variable, Some("n".to_string()));
-                assert_eq!(node.label, Some("Person".to_string()));
+                assert_eq!(node.labels, vec!["Person".to_string()]);
+            } else {
+                panic!("expected node pattern");
+            }
+        } else {
+            panic!("expected CREATE statement");
+        }
+    }
+
+    #[test]
+    fn test_create_node_with_multiple_labels() {
+        let stmt = parse("CREATE (n:Person:Employee)").unwrap();
+
+        if let Statement::Create(create) = stmt {
+            if let Pattern::Node(node) = &create.patterns[0] {
+                assert_eq!(node.variable, Some("n".to_string()));
+                assert_eq!(node.labels, vec!["Person".to_string(), "Employee".to_string()]);
             } else {
                 panic!("expected node pattern");
             }
@@ -2832,7 +2849,7 @@ mod tests {
         if let Statement::Create(create) = stmt {
             if let Pattern::Node(node) = &create.patterns[0] {
                 assert_eq!(node.variable, Some("n".to_string()));
-                assert_eq!(node.label, Some("Person".to_string()));
+                assert_eq!(node.labels, vec!["Person".to_string()]);
                 assert_eq!(
                     node.properties.get("name"),
                     Some(&Expression::Literal(Literal::String("Alice".to_string())))
@@ -2856,7 +2873,7 @@ mod tests {
         if let Statement::Create(create) = stmt {
             if let Pattern::Path(path) = &create.patterns[0] {
                 assert_eq!(path.start.variable, Some("a".to_string()));
-                assert_eq!(path.start.label, Some("Person".to_string()));
+                assert_eq!(path.start.labels, vec!["Person".to_string()]);
                 assert_eq!(path.segments.len(), 1);
 
                 let seg = &path.segments[0];

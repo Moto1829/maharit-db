@@ -206,11 +206,12 @@ pub enum Pattern {
     Path(PathPattern),
 }
 
-/// ノードパターン: (variable:Label {props})
+/// ノードパターン: (variable:Label1:Label2 {props})
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePattern {
     pub variable: Option<String>,
-    pub label: Option<String>,
+    /// マッチに使用するラベルリスト（全て保持していることが条件）
+    pub labels: Vec<String>,
     pub properties: HashMap<String, Expression>,
 }
 

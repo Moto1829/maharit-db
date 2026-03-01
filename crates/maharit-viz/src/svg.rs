@@ -258,10 +258,14 @@ impl SvgExporter {
             .unwrap();
 
             // Label: "label:id" or just the id when no label is set.
-            let raw_label = if node.label.is_empty() {
+            let raw_label = if node.labels.is_empty() {
                 node.id.to_string()
             } else {
-                format!("{}:{}", node.label, node.id)
+                format!(
+                    "{}:{}",
+                    node.labels.join(":"),
+                    node.id
+                )
             };
             let escaped = escape_xml(&raw_label);
             writeln!(

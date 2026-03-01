@@ -28,8 +28,8 @@ impl AsciiRenderer {
         for node in graph.nodes() {
             // ノード自体
             write!(output, "({})", node.id).unwrap();
-            if !node.label.is_empty() {
-                write!(output, ":{}", node.label).unwrap();
+            if !node.labels.is_empty() {
+                write!(output, "{}", node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()).unwrap();
             }
             writeln!(output).unwrap();
 
@@ -97,8 +97,8 @@ impl AsciiRenderer {
 
         write!(output, "{}{}", prefix, connector).unwrap();
         write!(output, "({})", node.id).unwrap();
-        if !node.label.is_empty() {
-            write!(output, ":{}", node.label).unwrap();
+        if !node.labels.is_empty() {
+            write!(output, "{}", node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()).unwrap();
         }
 
         // 循環検出
@@ -183,8 +183,8 @@ impl AsciiRenderer {
             // ノードを表示
             if let Some(node) = graph.get_node(node_id) {
                 write!(output, "  ({})", node.id).unwrap();
-                if !node.label.is_empty() {
-                    write!(output, ":{}", node.label).unwrap();
+                if !node.labels.is_empty() {
+                    write!(output, "{}", node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()).unwrap();
                 }
                 writeln!(output).unwrap();
             }

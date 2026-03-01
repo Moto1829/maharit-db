@@ -135,10 +135,14 @@ impl GraphMlImporter {
                     if matches!(xml_reader.read_event_into(&mut buf), Ok(Event::Empty(_))) {
                         // Process empty node
                         if let Some(ref node_id) = current_node_id {
-                            let label = current_node_label
+                            let label_str = current_node_label
                                 .clone()
                                 .unwrap_or_else(|| "Node".to_string());
-                            let internal_id = graph.create_node(&label);
+                            let labels: Vec<String> = label_str
+                                .split(':')
+                                .map(|s| s.to_string())
+                                .collect();
+                            let internal_id = graph.create_node_with_labels(labels);
                             id_map.insert(node_id.clone(), internal_id);
                             nodes_imported += 1;
                             current_node_id = None;
@@ -183,10 +187,14 @@ impl GraphMlImporter {
                 Ok(Event::End(ref e)) => match e.name().as_ref() {
                     b"node" => {
                         if let Some(ref node_id) = current_node_id {
-                            let label = current_node_label
+                            let label_str = current_node_label
                                 .take()
                                 .unwrap_or_else(|| "Node".to_string());
-                            let internal_id = graph.create_node(&label);
+                            let labels: Vec<String> = label_str
+                                .split(':')
+                                .map(|s| s.to_string())
+                                .collect();
+                            let internal_id = graph.create_node_with_labels(labels);
                             id_map.insert(node_id.clone(), internal_id);
 
                             if let Some(node) = graph.get_node_mut(internal_id) {
@@ -354,8 +362,8 @@ impl GraphMlExporter {
             node_elem.push_attribute(("id", node.id.to_string().as_str()));
             xml_writer.write_event(Event::Start(node_elem))?;
 
-            // Label
-            Self::write_data(&mut xml_writer, "label", &node.label)?;
+            // Label (colon-separated for multi-label support)
+            Self::write_data(&mut xml_writer, "label", &node.labels.join(":"))?;
 
             // Properties
             for (key, value) in &node.properties {

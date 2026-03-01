@@ -91,10 +91,14 @@ impl DotExporter {
     }
 
     fn make_node_label(node: &maharit_core::Node, style: &DotStyle) -> String {
-        let mut label = if node.label.is_empty() {
+        let mut label = if node.labels.is_empty() {
             format!("({})", node.id)
         } else {
-            format!("{}:{}", node.id, node.label)
+            format!(
+                "{}{}",
+                node.id,
+                node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+            )
         };
 
         if style.show_properties && !node.properties.is_empty() {

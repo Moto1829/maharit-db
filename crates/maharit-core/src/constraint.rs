@@ -308,18 +308,16 @@ impl ConstraintManager {
             } = &constraint.constraint_type
             {
                 // Check source node label
-                let from_node_label = graph
+                let from_has_label = graph
                     .get_node(from_id)
-                    .map(|n| n.label.as_str())
-                    .unwrap_or("");
-                let to_node_label = graph
+                    .map(|n| n.has_label(source_label.as_str()))
+                    .unwrap_or(false);
+                let to_has_label = graph
                     .get_node(to_id)
-                    .map(|n| n.label.as_str())
-                    .unwrap_or("");
+                    .map(|n| n.has_label(target_label.as_str()))
+                    .unwrap_or(false);
 
-                if from_node_label != source_label.as_str()
-                    || to_node_label != target_label.as_str()
-                {
+                if !from_has_label || !to_has_label {
                     return Err(ConstraintError::EndpointLabelViolation {
                         name: constraint.name.clone(),
                         edge_label: edge_label.to_string(),
@@ -346,7 +344,7 @@ impl ConstraintManager {
         }
 
         for constraint in self.constraints.values() {
-            if constraint.label != node.label
+            if !node.has_label(&constraint.label)
                 || !constraint.properties.contains(&property.to_string())
             {
                 continue;
@@ -406,7 +404,7 @@ impl ConstraintManager {
         }
 
         for constraint in self.constraints.values() {
-            if constraint.label != node.label
+            if !node.has_label(&constraint.label)
                 || !constraint.properties.contains(&property.to_string())
             {
                 continue;
@@ -433,7 +431,7 @@ impl ConstraintManager {
     ) -> Result<(), ConstraintError> {
         let property = &constraint.properties[0];
         for node in graph.nodes() {
-            if node.label != constraint.label {
+            if !node.has_label(&constraint.label) {
                 continue;
             }
             if let Some(exclude_id) = exclude_node_id {
@@ -475,7 +473,7 @@ impl ConstraintManager {
 
         // Check if any existing node has the same combination of values
         for node in graph.nodes() {
-            if node.label != constraint.label {
+            if !node.has_label(&constraint.label) {
                 continue;
             }
             if let Some(exclude_id) = exclude_node_id {

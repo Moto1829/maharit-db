@@ -35,11 +35,16 @@ impl CsvImporter {
             // id列（外部ID）
             let external_id = record.get(0).unwrap_or("").to_string();
 
-            // label列
-            let label = record.get(1).unwrap_or("").to_string();
+            // label列（コロン区切りで複数ラベルを格納）
+            let label_str = record.get(1).unwrap_or("").to_string();
+            let labels: Vec<String> = if label_str.is_empty() {
+                vec![]
+            } else {
+                label_str.split(':').map(|s| s.to_string()).collect()
+            };
 
             // ノードを作成
-            let node_id = graph.create_node(&label);
+            let node_id = graph.create_node_with_labels(labels);
             id_map.insert(external_id, node_id);
 
             // プロパティを設定
@@ -188,7 +193,7 @@ impl CsvExporter {
         // ノードを書き込み
         let mut count = 0;
         for node in graph.nodes() {
-            let mut record = vec![node.id.to_string(), node.label.clone()];
+            let mut record = vec![node.id.to_string(), node.labels.join(":")];
 
             for key in &all_keys {
                 let value = node

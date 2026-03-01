@@ -7,8 +7,8 @@ use crate::{EdgeId, NodeId};
 pub struct LabelIndex {
     /// ノードラベル -> ノードID集合
     node_labels: HashMap<String, HashSet<NodeId>>,
-    /// ノードID -> ラベル（逆引き用）
-    node_to_label: HashMap<NodeId, String>,
+    /// ノードID -> ラベルリスト（逆引き用、複数ラベル対応）
+    node_to_labels: HashMap<NodeId, Vec<String>>,
     /// エッジラベル -> エッジID集合
     edge_labels: HashMap<String, HashSet<EdgeId>>,
     /// エッジID -> ラベル（逆引き用）
@@ -22,35 +22,75 @@ impl LabelIndex {
 
     // ========== ノードインデックス操作 ==========
 
-    /// ノードをインデックスに追加
+    /// ノードをインデックスに追加（単一ラベル版、後方互換のため残す）
     pub fn add_node(&mut self, node_id: NodeId, label: &str) {
         if label.is_empty() {
             return;
         }
-
-        self.node_labels
-            .entry(label.to_string())
-            .or_default()
-            .insert(node_id);
-        self.node_to_label.insert(node_id, label.to_string());
+        self.add_node_labels(node_id, &[label]);
     }
 
-    /// ノードをインデックスから削除
+    /// ノードを複数ラベルでインデックスに追加する
+    pub fn add_node_labels(&mut self, node_id: NodeId, labels: &[&str]) {
+        let non_empty: Vec<String> = labels
+            .iter()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
+        if non_empty.is_empty() {
+            return;
+        }
+
+        for label in &non_empty {
+            self.node_labels
+                .entry(label.clone())
+                .or_default()
+                .insert(node_id);
+        }
+
+        // Merge with existing labels if the node was already registered
+        let existing = self.node_to_labels.entry(node_id).or_default();
+        for label in &non_empty {
+            if !existing.contains(label) {
+                existing.push(label.clone());
+            }
+        }
+    }
+
+    /// ノードをインデックスから削除（全ラベルを削除）
     pub fn remove_node(&mut self, node_id: NodeId) {
-        if let Some(label) = self.node_to_label.remove(&node_id) {
-            if let Some(nodes) = self.node_labels.get_mut(&label) {
-                nodes.remove(&node_id);
-                if nodes.is_empty() {
-                    self.node_labels.remove(&label);
+        if let Some(labels) = self.node_to_labels.remove(&node_id) {
+            for label in &labels {
+                if let Some(nodes) = self.node_labels.get_mut(label) {
+                    nodes.remove(&node_id);
+                    if nodes.is_empty() {
+                        self.node_labels.remove(label);
+                    }
                 }
             }
         }
     }
 
-    /// ノードのラベルを変更し、インデックスを更新する
+    /// ノードから特定のラベルをインデックスから削除する
+    pub fn remove_node_label(&mut self, node_id: NodeId, label: &str) {
+        if let Some(labels) = self.node_to_labels.get_mut(&node_id) {
+            labels.retain(|l| l != label);
+            if labels.is_empty() {
+                self.node_to_labels.remove(&node_id);
+            }
+        }
+        if let Some(nodes) = self.node_labels.get_mut(label) {
+            nodes.remove(&node_id);
+            if nodes.is_empty() {
+                self.node_labels.remove(label);
+            }
+        }
+    }
+
+    /// ノードのラベルを変更し、インデックスを更新する（後方互換のため残す）
     ///
     /// 旧ラベルのインデックスから削除し、新ラベルのインデックスへ追加する。
-    /// これにより、ラベル変更後に新ラベルで MATCH でき、旧ラベルでは MATCH できなくなる。
     ///
     /// # Arguments
     ///
@@ -59,17 +99,20 @@ impl LabelIndex {
     ///
     /// # Returns
     ///
-    /// 変更前のラベル（存在していた場合は `Some(old_label)`、なければ `None`）
+    /// 変更前の最初のラベル（存在していた場合は `Some(old_label)`、なければ `None`）
     pub fn update_node_label(&mut self, node_id: NodeId, new_label: &str) -> Option<String> {
         // 旧ラベルをインデックスから削除
-        let old_label = if let Some(old) = self.node_to_label.remove(&node_id) {
-            if let Some(nodes) = self.node_labels.get_mut(&old) {
-                nodes.remove(&node_id);
-                if nodes.is_empty() {
-                    self.node_labels.remove(&old);
+        let old_first = if let Some(labels) = self.node_to_labels.remove(&node_id) {
+            let first = labels.first().cloned();
+            for label in &labels {
+                if let Some(nodes) = self.node_labels.get_mut(label) {
+                    nodes.remove(&node_id);
+                    if nodes.is_empty() {
+                        self.node_labels.remove(label);
+                    }
                 }
             }
-            Some(old)
+            first
         } else {
             None
         };
@@ -80,10 +123,19 @@ impl LabelIndex {
                 .entry(new_label.to_string())
                 .or_default()
                 .insert(node_id);
-            self.node_to_label.insert(node_id, new_label.to_string());
+            self.node_to_labels
+                .insert(node_id, vec![new_label.to_string()]);
         }
 
-        old_label
+        old_first
+    }
+
+    /// ノードが持つラベルリストを取得する
+    pub fn get_node_labels(&self, node_id: NodeId) -> Vec<&str> {
+        self.node_to_labels
+            .get(&node_id)
+            .map(|labels| labels.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
     }
 
     /// ラベルでノードを検索
@@ -156,7 +208,7 @@ impl LabelIndex {
 
     /// インデックス済みノード数
     pub fn indexed_node_count(&self) -> usize {
-        self.node_to_label.len()
+        self.node_to_labels.len()
     }
 
     /// インデックス済みエッジ数
@@ -167,7 +219,7 @@ impl LabelIndex {
     /// インデックスをクリア
     pub fn clear(&mut self) {
         self.node_labels.clear();
-        self.node_to_label.clear();
+        self.node_to_labels.clear();
         self.edge_labels.clear();
         self.edge_to_label.clear();
     }
@@ -360,5 +412,71 @@ mod tests {
         let nodes = index.get_nodes_by_label("NewLabel");
         assert_eq!(nodes.len(), 1);
         assert!(nodes.contains(&999));
+    }
+
+    #[test]
+    fn test_add_node_labels_multiple() {
+        let mut index = LabelIndex::new();
+
+        // ノード0 に Person と Employee の2ラベルを付与
+        index.add_node_labels(0, &["Person", "Employee"]);
+
+        let persons = index.get_nodes_by_label("Person");
+        assert_eq!(persons.len(), 1);
+        assert!(persons.contains(&0));
+
+        let employees = index.get_nodes_by_label("Employee");
+        assert_eq!(employees.len(), 1);
+        assert!(employees.contains(&0));
+
+        // 逆引きで2ラベルを確認
+        let labels = index.get_node_labels(0);
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains(&"Person"));
+        assert!(labels.contains(&"Employee"));
+    }
+
+    #[test]
+    fn test_add_node_labels_incremental() {
+        let mut index = LabelIndex::new();
+
+        index.add_node(0, "Person");
+        index.add_node_labels(0, &["Employee"]);
+
+        // 両方のラベルで検索できる
+        assert!(index.get_nodes_by_label("Person").contains(&0));
+        assert!(index.get_nodes_by_label("Employee").contains(&0));
+
+        // 1ノードとしてカウント
+        assert_eq!(index.indexed_node_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_node_label_specific() {
+        let mut index = LabelIndex::new();
+
+        index.add_node_labels(0, &["Person", "Employee"]);
+
+        // Employeeラベルだけ削除
+        index.remove_node_label(0, "Employee");
+
+        // Personラベルはまだある
+        assert!(index.get_nodes_by_label("Person").contains(&0));
+        assert!(!index.get_nodes_by_label("Employee").contains(&0));
+
+        // ノード自体はまだ登録されている
+        assert_eq!(index.indexed_node_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_node_label_last_removes_node() {
+        let mut index = LabelIndex::new();
+
+        index.add_node(0, "Person");
+        index.remove_node_label(0, "Person");
+
+        // 全ラベルが消えたのでノードは登録解除される
+        assert_eq!(index.indexed_node_count(), 0);
+        assert!(index.get_nodes_by_label("Person").is_empty());
     }
 }
