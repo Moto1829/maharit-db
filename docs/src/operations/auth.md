@@ -107,7 +107,9 @@ maharit server \
   --default-admin-password "initialadminpass"
 ```
 
-初回起動時に `admin` ユーザーが作成されます。起動後すぐにパスワードを変更してください。
+初回起動時に `admin` ユーザーが自動的に作成されます。
+
+> **セキュリティ上の重要事項**: 起動直後に `ALTER USER admin SET PASSWORD "新しいパスワード"` コマンドでパスワードを変更してください。
 
 ### クライアントからの認証
 

@@ -8,7 +8,7 @@ Rust ツールチェーン（1.75 以降）が必要です。まだインスト�
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/Moto1829/maharit-db.git
+git clone https://github.com/suzukishimei/maharit-db.git
 cd maharit-db
 
 # リリースビルド（推奨）
@@ -109,7 +109,7 @@ TCP サーバーとして起動し、クライアントからネットワーク�
 # デフォルト設定で起動（127.0.0.1:7687）
 cargo run -- server
 
-# カスタムホスト・ポートを指定
+# すべてのインタフェースにバインド
 cargo run -- server --host 0.0.0.0 --port 7687
 
 # 最大接続数を指定
@@ -127,11 +127,11 @@ cargo run -- server --host 0.0.0.0 --port 7687 --max-connections 200
 
 ### Rust クライアント
 
-`Cargo.toml` に依存関係を追加します。
+`Cargo.toml` に依存関係を追加します（`/path/to/maharit-db` はクローンしたリポジトリのパスに置き換えてください）。
 
 ```toml
 [dependencies]
-maharit-client = { path = "../maharit-db/maharit-client" }
+maharit-client = { path = "/path/to/maharit-db/crates/maharit-client" }
 tokio = { version = "1", features = ["full"] }
 ```
 

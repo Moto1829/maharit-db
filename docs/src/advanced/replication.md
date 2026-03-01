@@ -144,7 +144,8 @@ maharit server \
   --leader-addr "follower-1:7688"  # 新しいリーダーのアドレス
 ```
 
-自動フェイルオーバーは現在のバージョンでは未サポートです。外部の監視システム（例: Kubernetes Operator、Consul、Zookeeper）と組み合わせて実装してください。
+> **注意**: 自動フェイルオーバーは現在のバージョンでは未サポートです。
+> 高可用性が必要な場合は、外部の監視システム（例: Kubernetes Operator、Consul、ZooKeeper）と組み合わせてフェイルオーバー処理を実装してください。
 
 ## レプリケーション設定のまとめ
 

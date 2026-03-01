@@ -7,5 +7,5 @@ src = "src"
 
 [output.html]
 default-theme = "navy"
-git-repository-url = "https://github.com/Moto1829/maharit-db"
-edit-url-template = "https://github.com/Moto1829/maharit-db/edit/main/docs/{path}"
+git-repository-url = "https://github.com/suzukishimei/maharit-db"
+edit-url-template = "https://github.com/suzukishimei/maharit-db/edit/main/docs/{path}"
