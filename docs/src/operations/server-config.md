@@ -8,6 +8,8 @@ MaharitDB サーバーは以下のコマンドラインオプションで設定�
 maharit server [OPTIONS]
 ```
 
+> **開発時の注意**: ビルドせずに起動する場合は `cargo run -p maharit-server -- server [OPTIONS]` を使用してください。
+
 ### 利用可能なオプション
 
 | オプション | 短縮形 | 型 | デフォルト | 説明 |

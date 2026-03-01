@@ -32,7 +32,7 @@ Rust ツールチェーン（1.75 以降）が必要です。
 ```bash
 git clone https://github.com/suzukishimei/maharit-db.git
 cd maharit-db
-cargo build --release
+cargo build --release -p maharit-server
 ```
 
 ## クイックスタート
@@ -40,7 +40,7 @@ cargo build --release
 ### REPL（対話モード）
 
 ```bash
-cargo run
+cargo run -p maharit-server
 ```
 
 ```cypher
@@ -68,10 +68,10 @@ Created 1 relationship(s).
 
 ```bash
 # デフォルト設定（127.0.0.1:7687）で起動
-cargo run -- server
+cargo run -p maharit-server -- server
 
 # すべてのインタフェースにバインド
-cargo run -- server --host 0.0.0.0 --port 7687
+cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687
 ```
 
 ### Rust クライアント

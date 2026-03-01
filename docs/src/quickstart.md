@@ -12,7 +12,7 @@ git clone https://github.com/suzukishimei/maharit-db.git
 cd maharit-db
 
 # リリースビルド（推奨）
-cargo build --release
+cargo build --release -p maharit-server
 
 # ビルド後のバイナリ場所
 ls target/release/maharit
@@ -24,7 +24,7 @@ REPL（Read-Eval-Print Loop）モードで対話的にクエリを実行でき�
 
 ```bash
 # デバッグビルドで REPL を起動
-cargo run
+cargo run -p maharit-server
 
 # またはリリースバイナリを直接起動
 ./target/release/maharit
@@ -107,13 +107,13 @@ TCP サーバーとして起動し、クライアントからネットワーク�
 
 ```bash
 # デフォルト設定で起動（127.0.0.1:7687）
-cargo run -- server
+cargo run -p maharit-server -- server
 
 # すべてのインタフェースにバインド
-cargo run -- server --host 0.0.0.0 --port 7687
+cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687
 
 # 最大接続数を指定
-cargo run -- server --host 0.0.0.0 --port 7687 --max-connections 200
+cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687 --max-connections 200
 ```
 
 サーバーが起動すると以下のログが表示されます。
