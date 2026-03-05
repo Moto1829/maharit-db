@@ -186,12 +186,12 @@ impl PropertyIndex {
         // Remove from range indexes
         match value {
             PropertyValue::Int(n) => {
-                if let Some(btree) = self.int_range_index.get_mut(property) {
-                    if let Some(nodes) = btree.get_mut(n) {
-                        nodes.remove(&node_id);
-                        if nodes.is_empty() {
-                            btree.remove(n);
-                        }
+                if let Some(btree) = self.int_range_index.get_mut(property)
+                    && let Some(nodes) = btree.get_mut(n)
+                {
+                    nodes.remove(&node_id);
+                    if nodes.is_empty() {
+                        btree.remove(n);
                     }
                 }
             }
@@ -219,12 +219,12 @@ impl PropertyIndex {
                 // Remove from range indexes
                 match &key.value {
                     PropertyValue::Int(n) => {
-                        if let Some(btree) = self.int_range_index.get_mut(&key.property) {
-                            if let Some(nodes) = btree.get_mut(n) {
-                                nodes.remove(&node_id);
-                                if nodes.is_empty() {
-                                    btree.remove(n);
-                                }
+                        if let Some(btree) = self.int_range_index.get_mut(&key.property)
+                            && let Some(nodes) = btree.get_mut(n)
+                        {
+                            nodes.remove(&node_id);
+                            if nodes.is_empty() {
+                                btree.remove(n);
                             }
                         }
                     }

@@ -85,6 +85,9 @@ impl HealthStatus {
     }
 }
 
+/// Type alias for a boxed health-check closure stored in [`HealthRegistry`].
+type HealthCheckFn = Box<dyn Fn() -> HealthStatus + Send + Sync>;
+
 /// A registry of named health-check functions.
 ///
 /// Register closures with [`HealthRegistry::register`]; the HTTP server will
@@ -108,7 +111,7 @@ impl HealthStatus {
 pub struct HealthRegistry {
     /// Named check closures.  `Box<dyn Fn() -> HealthStatus + Send + Sync>`
     /// allows arbitrary check logic without generics in the public API.
-    checks: Mutex<Vec<(String, Box<dyn Fn() -> HealthStatus + Send + Sync>)>>,
+    checks: Mutex<Vec<(String, HealthCheckFn)>>,
 }
 
 impl std::fmt::Debug for HealthRegistry {

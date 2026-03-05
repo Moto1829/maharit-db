@@ -184,20 +184,20 @@ impl Graph {
         // 関連するエッジを削除
         if let Some(outgoing) = self.outgoing_edges.remove(&id) {
             for edge_id in outgoing {
-                if let Some(edge) = self.edges.remove(&edge_id) {
-                    if let Some(incoming) = self.incoming_edges.get_mut(&edge.to) {
-                        incoming.retain(|&e| e != edge_id);
-                    }
+                if let Some(edge) = self.edges.remove(&edge_id)
+                    && let Some(incoming) = self.incoming_edges.get_mut(&edge.to)
+                {
+                    incoming.retain(|&e| e != edge_id);
                 }
             }
         }
 
         if let Some(incoming) = self.incoming_edges.remove(&id) {
             for edge_id in incoming {
-                if let Some(edge) = self.edges.remove(&edge_id) {
-                    if let Some(outgoing) = self.outgoing_edges.get_mut(&edge.from) {
-                        outgoing.retain(|&e| e != edge_id);
-                    }
+                if let Some(edge) = self.edges.remove(&edge_id)
+                    && let Some(outgoing) = self.outgoing_edges.get_mut(&edge.from)
+                {
+                    outgoing.retain(|&e| e != edge_id);
                 }
             }
         }

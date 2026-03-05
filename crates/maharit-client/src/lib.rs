@@ -155,6 +155,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 }
 
 /// Connection stream that supports both plain TCP and TLS
+#[allow(clippy::large_enum_variant)]
 enum ConnectionStream {
     Plain(TcpStream),
     Tls(TlsStream<TcpStream>),
@@ -317,12 +318,14 @@ enum Response {
     #[serde(rename = "committed")]
     Committed {
         #[serde(rename = "txId")]
+        #[allow(dead_code)]
         tx_id: TxId,
     },
 
     #[serde(rename = "rolledBack")]
     RolledBack {
         #[serde(rename = "txId")]
+        #[allow(dead_code)]
         tx_id: TxId,
     },
 
@@ -339,6 +342,7 @@ enum Response {
         #[serde(rename = "streamId")]
         stream_id: u64,
         #[serde(rename = "chunkIndex")]
+        #[allow(dead_code)]
         chunk_index: usize,
         rows: Vec<HashMap<String, String>>,
     },
@@ -637,12 +641,13 @@ impl Client {
         let result = self.query_internal(query, tx_id).await;
 
         // Only auto-reconnect if not in a transaction
-        if result.is_err() && self.config.auto_reconnect && tx_id.is_none() {
-            if Self::should_reconnect(result.as_ref().unwrap_err()) {
-                if self.try_reconnect().await {
-                    return self.query_internal(query, tx_id).await;
-                }
-            }
+        if let Err(ref e) = result
+            && self.config.auto_reconnect
+            && tx_id.is_none()
+            && Self::should_reconnect(e)
+            && self.try_reconnect().await
+        {
+            return self.query_internal(query, tx_id).await;
         }
 
         result
@@ -793,12 +798,12 @@ impl Client {
     pub async fn ping(&mut self) -> Result<()> {
         let result = self.ping_internal().await;
 
-        if result.is_err() && self.config.auto_reconnect {
-            if Self::should_reconnect(result.as_ref().unwrap_err()) {
-                if self.try_reconnect().await {
-                    return self.ping_internal().await;
-                }
-            }
+        if let Err(ref e) = result
+            && self.config.auto_reconnect
+            && Self::should_reconnect(e)
+            && self.try_reconnect().await
+        {
+            return self.ping_internal().await;
         }
 
         result
@@ -1100,7 +1105,7 @@ pub mod sync {
         /// Connect to a MaharitDB server with custom configuration
         pub fn connect_with_config(addr: &str, config: ClientConfig) -> Result<Self> {
             let runtime =
-                tokio::runtime::Runtime::new().map_err(|e| ClientError::Connection(e.into()))?;
+                tokio::runtime::Runtime::new().map_err(ClientError::Connection)?;
 
             let client = runtime.block_on(Client::connect_with_config(addr, config))?;
 

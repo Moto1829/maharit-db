@@ -434,20 +434,20 @@ impl ConstraintManager {
             if !node.has_label(&constraint.label) {
                 continue;
             }
-            if let Some(exclude_id) = exclude_node_id {
-                if node.id == exclude_id {
-                    continue;
-                }
+            if let Some(exclude_id) = exclude_node_id
+                && node.id == exclude_id
+            {
+                continue;
             }
-            if let Some(existing_value) = node.get_property(property) {
-                if existing_value == value {
-                    return Err(ConstraintError::UniqueViolation {
-                        name: constraint.name.clone(),
-                        label: constraint.label.clone(),
-                        property: property.clone(),
-                        value: format!("{}", value),
-                    });
-                }
+            if let Some(existing_value) = node.get_property(property)
+                && existing_value == value
+            {
+                return Err(ConstraintError::UniqueViolation {
+                    name: constraint.name.clone(),
+                    label: constraint.label.clone(),
+                    property: property.clone(),
+                    value: format!("{}", value),
+                });
             }
         }
         Ok(())
@@ -476,10 +476,10 @@ impl ConstraintManager {
             if !node.has_label(&constraint.label) {
                 continue;
             }
-            if let Some(exclude_id) = exclude_node_id {
-                if node.id == exclude_id {
-                    continue;
-                }
+            if let Some(exclude_id) = exclude_node_id
+                && node.id == exclude_id
+            {
+                continue;
             }
 
             // Check if all properties match
@@ -518,13 +518,13 @@ impl ConstraintManager {
             return Ok(()); // NULL is allowed unless NOT NULL constraint
         }
 
-        let type_ok = match (expected, value) {
-            (PropertyType::Bool, PropertyValue::Bool(_)) => true,
-            (PropertyType::Int, PropertyValue::Int(_)) => true,
-            (PropertyType::Float, PropertyValue::Float(_)) => true,
-            (PropertyType::String, PropertyValue::String(_)) => true,
-            _ => false,
-        };
+        let type_ok = matches!(
+            (expected, value),
+            (PropertyType::Bool, PropertyValue::Bool(_))
+                | (PropertyType::Int, PropertyValue::Int(_))
+                | (PropertyType::Float, PropertyValue::Float(_))
+                | (PropertyType::String, PropertyValue::String(_))
+        );
 
         if !type_ok {
             let actual_type = match value {

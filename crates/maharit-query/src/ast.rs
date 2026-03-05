@@ -348,20 +348,15 @@ pub enum OrderDirection {
 }
 
 /// NULL値の順序
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NullsOrder {
     /// NULL値を先頭に（NULLS FIRST）
     First,
     /// NULL値を末尾に（NULLS LAST）
     Last,
     /// デフォルト（ASCならLAST、DESCならFIRST）
+    #[default]
     Default,
-}
-
-impl Default for NullsOrder {
-    fn default() -> Self {
-        NullsOrder::Default
-    }
 }
 
 /// RETURN項目

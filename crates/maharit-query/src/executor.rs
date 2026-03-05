@@ -550,14 +550,11 @@ impl<'a> Executor<'a> {
 
         // Apply WHERE filter
         if let Some(where_expr) = &d.where_clause {
-            all_bindings = all_bindings
-                .into_iter()
-                .filter(|bindings| {
-                    self.evaluate_expression(where_expr, bindings)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
-                })
-                .collect();
+            all_bindings.retain(|bindings| {
+                self.evaluate_expression(where_expr, bindings)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
         }
 
         // Apply SET clause
@@ -648,14 +645,11 @@ impl<'a> Executor<'a> {
 
         // Apply WHERE filter (from last segment)
         if let Some(where_expr) = &mc.where_clause {
-            all_bindings = all_bindings
-                .into_iter()
-                .filter(|b| {
-                    self.evaluate_expression(where_expr, b)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
-                })
-                .collect();
+            all_bindings.retain(|b| {
+                self.evaluate_expression(where_expr, b)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
         }
 
         // Execute CREATE for each binding set
@@ -688,10 +682,10 @@ impl<'a> Executor<'a> {
             match pattern {
                 Pattern::Node(node_pattern) => {
                     // If variable is already bound, skip creation
-                    if let Some(var) = &node_pattern.variable {
-                        if bindings.contains_key(var) {
-                            continue;
-                        }
+                    if let Some(var) = &node_pattern.variable
+                        && bindings.contains_key(var)
+                    {
+                        continue;
                     }
                     self.create_node(node_pattern, &mut bindings)?;
                     created_nodes += 1;
@@ -789,14 +783,11 @@ impl<'a> Executor<'a> {
 
         // Apply WHERE filter
         if let Some(where_expr) = &ms.where_clause {
-            all_bindings = all_bindings
-                .into_iter()
-                .filter(|b| {
-                    self.evaluate_expression(where_expr, b)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
-                })
-                .collect();
+            all_bindings.retain(|b| {
+                self.evaluate_expression(where_expr, b)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
         }
 
         // Apply SET clause
@@ -941,14 +932,11 @@ impl<'a> Executor<'a> {
             }
 
             if let Some(where_expr) = &merge.where_clause {
-                all_bindings = all_bindings
-                    .into_iter()
-                    .filter(|b| {
-                        self.evaluate_expression(where_expr, b)
-                            .map(|v| matches!(v, Value::Bool(true)))
-                            .unwrap_or(false)
-                    })
-                    .collect();
+                all_bindings.retain(|b| {
+                    self.evaluate_expression(where_expr, b)
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .unwrap_or(false)
+                });
             }
         }
 
@@ -1001,10 +989,10 @@ impl<'a> Executor<'a> {
     ) -> Result<(), ExecuteError> {
         match pattern {
             Pattern::Node(node_pattern) => {
-                if let Some(var) = &node_pattern.variable {
-                    if bindings.contains_key(var) {
-                        return Ok(());
-                    }
+                if let Some(var) = &node_pattern.variable
+                    && bindings.contains_key(var)
+                {
+                    return Ok(());
                 }
                 self.create_node(node_pattern, bindings)?;
                 Ok(())
@@ -1091,14 +1079,11 @@ impl<'a> Executor<'a> {
 
         // Apply WHERE filter
         if let Some(where_expr) = &mr.where_clause {
-            all_bindings = all_bindings
-                .into_iter()
-                .filter(|b| {
-                    self.evaluate_expression(where_expr, b)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
-                })
-                .collect();
+            all_bindings.retain(|b| {
+                self.evaluate_expression(where_expr, b)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
         }
 
         // Apply REMOVE clause
@@ -1136,10 +1121,10 @@ impl<'a> Executor<'a> {
                         let _binding_value = bindings
                             .get(var)
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-                        if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
-                            if let Some(node) = self.graph.get_node_mut(node_id) {
-                                node.remove_label(label);
-                            }
+                        if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node())
+                            && let Some(node) = self.graph.get_node_mut(node_id)
+                        {
+                            node.remove_label(label);
                         }
                     }
                 }
@@ -1271,7 +1256,7 @@ impl<'a> Executor<'a> {
                 Ok(())
             }
             ForeachClause::Set(set) => {
-                self.apply_set_clause(set, &[bindings.clone()])?;
+                self.apply_set_clause(set, std::slice::from_ref(bindings))?;
                 Ok(())
             }
             ForeachClause::Remove(remove) => {
@@ -1784,14 +1769,11 @@ impl<'a> Executor<'a> {
 
             // Apply inner WHERE
             if let Some(ref where_expr) = call.where_clause {
-                inner_bindings = inner_bindings
-                    .into_iter()
-                    .filter(|b| {
-                        self.evaluate_expression(where_expr, b)
-                            .map(|v| matches!(v, Value::Bool(true)))
-                            .unwrap_or(false)
-                    })
-                    .collect();
+                inner_bindings.retain(|b| {
+                    self.evaluate_expression(where_expr, b)
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .unwrap_or(false)
+                });
             }
 
             // Evaluate each return item for all inner bindings
@@ -1855,14 +1837,11 @@ impl<'a> Executor<'a> {
 
         // Apply WHERE filter
         if let Some(where_expr) = &segment.where_clause {
-            bindings = bindings
-                .into_iter()
-                .filter(|b| {
-                    self.evaluate_expression(where_expr, b)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
-                })
-                .collect();
+            bindings.retain(|b| {
+                self.evaluate_expression(where_expr, b)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
         }
 
         // Apply WITH clause if present
@@ -2101,16 +2080,16 @@ impl<'a> Executor<'a> {
 
         for bindings in current_bindings {
             // Check if variable is already bound
-            if let Some(var) = &pattern.variable {
-                if let Some(bound_value) = bindings.get(var) {
-                    if let Some(bound_id) = bound_value.as_node() {
-                        // Variable already bound, check if it matches
-                        if self.node_matches_pattern(bound_id, pattern, &bindings)? {
-                            result.push(bindings);
-                        }
+            if let Some(var) = &pattern.variable
+                && let Some(bound_value) = bindings.get(var)
+            {
+                if let Some(bound_id) = bound_value.as_node() {
+                    // Variable already bound, check if it matches
+                    if self.node_matches_pattern(bound_id, pattern, &bindings)? {
+                        result.push(bindings);
                     }
-                    continue;
                 }
+                continue;
             }
 
             // Find matching nodes.
@@ -2230,14 +2209,14 @@ impl<'a> Executor<'a> {
 
         for edge in edges {
             // Check edge type
-            if let Some(ref edge_type) = segment.edge.edge_type {
-                if &edge.label != edge_type {
-                    continue;
-                }
+            if let Some(ref edge_type) = segment.edge.edge_type
+                && &edge.label != edge_type
+            {
+                continue;
             }
 
             // Get the other node
-            let next_id = self.get_next_node(prev_id, &edge, segment.edge.direction);
+            let next_id = self.get_next_node(prev_id, edge, segment.edge.direction);
 
             // Check if next node matches pattern
             if self.node_matches_pattern(next_id, &segment.node, bindings)? {
@@ -2301,13 +2280,13 @@ impl<'a> Executor<'a> {
 
                 for edge in edges {
                     // Check edge type
-                    if let Some(ref edge_type) = segment.edge.edge_type {
-                        if &edge.label != edge_type {
-                            continue;
-                        }
+                    if let Some(ref edge_type) = segment.edge.edge_type
+                        && &edge.label != edge_type
+                    {
+                        continue;
                     }
 
-                    let next_id = self.get_next_node(current_id, &edge, segment.edge.direction);
+                    let next_id = self.get_next_node(current_id, edge, segment.edge.direction);
 
                     // Avoid cycles: don't revisit nodes already in the current path
                     if visited_nodes.contains(&next_id) {
@@ -2906,15 +2885,15 @@ impl<'a> Executor<'a> {
             }
             ReturnItem::All => {
                 // For *, we return the first bound node variable
-                for (_var, binding_value) in bindings {
-                    if let BindingValue::Node(node_id) = binding_value {
-                        if let Some(node) = self.graph.get_node(*node_id) {
-                            return Ok(Value::NodeData {
-                                id: *node_id,
-                                labels: node.labels.clone(),
-                                properties: Arc::clone(&node.properties),
-                            });
-                        }
+                for binding_value in bindings.values() {
+                    if let BindingValue::Node(node_id) = binding_value
+                        && let Some(node) = self.graph.get_node(*node_id)
+                    {
+                        return Ok(Value::NodeData {
+                            id: *node_id,
+                            labels: node.labels.clone(),
+                            properties: Arc::clone(&node.properties),
+                        });
                     }
                 }
                 Ok(Value::Null)
@@ -3968,7 +3947,7 @@ impl<'a> Executor<'a> {
                             ));
                         }
                     };
-                    if p < 0.0 || p > 1.0 {
+                    if !(0.0..=1.0).contains(&p) {
                         return Err(ExecuteError::TypeError(
                             "percentileCont() percentile must be between 0 and 1".to_string(),
                         ));
@@ -4011,7 +3990,7 @@ impl<'a> Executor<'a> {
                             ));
                         }
                     };
-                    if p < 0.0 || p > 1.0 {
+                    if !(0.0..=1.0).contains(&p) {
                         return Err(ExecuteError::TypeError(
                             "percentileDisc() percentile must be between 0 and 1".to_string(),
                         ));
@@ -4317,14 +4296,11 @@ impl<'a> Executor<'a> {
                 }
                 // Apply WHERE filter
                 if let Some(ref where_expr) = subquery.where_clause {
-                    matches = matches
-                        .into_iter()
-                        .filter(|b| {
-                            self.evaluate_expression(where_expr, b)
-                                .map(|v| matches!(v, Value::Bool(true)))
-                                .unwrap_or(false)
-                        })
-                        .collect();
+                    matches.retain(|b| {
+                        self.evaluate_expression(where_expr, b)
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .unwrap_or(false)
+                    });
                 }
                 Ok(Value::Bool(!matches.is_empty()))
             }
@@ -4336,14 +4312,11 @@ impl<'a> Executor<'a> {
                 }
                 // Apply WHERE filter
                 if let Some(ref where_expr) = subquery.where_clause {
-                    matches = matches
-                        .into_iter()
-                        .filter(|b| {
-                            self.evaluate_expression(where_expr, b)
-                                .map(|v| matches!(v, Value::Bool(true)))
-                                .unwrap_or(false)
-                        })
-                        .collect();
+                    matches.retain(|b| {
+                        self.evaluate_expression(where_expr, b)
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .unwrap_or(false)
+                    });
                 }
                 Ok(Value::Int(matches.len() as i64))
             }
@@ -4355,14 +4328,11 @@ impl<'a> Executor<'a> {
                 }
                 // Apply WHERE filter
                 if let Some(ref where_expr) = body.where_clause {
-                    matches = matches
-                        .into_iter()
-                        .filter(|b| {
-                            self.evaluate_expression(where_expr, b)
-                                .map(|v| matches!(v, Value::Bool(true)))
-                                .unwrap_or(false)
-                        })
-                        .collect();
+                    matches.retain(|b| {
+                        self.evaluate_expression(where_expr, b)
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .unwrap_or(false)
+                    });
                 }
                 // Evaluate return item for each match
                 let values: Vec<Value> = matches

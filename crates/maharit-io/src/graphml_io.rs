@@ -12,6 +12,9 @@ use quick_xml::{Reader, Writer};
 
 use crate::{IoError, Result};
 
+/// Type alias for a list of (property-name, type-string) pairs used in GraphML key collection.
+type KeyList = Vec<(String, &'static str)>;
+
 /// GraphML key definition
 #[derive(Debug, Clone)]
 struct KeyDef {
@@ -154,16 +157,15 @@ impl GraphMlImporter {
                         let text = e.unescape().unwrap_or_default().to_string();
 
                         // Check if this is a label key
-                        if let Some(key_def) = keys.get(key_id) {
-                            if key_def.name == "label"
+                        if let Some(key_def) = keys.get(key_id)
+                            && (key_def.name == "label"
                                 || key_def.name == "labelV"
-                                || key_def.name == "labelE"
-                            {
-                                if current_node_id.is_some() {
-                                    current_node_label = Some(text.clone());
-                                } else if current_edge.is_some() {
-                                    current_edge_label = Some(text.clone());
-                                }
+                                || key_def.name == "labelE")
+                        {
+                            if current_node_id.is_some() {
+                                current_node_label = Some(text.clone());
+                            } else if current_edge.is_some() {
+                                current_edge_label = Some(text.clone());
                             }
                         }
 
@@ -416,7 +418,7 @@ impl GraphMlExporter {
         String::from_utf8(output).map_err(|e| IoError::InvalidFormat(e.to_string()))
     }
 
-    fn collect_keys(graph: &Graph) -> (Vec<(String, &'static str)>, Vec<(String, &'static str)>) {
+    fn collect_keys(graph: &Graph) -> (KeyList, KeyList) {
         let mut node_keys: HashMap<String, &'static str> = HashMap::new();
         let mut edge_keys: HashMap<String, &'static str> = HashMap::new();
 

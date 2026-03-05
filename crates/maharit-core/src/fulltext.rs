@@ -384,13 +384,13 @@ impl InvertedIndex {
         for (pos, token) in tokens.iter().enumerate() {
             token_positions
                 .entry(token.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(pos);
         }
 
         // Update inverted index
         for (token, positions) in token_positions {
-            let entry = self.index.entry(token).or_insert_with(Vec::new);
+            let entry = self.index.entry(token).or_default();
 
             // Remove existing entry for this document if present
             entry.retain(|tp| tp.doc_id != doc_id);
@@ -452,7 +452,7 @@ impl InvertedIndex {
         self.index
             .get(token)
             .map(|postings| postings.iter().map(|tp| tp.doc_id.clone()).collect())
-            .unwrap_or_else(HashSet::new)
+            .unwrap_or_default()
     }
 
     /// Get positions of a token in a specific document.
@@ -966,11 +966,8 @@ impl FulltextManager {
                 // Clone properties list to avoid borrow conflict
                 let index_props: Vec<String> = index.properties().to_vec();
                 for property_name in &index_props {
-                    if let Some(value) = properties.get(property_name.as_str()) {
-                        // Only index string properties
-                        if let PropertyValue::String(text) = value {
-                            index.add_document(node_id, property_name, text);
-                        }
+                    if let Some(PropertyValue::String(text)) = properties.get(property_name.as_str()) {
+                        index.add_document(node_id, property_name, text);
                     }
                 }
             }

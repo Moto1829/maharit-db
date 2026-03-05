@@ -173,12 +173,12 @@ impl LabelIndex {
 
     /// エッジをインデックスから削除
     pub fn remove_edge(&mut self, edge_id: EdgeId) {
-        if let Some(label) = self.edge_to_label.remove(&edge_id) {
-            if let Some(edges) = self.edge_labels.get_mut(&label) {
-                edges.remove(&edge_id);
-                if edges.is_empty() {
-                    self.edge_labels.remove(&label);
-                }
+        if let Some(label) = self.edge_to_label.remove(&edge_id)
+            && let Some(edges) = self.edge_labels.get_mut(&label)
+        {
+            edges.remove(&edge_id);
+            if edges.is_empty() {
+                self.edge_labels.remove(&label);
             }
         }
     }

@@ -310,7 +310,7 @@ impl Parser {
         }
 
         // Check for MATCH + SET (standalone, not for DELETE)
-        if set_clause.is_some() {
+        if let Some(set_clause) = set_clause {
             let return_clause = if self.check(TokenKind::Return) {
                 self.advance();
                 Some(self.parse_return_clause()?)
@@ -320,7 +320,7 @@ impl Parser {
             return Ok(Statement::MatchSet(MatchSetStatement {
                 segments: vec![first_segment.clone()],
                 where_clause: first_segment.where_clause,
-                set_clause: set_clause.unwrap(),
+                set_clause,
                 return_clause,
             }));
         }
@@ -360,7 +360,7 @@ impl Parser {
                     return Err(self.unexpected_token("RETURN or WITH"));
                 }
                 // Check for SET after inner segment
-                if set_cl.is_some() {
+                if let Some(set_cl) = set_cl {
                     let return_clause = if self.check(TokenKind::Return) {
                         self.advance();
                         Some(self.parse_return_clause()?)
@@ -371,7 +371,7 @@ impl Parser {
                     return Ok(Statement::MatchSet(MatchSetStatement {
                         segments,
                         where_clause: segment.where_clause,
-                        set_clause: set_cl.unwrap(),
+                        set_clause: set_cl,
                         return_clause,
                     }));
                 }
@@ -1733,9 +1733,7 @@ impl Parser {
         self.expect(TokenKind::RBracket)?;
 
         // consume `->` or `-`
-        if self.check(TokenKind::Arrow) {
-            self.advance();
-        } else if self.check(TokenKind::Dash) {
+        if self.check(TokenKind::Arrow) || self.check(TokenKind::Dash) {
             self.advance();
         }
 
@@ -2734,7 +2732,7 @@ impl Parser {
     }
 
     fn check(&self, kind: TokenKind) -> bool {
-        self.peek_kind().map_or(false, |k| {
+        self.peek_kind().is_some_and(|k| {
             std::mem::discriminant(k) == std::mem::discriminant(&kind)
         })
     }

@@ -433,11 +433,11 @@ impl TransactionManager {
             lock_info.holders.remove(&tx_id);
 
             // Grant lock to next waiter if possible
-            if lock_info.holders.is_empty() {
-                if let Some((next_tx, next_mode, _)) = lock_info.waiting.pop_front() {
-                    lock_info.mode = next_mode;
-                    lock_info.holders.insert(next_tx);
-                }
+            if lock_info.holders.is_empty()
+                && let Some((next_tx, next_mode, _)) = lock_info.waiting.pop_front()
+            {
+                lock_info.mode = next_mode;
+                lock_info.holders.insert(next_tx);
             }
         }
 
@@ -457,11 +457,11 @@ impl TransactionManager {
                 lock_info.holders.remove(&tx_id);
 
                 // Grant to next waiter
-                if lock_info.holders.is_empty() {
-                    if let Some((next_tx, next_mode, _)) = lock_info.waiting.pop_front() {
-                        lock_info.mode = next_mode;
-                        lock_info.holders.insert(next_tx);
-                    }
+                if lock_info.holders.is_empty()
+                    && let Some((next_tx, next_mode, _)) = lock_info.waiting.pop_front()
+                {
+                    lock_info.mode = next_mode;
+                    lock_info.holders.insert(next_tx);
                 }
             }
         }

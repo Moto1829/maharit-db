@@ -42,21 +42,12 @@ pub enum BackupError {
 pub type Result<T> = std::result::Result<T, BackupError>;
 
 /// Options for creating a backup
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BackupOptions {
     /// Whether to compress the backup with gzip
     pub compressed: bool,
     /// Optional description of the backup
     pub description: String,
-}
-
-impl Default for BackupOptions {
-    fn default() -> Self {
-        Self {
-            compressed: false,
-            description: String::new(),
-        }
-    }
 }
 
 impl BackupOptions {

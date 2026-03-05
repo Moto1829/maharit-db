@@ -225,7 +225,7 @@ impl GraphWebSocketServer {
                     edges: edges.clone(),
                 };
                 if let Ok(json) = serde_json::to_string(&evt) {
-                    let _ = ws_sink.send(Message::Text(json.into())).await;
+                    let _ = ws_sink.send(Message::Text(json)).await;
                 }
             }
         }
@@ -239,7 +239,7 @@ impl GraphWebSocketServer {
                         Ok(event) => {
                             match serde_json::to_string(&event) {
                                 Ok(json) => {
-                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                    if ws_sink.send(Message::Text(json)).await.is_err() {
                                         break;
                                     }
                                 }

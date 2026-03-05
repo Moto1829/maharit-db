@@ -62,8 +62,8 @@ impl fmt::Display for QueryPlan {
         } else {
             writeln!(
                 f,
-                "{:<24} {:>12} {:>8} {}",
-                "Operator", "Est. Rows", "Cost", "Details"
+                "{:<24} {:>12} {:>8} Details",
+                "Operator", "Est. Rows", "Cost"
             )?;
             writeln!(f, "{}", "-".repeat(72))?;
         }
@@ -809,40 +809,40 @@ fn classify_filter(expr: &Expression) -> FilterType {
     match expr {
         Expression::BinaryOp(left, op, right) => match op {
             BinaryOp::Eq => {
-                if let Some((var, prop)) = extract_property_access(left) {
-                    if is_literal_or_value(right) {
-                        return FilterType::IndexSeek {
-                            _variable: var,
-                            property: prop,
-                        };
-                    }
+                if let Some((var, prop)) = extract_property_access(left)
+                    && is_literal_or_value(right)
+                {
+                    return FilterType::IndexSeek {
+                        _variable: var,
+                        property: prop,
+                    };
                 }
-                if let Some((var, prop)) = extract_property_access(right) {
-                    if is_literal_or_value(left) {
-                        return FilterType::IndexSeek {
-                            _variable: var,
-                            property: prop,
-                        };
-                    }
+                if let Some((var, prop)) = extract_property_access(right)
+                    && is_literal_or_value(left)
+                {
+                    return FilterType::IndexSeek {
+                        _variable: var,
+                        property: prop,
+                    };
                 }
                 FilterType::Other
             }
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte => {
-                if let Some((var, prop)) = extract_property_access(left) {
-                    if is_literal_or_value(right) {
-                        return FilterType::IndexRange {
-                            _variable: var,
-                            property: prop,
-                        };
-                    }
+                if let Some((var, prop)) = extract_property_access(left)
+                    && is_literal_or_value(right)
+                {
+                    return FilterType::IndexRange {
+                        _variable: var,
+                        property: prop,
+                    };
                 }
-                if let Some((var, prop)) = extract_property_access(right) {
-                    if is_literal_or_value(left) {
-                        return FilterType::IndexRange {
-                            _variable: var,
-                            property: prop,
-                        };
-                    }
+                if let Some((var, prop)) = extract_property_access(right)
+                    && is_literal_or_value(left)
+                {
+                    return FilterType::IndexRange {
+                        _variable: var,
+                        property: prop,
+                    };
                 }
                 FilterType::Other
             }

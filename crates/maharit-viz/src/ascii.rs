@@ -68,6 +68,7 @@ impl AsciiRenderer {
         output
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_node_tree(
         graph: &Graph,
         node_id: NodeId,

@@ -518,10 +518,10 @@ pub fn has_cycle(graph: &Graph) -> bool {
     let mut rec_stack = HashSet::new();
 
     for node in graph.nodes() {
-        if !visited.contains(&node.id) {
-            if dfs_cycle(graph, node.id, &mut visited, &mut rec_stack) {
-                return true;
-            }
+        if !visited.contains(&node.id)
+            && dfs_cycle(graph, node.id, &mut visited, &mut rec_stack)
+        {
+            return true;
         }
     }
 

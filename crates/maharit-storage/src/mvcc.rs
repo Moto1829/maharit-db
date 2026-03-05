@@ -247,16 +247,15 @@ impl MvccManager {
     /// visibility can be correctly determined.
     pub fn delete_node(&mut self, node_id: u64, txn_id: u64) {
         let ts = self.tick();
-        if let Some(versioned) = self.versioned_nodes.get_mut(&node_id) {
-            if let Some(v) = versioned
+        if let Some(versioned) = self.versioned_nodes.get_mut(&node_id)
+            && let Some(v) = versioned
                 .versions
                 .iter_mut()
                 .rev()
                 .find(|v| v.deleted_at.is_none())
-            {
-                v.deleted_at = Some(ts);
-                v.deleter_txn = Some(txn_id);
-            }
+        {
+            v.deleted_at = Some(ts);
+            v.deleter_txn = Some(txn_id);
         }
     }
 
@@ -325,9 +324,7 @@ impl MvccManager {
             let n = versioned.versions.len();
             let mut keep = vec![true; n];
 
-            for i in 0..n {
-                let v = &versioned.versions[i];
-
+            for (i, v) in versioned.versions.iter().enumerate() {
                 if let Some(del_ts) = v.deleted_at {
                     // Version is logically deleted and the deletion is old
                     // enough that no future snapshot will see it as "live".

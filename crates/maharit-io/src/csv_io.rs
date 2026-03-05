@@ -50,11 +50,11 @@ impl CsvImporter {
             // プロパティを設定
             if let Some(node) = graph.get_node_mut(node_id) {
                 for (i, header) in headers.iter().enumerate().skip(2) {
-                    if let Some(value) = record.get(i) {
-                        if !value.is_empty() {
-                            let prop_value = Self::parse_value(value);
-                            node.set_property(header.clone(), prop_value);
-                        }
+                    if let Some(value) = record.get(i)
+                        && !value.is_empty()
+                    {
+                        let prop_value = Self::parse_value(value);
+                        node.set_property(header.clone(), prop_value);
                     }
                 }
             }
@@ -114,11 +114,11 @@ impl CsvImporter {
             // プロパティを設定
             if let Some(edge) = graph.get_edge_mut(edge_id) {
                 for (i, header) in headers.iter().enumerate().skip(3) {
-                    if let Some(value) = record.get(i) {
-                        if !value.is_empty() {
-                            let prop_value = Self::parse_value(value);
-                            edge.set_property(header.clone(), prop_value);
-                        }
+                    if let Some(value) = record.get(i)
+                        && !value.is_empty()
+                    {
+                        let prop_value = Self::parse_value(value);
+                        edge.set_property(header.clone(), prop_value);
                     }
                 }
             }

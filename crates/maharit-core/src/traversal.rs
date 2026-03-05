@@ -14,14 +14,19 @@ pub enum Direction {
     Both,
 }
 
+/// Type alias for edge filter closures used in traversal
+type EdgeFilter<'a> = Option<Box<dyn Fn(&Edge) -> bool + 'a>>;
+/// Type alias for node filter closures used in traversal
+type NodeFilter<'a> = Option<Box<dyn Fn(&Node) -> bool + 'a>>;
+
 /// トラバーサルビルダー
 pub struct Traversal<'a> {
     graph: &'a Graph,
     start: NodeId,
     direction: Direction,
     max_depth: Option<usize>,
-    edge_filter: Option<Box<dyn Fn(&Edge) -> bool + 'a>>,
-    node_filter: Option<Box<dyn Fn(&Node) -> bool + 'a>>,
+    edge_filter: EdgeFilter<'a>,
+    node_filter: NodeFilter<'a>,
 }
 
 impl<'a> Traversal<'a> {
@@ -132,10 +137,10 @@ impl<'a> Iterator for BfsIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((node_id, depth)) = self.queue.pop_front() {
             // 深さ制限のチェック
-            if let Some(max_depth) = self.traversal.max_depth {
-                if depth > max_depth {
-                    continue;
-                }
+            if let Some(max_depth) = self.traversal.max_depth
+                && depth > max_depth
+            {
+                continue;
             }
 
             // ノードフィルタのチェック
@@ -193,10 +198,10 @@ impl<'a> Iterator for DfsIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((node_id, depth)) = self.stack.pop() {
             // 深さ制限のチェック
-            if let Some(max_depth) = self.traversal.max_depth {
-                if depth > max_depth {
-                    continue;
-                }
+            if let Some(max_depth) = self.traversal.max_depth
+                && depth > max_depth
+            {
+                continue;
             }
 
             // ノードフィルタのチェック
@@ -307,10 +312,10 @@ pub fn all_shortest_paths(graph: &Graph, from: NodeId, to: NodeId) -> Vec<Path> 
         let current_dist = distances[&current];
 
         // If we've found paths to target and current distance exceeds target distance, stop
-        if let Some(td) = target_distance {
-            if current_dist >= td {
-                continue;
-            }
+        if let Some(td) = target_distance
+            && current_dist >= td
+        {
+            continue;
         }
 
         for edge in graph.get_outgoing_edges(current) {
@@ -379,7 +384,7 @@ fn reconstruct_all_paths(
 /// 注意: グラフが大きい場合は指数的に増加する可能性がある
 pub fn all_paths(graph: &Graph, from: NodeId, to: NodeId, max_depth: Option<usize>) -> Vec<Path> {
     let mut results = Vec::new();
-    if !graph.get_node(from).is_some() || !graph.get_node(to).is_some() {
+    if graph.get_node(from).is_none() || graph.get_node(to).is_none() {
         return results;
     }
     if from == to {
@@ -401,6 +406,7 @@ pub fn all_paths(graph: &Graph, from: NodeId, to: NodeId, max_depth: Option<usiz
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn all_paths_dfs(
     graph: &Graph,
     current: NodeId,
@@ -411,10 +417,10 @@ fn all_paths_dfs(
     current_path: &mut Vec<NodeId>,
     results: &mut Vec<Path>,
 ) {
-    if let Some(max) = max_depth {
-        if depth >= max {
-            return;
-        }
+    if let Some(max) = max_depth
+        && depth >= max
+    {
+        return;
     }
     for edge in graph.get_outgoing_edges(current) {
         let neighbor = edge.to;
@@ -587,10 +593,10 @@ impl<'a> Dijkstra<'a> {
             }
 
             // すでにより短い経路が見つかっている場合はスキップ
-            if let Some(&d) = distances.get(&node) {
-                if distance > d {
-                    continue;
-                }
+            if let Some(&d) = distances.get(&node)
+                && distance > d
+            {
+                continue;
             }
 
             for edge in self.graph.get_outgoing_edges(node) {
@@ -624,10 +630,10 @@ impl<'a> Dijkstra<'a> {
         });
 
         while let Some(DijkstraEntry { node, distance }) = heap.pop() {
-            if let Some(&d) = distances.get(&node) {
-                if distance > d {
-                    continue;
-                }
+            if let Some(&d) = distances.get(&node)
+                && distance > d
+            {
+                continue;
             }
 
             for edge in self.graph.get_outgoing_edges(node) {

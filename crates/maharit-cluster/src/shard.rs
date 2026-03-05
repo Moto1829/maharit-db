@@ -168,31 +168,26 @@ impl ShardMap {
         let mut over_rem: Option<(ShardId, u64)> = over_iter.next();
         let mut under_rem: Option<(ShardId, u64)> = under_iter.next();
 
-        loop {
-            match (over_rem, under_rem) {
-                (Some((from, from_cap)), Some((to, to_cap))) => {
-                    let batch = from_cap.min(to_cap);
-                    for _ in 0..batch {
-                        moves.push(ShardMove {
-                            node_id: synthetic_node_id,
-                            from_shard: from,
-                            to_shard: to,
-                        });
-                        synthetic_node_id += 1;
-                    }
-                    over_rem = if from_cap > batch {
-                        Some((from, from_cap - batch))
-                    } else {
-                        over_iter.next()
-                    };
-                    under_rem = if to_cap > batch {
-                        Some((to, to_cap - batch))
-                    } else {
-                        under_iter.next()
-                    };
-                }
-                _ => break,
+        while let (Some((from, from_cap)), Some((to, to_cap))) = (over_rem, under_rem) {
+            let batch = from_cap.min(to_cap);
+            for _ in 0..batch {
+                moves.push(ShardMove {
+                    node_id: synthetic_node_id,
+                    from_shard: from,
+                    to_shard: to,
+                });
+                synthetic_node_id += 1;
             }
+            over_rem = if from_cap > batch {
+                Some((from, from_cap - batch))
+            } else {
+                over_iter.next()
+            };
+            under_rem = if to_cap > batch {
+                Some((to, to_cap - batch))
+            } else {
+                under_iter.next()
+            };
         }
 
         RebalancePlan { moves }
