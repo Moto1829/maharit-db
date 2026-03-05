@@ -85,16 +85,28 @@ impl Edge {
 }
 
 /// インメモリグラフデータベース
+///
+/// ノード/エッジは連番 `u64` IDで管理されるため、`HashMap` の代わりに
+/// `Vec<Option<T>>` を使って O(1) の直接アクセスを実現する。
+/// 削除済みスロットはフリーリストに追加し再利用する。
 #[derive(Debug, Default)]
 pub struct Graph {
-    nodes: HashMap<NodeId, Node>,
-    edges: HashMap<EdgeId, Edge>,
-    /// ノードから出るエッジのインデックス (from_node_id -> [edge_id])
-    outgoing_edges: HashMap<NodeId, Vec<EdgeId>>,
-    /// ノードに入るエッジのインデックス (to_node_id -> [edge_id])
-    incoming_edges: HashMap<NodeId, Vec<EdgeId>>,
-    next_node_id: NodeId,
-    next_edge_id: EdgeId,
+    /// NodeId をインデックスとするノード配列（削除済みは None）
+    nodes: Vec<Option<Node>>,
+    /// EdgeId をインデックスとするエッジ配列（削除済みは None）
+    edges: Vec<Option<Edge>>,
+    /// ノードから出るエッジのリスト（NodeId をインデックス）
+    outgoing_edges: Vec<Vec<EdgeId>>,
+    /// ノードに入るエッジのリスト（NodeId をインデックス）
+    incoming_edges: Vec<Vec<EdgeId>>,
+    /// 削除済みノードスロットの再利用リスト
+    node_free_list: Vec<NodeId>,
+    /// 削除済みエッジスロットの再利用リスト
+    edge_free_list: Vec<EdgeId>,
+    /// 存在するノードの数（None スロットを除く）
+    node_count: usize,
+    /// 存在するエッジの数（None スロットを除く）
+    edge_count: usize,
 }
 
 impl Graph {
@@ -115,26 +127,35 @@ impl Graph {
 
     /// 複数ラベルを指定してノードを作成する
     pub fn create_node_with_labels(&mut self, labels: Vec<String>) -> NodeId {
-        let id = self.next_node_id;
-        self.next_node_id += 1;
-
-        let node = Node {
-            id,
-            labels,
-            properties: Arc::new(HashMap::new()),
+        let id = if let Some(freed) = self.node_free_list.pop() {
+            // Reuse a deleted slot
+            self.nodes[freed as usize] = Some(Node {
+                id: freed,
+                labels,
+                properties: Arc::new(HashMap::new()),
+            });
+            self.outgoing_edges[freed as usize] = Vec::new();
+            self.incoming_edges[freed as usize] = Vec::new();
+            freed
+        } else {
+            // Append a new slot
+            let id = self.nodes.len() as NodeId;
+            self.nodes.push(Some(Node {
+                id,
+                labels,
+                properties: Arc::new(HashMap::new()),
+            }));
+            self.outgoing_edges.push(Vec::new());
+            self.incoming_edges.push(Vec::new());
+            id
         };
-
-        self.nodes.insert(id, node);
-        self.outgoing_edges.insert(id, Vec::new());
-        self.incoming_edges.insert(id, Vec::new());
-
+        self.node_count += 1;
         id
     }
 
     /// 指定したIDでノードを作成する（バックアップ/リストア専用、単一ラベル版）
     ///
     /// 指定した `id` が既に使用されている場合は既存ノードの ID を返す。
-    /// `next_node_id` は必要に応じて更新される。
     pub fn create_node_with_id(&mut self, id: NodeId, label: impl Into<String>) -> NodeId {
         let label_str = label.into();
         let labels = if label_str.is_empty() {
@@ -147,62 +168,85 @@ impl Graph {
 
     /// 指定したIDと複数ラベルでノードを作成する（バックアップ/リストア専用）
     pub fn create_node_with_id_and_labels(&mut self, id: NodeId, labels: Vec<String>) -> NodeId {
-        if self.nodes.contains_key(&id) {
+        // Already exists?
+        if matches!(self.nodes.get(id as usize), Some(Some(_))) {
             return id;
         }
 
-        let node = Node {
+        // Extend backing vecs if needed
+        let idx = id as usize;
+        if idx >= self.nodes.len() {
+            let new_len = idx + 1;
+            self.nodes.resize_with(new_len, || None);
+            self.outgoing_edges.resize_with(new_len, Vec::new);
+            self.incoming_edges.resize_with(new_len, Vec::new);
+        }
+
+        // Remove from free list if it was there (slot is being explicitly assigned)
+        self.node_free_list.retain(|&fid| fid != id);
+
+        self.nodes[idx] = Some(Node {
             id,
             labels,
             properties: Arc::new(HashMap::new()),
-        };
-
-        self.nodes.insert(id, node);
-        self.outgoing_edges.insert(id, Vec::new());
-        self.incoming_edges.insert(id, Vec::new());
-
-        // Keep next_node_id ahead of all assigned IDs.
-        if id >= self.next_node_id {
-            self.next_node_id = id + 1;
-        }
-
+        });
+        self.outgoing_edges[idx] = Vec::new();
+        self.incoming_edges[idx] = Vec::new();
+        self.node_count += 1;
         id
     }
 
     /// ノードを取得
     pub fn get_node(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(&id)
+        self.nodes.get(id as usize)?.as_ref()
     }
 
     /// ノードを可変参照で取得
     pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-        self.nodes.get_mut(&id)
+        self.nodes.get_mut(id as usize)?.as_mut()
     }
 
     /// ノードを削除
     pub fn delete_node(&mut self, id: NodeId) -> Option<Node> {
-        // 関連するエッジを削除
-        if let Some(outgoing) = self.outgoing_edges.remove(&id) {
-            for edge_id in outgoing {
-                if let Some(edge) = self.edges.remove(&edge_id)
-                    && let Some(incoming) = self.incoming_edges.get_mut(&edge.to)
-                {
-                    incoming.retain(|&e| e != edge_id);
+        // Not present?
+        if !matches!(self.nodes.get(id as usize), Some(Some(_))) {
+            return None;
+        }
+
+        // Remove edges going FROM this node
+        let outgoing = std::mem::take(&mut self.outgoing_edges[id as usize]);
+        for edge_id in outgoing {
+            if let Some(slot @ Some(_)) = self.edges.get_mut(edge_id as usize) {
+                let to = slot.as_ref().unwrap().to;
+                slot.take();
+                if (to as usize) < self.incoming_edges.len() {
+                    self.incoming_edges[to as usize].retain(|&e| e != edge_id);
                 }
+                self.edge_free_list.push(edge_id);
+                self.edge_count -= 1;
             }
         }
 
-        if let Some(incoming) = self.incoming_edges.remove(&id) {
-            for edge_id in incoming {
-                if let Some(edge) = self.edges.remove(&edge_id)
-                    && let Some(outgoing) = self.outgoing_edges.get_mut(&edge.from)
-                {
-                    outgoing.retain(|&e| e != edge_id);
+        // Remove edges going TO this node
+        let incoming = std::mem::take(&mut self.incoming_edges[id as usize]);
+        for edge_id in incoming {
+            if let Some(slot @ Some(_)) = self.edges.get_mut(edge_id as usize) {
+                let from = slot.as_ref().unwrap().from;
+                slot.take();
+                if (from as usize) < self.outgoing_edges.len() {
+                    self.outgoing_edges[from as usize].retain(|&e| e != edge_id);
                 }
+                self.edge_free_list.push(edge_id);
+                self.edge_count -= 1;
             }
         }
 
-        self.nodes.remove(&id)
+        let node = self.nodes[id as usize].take();
+        if node.is_some() {
+            self.node_free_list.push(id);
+            self.node_count -= 1;
+        }
+        node
     }
 
     /// 新しいエッジを作成して追加
@@ -212,64 +256,74 @@ impl Graph {
         to: NodeId,
         label: impl Into<String>,
     ) -> Result<EdgeId, GraphError> {
-        if !self.nodes.contains_key(&from) {
+        if !matches!(self.nodes.get(from as usize), Some(Some(_))) {
             return Err(GraphError::NodeNotFound(from));
         }
-        if !self.nodes.contains_key(&to) {
+        if !matches!(self.nodes.get(to as usize), Some(Some(_))) {
             return Err(GraphError::NodeNotFound(to));
         }
 
-        let id = self.next_edge_id;
-        self.next_edge_id += 1;
-
-        let edge = Edge {
-            id,
-            label: label.into(),
-            from,
-            to,
-            properties: Arc::new(HashMap::new()),
+        let id = if let Some(freed) = self.edge_free_list.pop() {
+            self.edges[freed as usize] = Some(Edge {
+                id: freed,
+                label: label.into(),
+                from,
+                to,
+                properties: Arc::new(HashMap::new()),
+            });
+            freed
+        } else {
+            let id = self.edges.len() as EdgeId;
+            self.edges.push(Some(Edge {
+                id,
+                label: label.into(),
+                from,
+                to,
+                properties: Arc::new(HashMap::new()),
+            }));
+            id
         };
 
-        self.edges.insert(id, edge);
-        self.outgoing_edges.get_mut(&from).unwrap().push(id);
-        self.incoming_edges.get_mut(&to).unwrap().push(id);
+        self.outgoing_edges[from as usize].push(id);
+        self.incoming_edges[to as usize].push(id);
+        self.edge_count += 1;
 
         Ok(id)
     }
 
     /// エッジを取得
     pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
-        self.edges.get(&id)
+        self.edges.get(id as usize)?.as_ref()
     }
 
     /// エッジを可変参照で取得
     pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut Edge> {
-        self.edges.get_mut(&id)
+        self.edges.get_mut(id as usize)?.as_mut()
     }
 
     /// エッジを削除
     pub fn delete_edge(&mut self, id: EdgeId) -> Option<Edge> {
-        if let Some(edge) = self.edges.remove(&id) {
-            if let Some(outgoing) = self.outgoing_edges.get_mut(&edge.from) {
-                outgoing.retain(|&e| e != id);
-            }
-            if let Some(incoming) = self.incoming_edges.get_mut(&edge.to) {
-                incoming.retain(|&e| e != id);
-            }
-            Some(edge)
-        } else {
-            None
+        let slot = self.edges.get_mut(id as usize)?;
+        let edge = slot.take()?;
+        if (edge.from as usize) < self.outgoing_edges.len() {
+            self.outgoing_edges[edge.from as usize].retain(|&e| e != id);
         }
+        if (edge.to as usize) < self.incoming_edges.len() {
+            self.incoming_edges[edge.to as usize].retain(|&e| e != id);
+        }
+        self.edge_free_list.push(id);
+        self.edge_count -= 1;
+        Some(edge)
     }
 
     /// ノードから出るエッジを取得
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
         self.outgoing_edges
-            .get(&node_id)
+            .get(node_id as usize)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
-                    .filter_map(|id| self.edges.get(id))
+                    .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
                     .collect()
             })
             .unwrap_or_default()
@@ -278,11 +332,11 @@ impl Graph {
     /// ノードに入るエッジを取得
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
         self.incoming_edges
-            .get(&node_id)
+            .get(node_id as usize)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
-                    .filter_map(|id| self.edges.get(id))
+                    .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
                     .collect()
             })
             .unwrap_or_default()
@@ -292,28 +346,28 @@ impl Graph {
     pub fn get_neighbors(&self, node_id: NodeId) -> Vec<&Node> {
         self.get_outgoing_edges(node_id)
             .iter()
-            .filter_map(|edge| self.nodes.get(&edge.to))
+            .filter_map(|edge| self.get_node(edge.to))
             .collect()
     }
 
     /// 全ノード数
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.node_count
     }
 
     /// 全エッジ数
     pub fn edge_count(&self) -> usize {
-        self.edges.len()
+        self.edge_count
     }
 
-    /// 全ノードをイテレート
+    /// 全ノードをイテレート（削除済みスロットをスキップ）
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.values()
+        self.nodes.iter().filter_map(|n| n.as_ref())
     }
 
-    /// 全エッジをイテレート
+    /// 全エッジをイテレート（削除済みスロットをスキップ）
     pub fn edges(&self) -> impl Iterator<Item = &Edge> {
-        self.edges.values()
+        self.edges.iter().filter_map(|e| e.as_ref())
     }
 
     /// 指定したノードからトラバーサルを開始
@@ -323,16 +377,14 @@ impl Graph {
 
     /// ラベルでノードを検索（指定ラベルを持つノードを全て返す）
     pub fn find_nodes_by_label(&self, label: &str) -> Vec<&Node> {
-        self.nodes
-            .values()
+        self.nodes()
             .filter(|n| n.has_label(label))
             .collect()
     }
 
     /// ラベル（タイプ）でエッジを検索
     pub fn find_edges_by_type(&self, edge_type: &str) -> Vec<&Edge> {
-        self.edges
-            .values()
+        self.edges()
             .filter(|e| e.label == edge_type)
             .collect()
     }
