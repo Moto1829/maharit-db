@@ -606,8 +606,8 @@ impl<'a> Executor<'a> {
                 }
             } else {
                 // Check if node has edges
-                let has_edges = !self.graph.get_outgoing_edges(node_id).is_empty()
-                    || !self.graph.get_incoming_edges(node_id).is_empty();
+                let has_edges = self.graph.get_outgoing_edges(node_id).next().is_some()
+                    || self.graph.get_incoming_edges(node_id).next().is_some();
 
                 if has_edges {
                     // In a real Cypher implementation, this would be an error
@@ -1368,8 +1368,8 @@ impl<'a> Executor<'a> {
             if delete.detach {
                 self.graph.delete_node(node_id);
             } else {
-                let has_edges = !self.graph.get_outgoing_edges(node_id).is_empty()
-                    || !self.graph.get_incoming_edges(node_id).is_empty();
+                let has_edges = self.graph.get_outgoing_edges(node_id).next().is_some()
+                    || self.graph.get_incoming_edges(node_id).next().is_some();
                 if !has_edges {
                     self.graph.delete_node(node_id);
                 }
@@ -2332,13 +2332,13 @@ impl<'a> Executor<'a> {
 
     fn get_edges_by_direction(&self, node_id: NodeId, direction: EdgeDirection) -> Vec<&Edge> {
         match direction {
-            EdgeDirection::Outgoing => self.graph.get_outgoing_edges(node_id),
-            EdgeDirection::Incoming => self.graph.get_incoming_edges(node_id),
-            EdgeDirection::Both => {
-                let mut edges = self.graph.get_outgoing_edges(node_id);
-                edges.extend(self.graph.get_incoming_edges(node_id));
-                edges
-            }
+            EdgeDirection::Outgoing => self.graph.get_outgoing_edges(node_id).collect(),
+            EdgeDirection::Incoming => self.graph.get_incoming_edges(node_id).collect(),
+            EdgeDirection::Both => self
+                .graph
+                .get_outgoing_edges(node_id)
+                .chain(self.graph.get_incoming_edges(node_id))
+                .collect(),
         }
     }
 

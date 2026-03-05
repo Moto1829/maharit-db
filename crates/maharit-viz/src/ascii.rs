@@ -34,7 +34,7 @@ impl AsciiRenderer {
             writeln!(output).unwrap();
 
             // 出るエッジ
-            let outgoing = graph.get_outgoing_edges(node.id);
+            let outgoing: Vec<_> = graph.get_outgoing_edges(node.id).collect();
             for (i, edge) in outgoing.iter().enumerate() {
                 let is_last = i == outgoing.len() - 1;
                 let prefix = if is_last { "└" } else { "├" };
@@ -112,7 +112,7 @@ impl AsciiRenderer {
         visited.insert(node_id);
 
         // 子ノードを表示
-        let outgoing = graph.get_outgoing_edges(node_id);
+        let outgoing: Vec<_> = graph.get_outgoing_edges(node_id).collect();
         let child_prefix = if depth == 0 {
             String::new()
         } else {

@@ -316,36 +316,41 @@ impl Graph {
         Some(edge)
     }
 
-    /// ノードから出るエッジを取得
-    pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<&Edge> {
-        self.outgoing_edges
+    /// ノードから出るエッジをイテレートする（Vec アロケーションなし）
+    pub fn get_outgoing_edges(&self, node_id: NodeId) -> impl Iterator<Item = &Edge> + '_ {
+        let ids = self
+            .outgoing_edges
             .get(node_id as usize)
-            .map(|edge_ids| {
-                edge_ids
-                    .iter()
-                    .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        ids.iter()
+            .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
     }
 
-    /// ノードに入るエッジを取得
-    pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<&Edge> {
-        self.incoming_edges
+    /// ノードに入るエッジをイテレートする（Vec アロケーションなし）
+    pub fn get_incoming_edges(&self, node_id: NodeId) -> impl Iterator<Item = &Edge> + '_ {
+        let ids = self
+            .incoming_edges
             .get(node_id as usize)
-            .map(|edge_ids| {
-                edge_ids
-                    .iter()
-                    .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        ids.iter()
+            .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
+    }
+
+    /// NodeId の上限（稠密インデックス用）。現在の Vec キャパシティに等しい。
+    pub fn node_capacity(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// EdgeId の上限（稠密インデックス用）
+    pub fn edge_capacity(&self) -> usize {
+        self.edges.len()
     }
 
     /// 隣接ノードを取得（出るエッジの先）
     pub fn get_neighbors(&self, node_id: NodeId) -> Vec<&Node> {
         self.get_outgoing_edges(node_id)
-            .iter()
             .filter_map(|edge| self.get_node(edge.to))
             .collect()
     }

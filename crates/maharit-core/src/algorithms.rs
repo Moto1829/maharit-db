@@ -284,7 +284,7 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
     // Build out-degree map (read-only after construction).
     let out_degree: HashMap<NodeId, usize> = nodes
         .iter()
-        .map(|&id| (id, graph.get_outgoing_edges(id).len()))
+        .map(|&id| (id, graph.get_outgoing_edges(id).count()))
         .collect();
 
     let damping = config.damping;

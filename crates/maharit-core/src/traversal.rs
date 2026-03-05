@@ -577,11 +577,13 @@ impl<'a> Dijkstra<'a> {
             return Some(WeightedPath::new(vec![from], vec![], 0.0));
         }
 
-        let mut distances: HashMap<NodeId, f64> = HashMap::new();
-        let mut previous: HashMap<NodeId, (NodeId, EdgeId)> = HashMap::new();
+        // Dense Vec indexed by NodeId for O(1) access (no hash computation)
+        let n = self.graph.node_capacity();
+        let mut distances = vec![f64::INFINITY; n];
+        let mut previous: Vec<Option<(NodeId, EdgeId)>> = vec![None; n];
         let mut heap = BinaryHeap::new();
 
-        distances.insert(from, 0.0);
+        distances[from as usize] = 0.0;
         heap.push(DijkstraEntry {
             node: from,
             distance: 0.0,
@@ -593,9 +595,7 @@ impl<'a> Dijkstra<'a> {
             }
 
             // すでにより短い経路が見つかっている場合はスキップ
-            if let Some(&d) = distances.get(&node)
-                && distance > d
-            {
+            if distance > distances[node as usize] {
                 continue;
             }
 
@@ -604,9 +604,9 @@ impl<'a> Dijkstra<'a> {
                 let next_distance = distance + weight;
                 let neighbor = edge.to;
 
-                if !distances.contains_key(&neighbor) || next_distance < distances[&neighbor] {
-                    distances.insert(neighbor, next_distance);
-                    previous.insert(neighbor, (node, edge.id));
+                if next_distance < distances[neighbor as usize] {
+                    distances[neighbor as usize] = next_distance;
+                    previous[neighbor as usize] = Some((node, edge.id));
                     heap.push(DijkstraEntry {
                         node: neighbor,
                         distance: next_distance,
@@ -658,7 +658,7 @@ impl<'a> Dijkstra<'a> {
         &self,
         from: NodeId,
         to: NodeId,
-        previous: &HashMap<NodeId, (NodeId, EdgeId)>,
+        previous: &[Option<(NodeId, EdgeId)>],
         total_weight: f64,
     ) -> WeightedPath {
         let mut nodes = vec![to];
@@ -666,7 +666,9 @@ impl<'a> Dijkstra<'a> {
         let mut current = to;
 
         while current != from {
-            if let Some(&(prev_node, edge_id)) = previous.get(&current) {
+            if let Some((prev_node, edge_id)) =
+                previous.get(current as usize).and_then(|v| *v)
+            {
                 nodes.push(prev_node);
                 edges.push(edge_id);
                 current = prev_node;
