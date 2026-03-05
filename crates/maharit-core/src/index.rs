@@ -7,8 +7,9 @@ use crate::{EdgeId, NodeId};
 pub struct LabelIndex {
     /// ノードラベル -> ノードID集合
     node_labels: HashMap<String, HashSet<NodeId>>,
-    /// ノードID -> ラベルリスト（逆引き用、複数ラベル対応）
-    node_to_labels: HashMap<NodeId, Vec<String>>,
+    /// ノードID -> ラベル集合（逆引き用、複数ラベル対応）
+    /// HashSet により重複チェックが O(N) → O(1) になる
+    node_to_labels: HashMap<NodeId, HashSet<String>>,
     /// エッジラベル -> エッジID集合
     edge_labels: HashMap<String, HashSet<EdgeId>>,
     /// エッジID -> ラベル（逆引き用）
@@ -32,40 +33,32 @@ impl LabelIndex {
 
     /// ノードを複数ラベルでインデックスに追加する
     pub fn add_node_labels(&mut self, node_id: NodeId, labels: &[&str]) {
-        let non_empty: Vec<String> = labels
-            .iter()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.to_string())
-            .collect();
-
-        if non_empty.is_empty() {
-            return;
-        }
-
-        for label in &non_empty {
+        for &label in labels {
+            if label.is_empty() {
+                continue;
+            }
+            // Forward index: label → node set
+            // entry() needs an owned key; one allocation per new label
             self.node_labels
-                .entry(label.clone())
+                .entry(label.to_string())
                 .or_default()
                 .insert(node_id);
-        }
-
-        // Merge with existing labels if the node was already registered
-        let existing = self.node_to_labels.entry(node_id).or_default();
-        for label in &non_empty {
-            if !existing.contains(label) {
-                existing.push(label.clone());
-            }
+            // Reverse index: node → label set (HashSet deduplicates in O(1))
+            self.node_to_labels
+                .entry(node_id)
+                .or_default()
+                .insert(label.to_string());
         }
     }
 
     /// ノードをインデックスから削除（全ラベルを削除）
     pub fn remove_node(&mut self, node_id: NodeId) {
         if let Some(labels) = self.node_to_labels.remove(&node_id) {
-            for label in &labels {
-                if let Some(nodes) = self.node_labels.get_mut(label) {
+            for label in labels {
+                if let Some(nodes) = self.node_labels.get_mut(&label) {
                     nodes.remove(&node_id);
                     if nodes.is_empty() {
-                        self.node_labels.remove(label);
+                        self.node_labels.remove(&label);
                     }
                 }
             }
@@ -75,7 +68,7 @@ impl LabelIndex {
     /// ノードから特定のラベルをインデックスから削除する
     pub fn remove_node_label(&mut self, node_id: NodeId, label: &str) {
         if let Some(labels) = self.node_to_labels.get_mut(&node_id) {
-            labels.retain(|l| l != label);
+            labels.remove(label);
             if labels.is_empty() {
                 self.node_to_labels.remove(&node_id);
             }
@@ -103,12 +96,12 @@ impl LabelIndex {
     pub fn update_node_label(&mut self, node_id: NodeId, new_label: &str) -> Option<String> {
         // 旧ラベルをインデックスから削除
         let old_first = if let Some(labels) = self.node_to_labels.remove(&node_id) {
-            let first = labels.first().cloned();
-            for label in &labels {
-                if let Some(nodes) = self.node_labels.get_mut(label) {
+            let first = labels.iter().next().cloned();
+            for label in labels {
+                if let Some(nodes) = self.node_labels.get_mut(&label) {
                     nodes.remove(&node_id);
                     if nodes.is_empty() {
-                        self.node_labels.remove(label);
+                        self.node_labels.remove(&label);
                     }
                 }
             }
@@ -123,8 +116,9 @@ impl LabelIndex {
                 .entry(new_label.to_string())
                 .or_default()
                 .insert(node_id);
-            self.node_to_labels
-                .insert(node_id, vec![new_label.to_string()]);
+            let mut label_set = HashSet::new();
+            label_set.insert(new_label.to_string());
+            self.node_to_labels.insert(node_id, label_set);
         }
 
         old_first
@@ -138,12 +132,12 @@ impl LabelIndex {
             .unwrap_or_default()
     }
 
-    /// ラベルでノードを検索
-    pub fn get_nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+    /// ラベルでノードをイテレートする（Vec アロケーションなし）
+    pub fn get_nodes_by_label(&self, label: &str) -> impl Iterator<Item = NodeId> + '_ {
         self.node_labels
             .get(label)
-            .map(|nodes| nodes.iter().copied().collect())
-            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|nodes| nodes.iter().copied())
     }
 
     /// ラベルを持つノード数をカウント
@@ -237,12 +231,12 @@ mod tests {
         index.add_node(1, "Person");
         index.add_node(2, "Company");
 
-        let persons = index.get_nodes_by_label("Person");
+        let persons: Vec<_> = index.get_nodes_by_label("Person").collect();
         assert_eq!(persons.len(), 2);
         assert!(persons.contains(&0));
         assert!(persons.contains(&1));
 
-        let companies = index.get_nodes_by_label("Company");
+        let companies: Vec<_> = index.get_nodes_by_label("Company").collect();
         assert_eq!(companies.len(), 1);
         assert!(companies.contains(&2));
     }
@@ -263,7 +257,7 @@ mod tests {
         assert_eq!(index.count_nodes_by_label("Person"), 0);
 
         // ラベル自体も削除されている
-        assert!(index.get_nodes_by_label("Person").is_empty());
+        assert!(index.get_nodes_by_label("Person").next().is_none());
     }
 
     #[test]
@@ -332,7 +326,7 @@ mod tests {
     fn test_nonexistent_label() {
         let index = LabelIndex::new();
 
-        assert!(index.get_nodes_by_label("NonExistent").is_empty());
+        assert!(index.get_nodes_by_label("NonExistent").next().is_none());
         assert_eq!(index.count_nodes_by_label("NonExistent"), 0);
     }
 
@@ -364,7 +358,7 @@ mod tests {
         assert_eq!(old_label, Some("Person".to_string()));
 
         // 新ラベル "Employee" で検索できる
-        let employees = index.get_nodes_by_label("Employee");
+        let employees: Vec<_> = index.get_nodes_by_label("Employee").collect();
         assert_eq!(employees.len(), 1);
         assert!(employees.contains(&0));
     }
@@ -380,7 +374,7 @@ mod tests {
         index.update_node_label(0, "Employee");
 
         // 旧ラベル "Person" でノード0は見つからない
-        let persons = index.get_nodes_by_label("Person");
+        let persons: Vec<_> = index.get_nodes_by_label("Person").collect();
         assert_eq!(persons.len(), 1);
         assert!(!persons.contains(&0), "旧ラベルで変更したノードは見つからないべき");
         assert!(persons.contains(&1), "旧ラベルを持つ他のノードは見つかるべき");
@@ -395,9 +389,9 @@ mod tests {
         index.update_node_label(0, "Permanent");
 
         // 旧ラベル "Temp" のノードは空になる
-        assert!(index.get_nodes_by_label("Temp").is_empty());
+        assert!(index.get_nodes_by_label("Temp").next().is_none());
         // 新ラベル "Permanent" は正常に機能する
-        assert_eq!(index.get_nodes_by_label("Permanent").len(), 1);
+        assert_eq!(index.get_nodes_by_label("Permanent").count(), 1);
     }
 
     #[test]
@@ -409,7 +403,7 @@ mod tests {
         assert_eq!(old_label, None);
 
         // 新ラベルは登録される
-        let nodes = index.get_nodes_by_label("NewLabel");
+        let nodes: Vec<_> = index.get_nodes_by_label("NewLabel").collect();
         assert_eq!(nodes.len(), 1);
         assert!(nodes.contains(&999));
     }
@@ -421,11 +415,11 @@ mod tests {
         // ノード0 に Person と Employee の2ラベルを付与
         index.add_node_labels(0, &["Person", "Employee"]);
 
-        let persons = index.get_nodes_by_label("Person");
+        let persons: Vec<_> = index.get_nodes_by_label("Person").collect();
         assert_eq!(persons.len(), 1);
         assert!(persons.contains(&0));
 
-        let employees = index.get_nodes_by_label("Employee");
+        let employees: Vec<_> = index.get_nodes_by_label("Employee").collect();
         assert_eq!(employees.len(), 1);
         assert!(employees.contains(&0));
 
@@ -444,8 +438,8 @@ mod tests {
         index.add_node_labels(0, &["Employee"]);
 
         // 両方のラベルで検索できる
-        assert!(index.get_nodes_by_label("Person").contains(&0));
-        assert!(index.get_nodes_by_label("Employee").contains(&0));
+        assert!(index.get_nodes_by_label("Person").any(|id| id == 0));
+        assert!(index.get_nodes_by_label("Employee").any(|id| id == 0));
 
         // 1ノードとしてカウント
         assert_eq!(index.indexed_node_count(), 1);
@@ -461,8 +455,8 @@ mod tests {
         index.remove_node_label(0, "Employee");
 
         // Personラベルはまだある
-        assert!(index.get_nodes_by_label("Person").contains(&0));
-        assert!(!index.get_nodes_by_label("Employee").contains(&0));
+        assert!(index.get_nodes_by_label("Person").any(|id| id == 0));
+        assert!(!index.get_nodes_by_label("Employee").any(|id| id == 0));
 
         // ノード自体はまだ登録されている
         assert_eq!(index.indexed_node_count(), 1);
@@ -477,6 +471,6 @@ mod tests {
 
         // 全ラベルが消えたのでノードは登録解除される
         assert_eq!(index.indexed_node_count(), 0);
-        assert!(index.get_nodes_by_label("Person").is_empty());
+        assert!(index.get_nodes_by_label("Person").next().is_none());
     }
 }
