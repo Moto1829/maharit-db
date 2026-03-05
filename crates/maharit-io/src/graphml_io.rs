@@ -366,7 +366,7 @@ impl GraphMlExporter {
             Self::write_data(&mut xml_writer, "label", &node.labels.join(":"))?;
 
             // Properties
-            for (key, value) in &node.properties {
+            for (key, value) in node.properties.iter() {
                 Self::write_data(
                     &mut xml_writer,
                     &format!("n_{}", key),
@@ -389,7 +389,7 @@ impl GraphMlExporter {
             Self::write_data(&mut xml_writer, "labelE", &edge.label)?;
 
             // Properties
-            for (key, value) in &edge.properties {
+            for (key, value) in edge.properties.iter() {
                 Self::write_data(
                     &mut xml_writer,
                     &format!("e_{}", key),
@@ -421,7 +421,7 @@ impl GraphMlExporter {
         let mut edge_keys: HashMap<String, &'static str> = HashMap::new();
 
         for node in graph.nodes() {
-            for (key, value) in &node.properties {
+            for (key, value) in node.properties.iter() {
                 node_keys
                     .entry(key.clone())
                     .or_insert_with(|| Self::property_type(value));
@@ -429,7 +429,7 @@ impl GraphMlExporter {
         }
 
         for edge in graph.edges() {
-            for (key, value) in &edge.properties {
+            for (key, value) in edge.properties.iter() {
                 edge_keys
                     .entry(key.clone())
                     .or_insert_with(|| Self::property_type(value));

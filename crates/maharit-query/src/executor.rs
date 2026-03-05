@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use maharit_core::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge, FulltextError,
@@ -107,7 +108,7 @@ pub enum Value {
         id: NodeId,
         /// ノードが保持するラベルのリスト（複数ラベル対応）
         labels: Vec<String>,
-        properties: HashMap<String, PropertyValue>,
+        properties: Arc<HashMap<String, PropertyValue>>,
     },
     /// リスト値（可変長パスのエッジリストなど）
     List(Vec<Value>),
@@ -1521,7 +1522,7 @@ impl<'a> Executor<'a> {
 
         for node_id in node_ids {
             if let Some(node) = self.graph.get_node(node_id) {
-                let props = node.properties.clone();
+                let props = Arc::clone(&node.properties);
                 self.fulltext.index_node(node_id, &cfi.label, &props);
             }
         }
@@ -2863,7 +2864,7 @@ impl<'a> Executor<'a> {
                                 Ok(Value::NodeData {
                                     id: *node_id,
                                     labels: node.labels.clone(),
-                                    properties: node.properties.clone(),
+                                    properties: Arc::clone(&node.properties),
                                 })
                             } else {
                                 Ok(Value::Node(*node_id))
@@ -2911,7 +2912,7 @@ impl<'a> Executor<'a> {
                             return Ok(Value::NodeData {
                                 id: *node_id,
                                 labels: node.labels.clone(),
-                                properties: node.properties.clone(),
+                                properties: Arc::clone(&node.properties),
                             });
                         }
                     }
@@ -2944,7 +2945,7 @@ impl<'a> Executor<'a> {
                                     Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
-                                        properties: node.properties.clone(),
+                                        properties: Arc::clone(&node.properties),
                                     }
                                 } else {
                                     Value::Node(node_id)
@@ -3409,7 +3410,7 @@ impl<'a> Executor<'a> {
                                     Ok(Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
-                                        properties: node.properties.clone(),
+                                        properties: Arc::clone(&node.properties),
                                     })
                                 } else {
                                     Ok(Value::Node(node_id))
@@ -3436,7 +3437,7 @@ impl<'a> Executor<'a> {
                                     Ok(Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
-                                        properties: node.properties.clone(),
+                                        properties: Arc::clone(&node.properties),
                                     })
                                 } else {
                                     Ok(Value::Node(node_id))
@@ -8205,13 +8206,11 @@ mod tests {
         graph
             .get_node_mut(0)
             .unwrap()
-            .properties
-            .insert("i".to_string(), PropertyValue::Int(-5));
+            .set_property("i", PropertyValue::Int(-5));
         graph
             .get_node_mut(0)
             .unwrap()
-            .properties
-            .insert("f".to_string(), PropertyValue::Float(-3.14));
+            .set_property("f", PropertyValue::Float(-3.14));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN abs(n.i)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
@@ -8233,8 +8232,7 @@ mod tests {
         graph
             .get_node_mut(0)
             .unwrap()
-            .properties
-            .insert("g".to_string(), PropertyValue::Float(-2.7));
+            .set_property("g", PropertyValue::Float(-2.7));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN ceil(n.f)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(4));
@@ -8284,13 +8282,11 @@ mod tests {
         graph
             .get_node_mut(0)
             .unwrap()
-            .properties
-            .insert("neg".to_string(), PropertyValue::Int(-3));
+            .set_property("neg", PropertyValue::Int(-3));
         graph
             .get_node_mut(0)
             .unwrap()
-            .properties
-            .insert("fneg".to_string(), PropertyValue::Float(-1.5));
+            .set_property("fneg", PropertyValue::Float(-1.5));
 
         let result = execute(&mut graph, "MATCH (n:T) RETURN sign(n.pos)").unwrap();
         assert_eq!(result.rows[0].columns[0], Value::Int(1));

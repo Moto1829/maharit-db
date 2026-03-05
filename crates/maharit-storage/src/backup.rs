@@ -859,7 +859,7 @@ impl Backup {
                 }
             } else if let Some(node) = graph.get_node_mut(old_id) {
                 node.labels = labels;
-                node.properties = properties;
+                node.properties = std::sync::Arc::new(properties);
             }
         }
 
@@ -884,7 +884,7 @@ impl Backup {
                 }
             } else if let Some(edge) = graph.get_edge_mut(old_id) {
                 edge.label = label;
-                edge.properties = properties;
+                edge.properties = std::sync::Arc::new(properties);
             }
         }
 

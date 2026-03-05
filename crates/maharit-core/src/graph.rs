@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::traversal::Traversal;
 use crate::{GraphError, PropertyValue};
@@ -12,7 +13,7 @@ pub struct Node {
     pub id: NodeId,
     /// ノードが持つラベルのリスト（複数ラベル対応）
     pub labels: Vec<String>,
-    pub properties: HashMap<String, PropertyValue>,
+    pub properties: Arc<HashMap<String, PropertyValue>>,
 }
 
 impl Node {
@@ -42,7 +43,7 @@ impl Node {
 
     /// プロパティを設定
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) {
-        self.properties.insert(key.into(), value.into());
+        Arc::make_mut(&mut self.properties).insert(key.into(), value.into());
     }
 
     /// プロパティを取得
@@ -52,7 +53,7 @@ impl Node {
 
     /// プロパティを削除
     pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
-        self.properties.remove(key)
+        Arc::make_mut(&mut self.properties).remove(key)
     }
 }
 
@@ -63,13 +64,13 @@ pub struct Edge {
     pub label: String,
     pub from: NodeId,
     pub to: NodeId,
-    pub properties: HashMap<String, PropertyValue>,
+    pub properties: Arc<HashMap<String, PropertyValue>>,
 }
 
 impl Edge {
     /// プロパティを設定
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) {
-        self.properties.insert(key.into(), value.into());
+        Arc::make_mut(&mut self.properties).insert(key.into(), value.into());
     }
 
     /// プロパティを取得
@@ -79,7 +80,7 @@ impl Edge {
 
     /// プロパティを削除
     pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
-        self.properties.remove(key)
+        Arc::make_mut(&mut self.properties).remove(key)
     }
 }
 
@@ -120,7 +121,7 @@ impl Graph {
         let node = Node {
             id,
             labels,
-            properties: HashMap::new(),
+            properties: Arc::new(HashMap::new()),
         };
 
         self.nodes.insert(id, node);
@@ -153,7 +154,7 @@ impl Graph {
         let node = Node {
             id,
             labels,
-            properties: HashMap::new(),
+            properties: Arc::new(HashMap::new()),
         };
 
         self.nodes.insert(id, node);
@@ -226,7 +227,7 @@ impl Graph {
             label: label.into(),
             from,
             to,
-            properties: HashMap::new(),
+            properties: Arc::new(HashMap::new()),
         };
 
         self.edges.insert(id, edge);

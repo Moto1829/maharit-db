@@ -68,7 +68,7 @@ enum UndoRecord {
         #[allow(dead_code)] // Kept for potential future use (e.g., ID restoration)
         node_id: NodeId,
         labels: Vec<String>,
-        properties: HashMap<String, PropertyValue>,
+        properties: Arc<HashMap<String, PropertyValue>>,
     },
     SetProperty {
         node_id: NodeId,
@@ -235,7 +235,7 @@ impl TransactionManager {
                 } => {
                     let new_id = graph.create_node_with_labels(labels.clone());
                     if let Some(node) = graph.get_node_mut(new_id) {
-                        for (key, value) in properties {
+                        for (key, value) in properties.iter() {
                             node.set_property(key.clone(), value.clone());
                         }
                     }
@@ -249,7 +249,7 @@ impl TransactionManager {
                         match old_value {
                             Some(value) => node.set_property(key.clone(), value.clone()),
                             None => {
-                                node.properties.remove(key);
+                                node.remove_property(key);
                             }
                         }
                     }
