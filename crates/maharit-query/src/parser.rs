@@ -2478,7 +2478,33 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expression, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::LParen) => {
-                self.advance();
+                // Speculatively try to parse as a pattern predicate: (n)-->() or (n:Label {..})
+                let saved_pos = self.pos;
+                if let Ok(start_node) = self.parse_node_pattern() {
+                    let has_labels_or_props =
+                        !start_node.labels.is_empty() || !start_node.properties.is_empty();
+                    if self.is_edge_start() || has_labels_or_props {
+                        // Commit as pattern predicate
+                        let pattern = if self.is_edge_start() {
+                            let mut segments = Vec::new();
+                            while self.is_edge_start() {
+                                let edge = self.parse_edge_pattern()?;
+                                let node = self.parse_node_pattern()?;
+                                segments.push(PathSegment { edge, node });
+                            }
+                            Pattern::Path(PathPattern {
+                                start: start_node,
+                                segments,
+                            })
+                        } else {
+                            Pattern::Node(start_node)
+                        };
+                        return Ok(Expression::PatternPredicate(vec![pattern]));
+                    }
+                }
+                // Restore and fall through to parenthesized expression
+                self.pos = saved_pos;
+                self.advance(); // consume (
                 let expr = self.parse_expression()?;
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)

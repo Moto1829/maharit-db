@@ -575,6 +575,8 @@ pub enum Expression {
     Exists(Box<Expression>),
     /// isEmpty(expr) - 空チェック (list/string)
     IsEmpty(Box<Expression>),
+    /// パターン述語: WHERE (n)-->() or WHERE (n)-[:KNOWS]->(m)
+    PatternPredicate(Vec<Pattern>),
 }
 
 /// CASE式

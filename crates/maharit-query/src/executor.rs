@@ -4389,6 +4389,21 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
+            Expression::PatternPredicate(patterns) => {
+                // Evaluate patterns against current bindings; return true if any match exists.
+                // After matching, verify that variables already bound in the outer scope still
+                // hold the same value (pattern matching may overwrite them with different nodes).
+                let mut matches = vec![bindings.clone()];
+                for pattern in patterns {
+                    matches = self.match_pattern(pattern, matches)?;
+                }
+                matches.retain(|new_b| {
+                    bindings
+                        .iter()
+                        .all(|(k, v)| new_b.get(k).map_or(true, |nv| nv == v))
+                });
+                Ok(Value::Bool(!matches.is_empty()))
+            }
         }
     }
 
@@ -9887,5 +9902,119 @@ mod tests {
         // Matching with a non-existent combo should return nothing
         let result3 = execute(&mut graph, r#"MATCH (n:A:D) RETURN n.val"#).unwrap();
         assert_eq!(result3.row_count(), 0);
+    }
+
+    #[test]
+    fn test_pattern_predicate_basic() {
+        let mut graph = Graph::new();
+        // Alice knows Bob, Charlie knows nobody
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(&mut graph, r#"CREATE (c:Person {name: "Charlie"})"#).unwrap();
+
+        // WHERE (n)-[:KNOWS]->() should return only Alice
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE (n)-[:KNOWS]->() RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pattern_predicate_not() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+        execute(&mut graph, r#"CREATE (c:Person {name: "Charlie"})"#).unwrap();
+
+        // WHERE NOT (n)-[:KNOWS]->() should return Bob and Charlie (no outgoing KNOWS)
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE NOT (n)-[:KNOWS]->() RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_pattern_predicate_with_bound_variable() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
+        )
+        .unwrap();
+
+        // WHERE (a)-[:KNOWS]->(b) with both a and b bound
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person), (b:Person) WHERE (a)-[:KNOWS]->(b) RETURN a.name, b.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+        assert_eq!(
+            result.rows[0].columns[1],
+            Value::String("Bob".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pattern_predicate_with_props() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice"})-[:WORKS_AT]->(c:Company {name: "ACME"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (b:Person {name: "Bob"})-[:WORKS_AT]->(c2:Company {name: "Other"})"#,
+        )
+        .unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WHERE (n)-[:WORKS_AT]->(:Company {name: "ACME"}) RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pattern_predicate_label_only() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Robot {name: "R2D2"})"#).unwrap();
+
+        // WHERE (n:Person) as standalone pattern predicate
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n) WHERE (n:Person) RETURN n.name"#,
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Alice".to_string())
+        );
     }
 }
