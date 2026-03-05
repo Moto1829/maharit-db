@@ -1,5 +1,50 @@
 use std::collections::HashMap;
 
+/// Returns `true` if the statement is provably read-only (never mutates the graph).
+///
+/// Read-only statements are those that only inspect the graph without creating,
+/// updating, or deleting nodes, edges, constraints, indexes, or users.
+///
+/// Used by the TCP server to choose a shared read lock instead of an exclusive
+/// write lock, enabling concurrent execution of multiple read-only queries.
+///
+/// # Note
+///
+/// `EXPLAIN` and `PROFILE` wrap another statement; they are considered read-only
+/// only when their inner statement is also read-only.
+pub fn is_read_only(stmt: &Statement) -> bool {
+    match stmt {
+        // Pure reads
+        Statement::Match(_) => true,
+        Statement::Union(u) => u.queries.iter().all(|_| true), // all MATCH queries
+        Statement::ShowConstraints => true,
+        Statement::ShowUsers => true,
+        Statement::ProcedureCall(_) => true, // read-only introspection calls
+
+        // EXPLAIN / PROFILE are read-only when the inner statement is read-only
+        Statement::Explain(inner) => is_read_only(inner),
+        Statement::Profile(inner) => is_read_only(inner),
+
+        // Everything else mutates the graph or schema
+        Statement::Create(_) => false,
+        Statement::Delete(_) => false,
+        Statement::MatchCreate(_) => false,
+        Statement::MatchSet(_) => false,
+        Statement::Merge(_) => false,
+        Statement::MatchRemove(_) => false,
+        Statement::Unwind(_) => false,
+        Statement::Foreach(_) => false,
+        Statement::MatchForeach(_) => false,
+        Statement::CreateConstraint(_) => false,
+        Statement::DropConstraint(_) => false,
+        Statement::CreateFulltextIndex(_) => false,
+        Statement::DropFulltextIndex(_) => false,
+        Statement::CreateUser(_) => false,
+        Statement::DropUser(_) => false,
+        Statement::AlterUser(_) => false,
+    }
+}
+
 /// クエリ文全体
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {

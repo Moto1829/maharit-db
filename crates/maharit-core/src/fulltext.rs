@@ -4,6 +4,7 @@
 //! efficient text search across node properties with relevance ranking.
 
 use crate::{NodeId, PropertyValue};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -66,11 +67,18 @@ const JAPANESE_STOP_POS: &[&str] = &[
     "非言語音",
 ];
 
+/// Threshold above which parallel index building is used.
+const PARALLEL_BUILD_THRESHOLD: usize = 200;
+
 /// Simple tokenizer that splits text on non-alphanumeric characters and lowercases.
 ///
 /// When the `japanese` feature is enabled and the input contains Japanese characters,
 /// lindera's morphological analyser is used instead, filtering out stop parts-of-speech
 /// and returning the dictionary (base) form of each content word.
+///
+/// When building the index in parallel, each worker thread keeps its own
+/// lindera `Tokenizer` in a thread-local variable so the expensive dictionary
+/// load only happens once per thread instead of once per document.
 struct Tokenizer;
 
 impl Tokenizer {
@@ -163,6 +171,84 @@ impl Tokenizer {
         let dictionary = load_dictionary("embedded://ipadic")?;
         let segmenter = Segmenter::new(Mode::Normal, dictionary, None);
         Ok(LinderaTokenizer::new(segmenter))
+    }
+
+    /// Tokenize text using a thread-local cached tokenizer.
+    ///
+    /// This variant is used during parallel index building so that the expensive
+    /// lindera dictionary load happens at most once per rayon worker thread.
+    fn tokenize_cached(text: &str) -> Vec<String> {
+        // For the non-japanese path this is identical to `tokenize`.
+        // For the japanese path the thread-local cache avoids repeated dictionary loads.
+        #[cfg(feature = "japanese")]
+        if contains_japanese(text) {
+            return Self::tokenize_japanese_cached(text);
+        }
+
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Japanese tokenization using a thread-local cached lindera tokenizer.
+    #[cfg(feature = "japanese")]
+    fn tokenize_japanese_cached(text: &str) -> Vec<String> {
+        // Each rayon worker thread gets its own lindera tokenizer so we pay the
+        // dictionary-load cost at most once per thread.
+        thread_local! {
+            static TOKENIZER: std::cell::RefCell<Option<LinderaTokenizer>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        TOKENIZER.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            if borrow.is_none() {
+                *borrow = Self::build_japanese_tokenizer().ok();
+            }
+
+            // If initialization failed, fall back to the whitespace splitter.
+            match borrow.as_mut() {
+                None => text
+                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+                Some(tokenizer) => {
+                    let mut tokens = match tokenizer.tokenize(text) {
+                        Ok(t) => t,
+                        Err(_) => {
+                            return text
+                                .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect();
+                        }
+                    };
+
+                    let mut result = Vec::new();
+                    for token in tokens.iter_mut() {
+                        let surface_owned: String = token.surface.as_ref().to_string();
+                        let details = token.details();
+                        let pos = details.first().copied().unwrap_or("*");
+                        if JAPANESE_STOP_POS.contains(&pos) {
+                            continue;
+                        }
+                        let base_form = details
+                            .get(6)
+                            .copied()
+                            .filter(|s| !s.is_empty() && *s != "*")
+                            .unwrap_or(&surface_owned);
+                        let normalized = base_form.to_lowercase();
+                        if !normalized.is_empty() {
+                            result.push(normalized);
+                        }
+                    }
+                    result
+                }
+            }
+        })
     }
 }
 
@@ -482,6 +568,84 @@ impl FulltextIndex {
     pub fn add_document(&mut self, node_id: NodeId, property: &str, text: &str) {
         let doc_id = DocumentId::new(node_id, property);
         self.inverted_index.add_document(doc_id, text);
+    }
+
+    /// Bulk-index a batch of documents using two-phase parallel construction.
+    ///
+    /// For batches with >= [`PARALLEL_BUILD_THRESHOLD`] entries the tokenization
+    /// phase is run in parallel across rayon worker threads (each node is
+    /// independent). Writing into the inverted index is then done sequentially
+    /// so no synchronisation primitives are required.
+    ///
+    /// # Arguments
+    ///
+    /// * `documents` – Slice of `(node_id, property_name, text)` tuples to index.
+    pub fn build_index(&mut self, documents: &[(NodeId, &str, &str)]) {
+        if documents.is_empty() {
+            return;
+        }
+
+        // Phase 1: tokenize each document (parallel when large enough).
+        // Returns Vec<(DocumentId, Vec<String /*tokens*/>)>
+        let tokenized: Vec<(DocumentId, Vec<String>)> = if documents.len()
+            >= PARALLEL_BUILD_THRESHOLD
+        {
+            documents
+                .par_iter()
+                .map(|&(node_id, property, text)| {
+                    let doc_id = DocumentId::new(node_id, property);
+                    let tokens = Tokenizer::tokenize_cached(text);
+                    (doc_id, tokens)
+                })
+                .collect()
+        } else {
+            documents
+                .iter()
+                .map(|&(node_id, property, text)| {
+                    let doc_id = DocumentId::new(node_id, property);
+                    let tokens = Tokenizer::tokenize(text);
+                    (doc_id, tokens)
+                })
+                .collect()
+        };
+
+        // Phase 2: write tokenized results into the inverted index sequentially.
+        for (doc_id, tokens) in tokenized {
+            let doc_length = tokens.len();
+
+            if !self.inverted_index.doc_lengths.contains_key(&doc_id) {
+                self.inverted_index.total_docs += 1;
+            } else if let Some(&old_len) = self.inverted_index.doc_lengths.get(&doc_id) {
+                self.inverted_index.total_length -= old_len;
+            }
+
+            self.inverted_index
+                .doc_lengths
+                .insert(doc_id.clone(), doc_length);
+            self.inverted_index.total_length += doc_length;
+
+            // Build position map for this document.
+            let mut token_positions: HashMap<String, Vec<usize>> = HashMap::new();
+            for (pos, token) in tokens.iter().enumerate() {
+                token_positions
+                    .entry(token.clone())
+                    .or_default()
+                    .push(pos);
+            }
+
+            for (token, positions) in token_positions {
+                let entry = self
+                    .inverted_index
+                    .index
+                    .entry(token)
+                    .or_default();
+                entry.retain(|tp| tp.doc_id != doc_id);
+                entry.push(TokenPosition {
+                    doc_id: doc_id.clone(),
+                    positions,
+                });
+            }
+        }
     }
 
     /// Remove a document from the index.
@@ -809,6 +973,49 @@ impl FulltextManager {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Bulk-index multiple nodes' properties into matching indexes.
+    ///
+    /// Internally delegates to [`FulltextIndex::build_index`] which parallelises
+    /// the tokenization phase for large batches.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` – Slice of `(node_id, label, properties)` tuples.
+    pub fn build_index_bulk(
+        &mut self,
+        nodes: &[(NodeId, &str, HashMap<String, PropertyValue>)],
+    ) {
+        // Group documents by (index_name) so we can call build_index once per index.
+        // We collect owned strings to satisfy lifetime requirements.
+        let mut per_index: HashMap<String, Vec<(NodeId, String, String)>> = HashMap::new();
+
+        for (node_id, label, properties) in nodes {
+            for index in self.indexes.values() {
+                if index.label() != *label {
+                    continue;
+                }
+                for prop_name in index.properties() {
+                    if let Some(PropertyValue::String(text)) = properties.get(prop_name.as_str()) {
+                        per_index
+                            .entry(index.name().to_string())
+                            .or_default()
+                            .push((*node_id, prop_name.clone(), text.clone()));
+                    }
+                }
+            }
+        }
+
+        for (index_name, docs) in per_index {
+            if let Some(index) = self.indexes.get_mut(&index_name) {
+                let doc_refs: Vec<(NodeId, &str, &str)> = docs
+                    .iter()
+                    .map(|(nid, prop, text)| (*nid, prop.as_str(), text.as_str()))
+                    .collect();
+                index.build_index(&doc_refs);
             }
         }
     }

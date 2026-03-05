@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod parser;
 pub mod planner;
 
+pub use ast::is_read_only;
 pub use cache::{AstCache, CacheStats, PlanCache, QueryCache};
 pub use executor::{ExecuteError, Executor, ResultSet, Row, Value};
 pub use lexer::{Lexer, LexerError, Span, Token, TokenKind};

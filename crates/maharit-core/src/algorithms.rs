@@ -5,10 +5,20 @@
 //! - PageRank
 //! - Community detection (connected components, strongly connected components)
 //! - Cycle detection and topological sort
+//!
+//! Algorithms operating on large graphs (>= 500 nodes) use rayon for parallel
+//! computation where the algorithm structure allows it. For small graphs the
+//! sequential path is taken to avoid rayon's thread-pool overhead.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use rayon::prelude::*;
+
 use crate::{Graph, NodeId};
+
+/// Threshold below which sequential algorithms are preferred over parallel ones.
+/// Rayon's thread-pool overhead is not worth it for small graphs.
+const PARALLEL_THRESHOLD: usize = 500;
 
 // ============================================================================
 // Centrality Measures
@@ -78,19 +88,20 @@ impl DegreeCentrality {
 ///
 /// Closeness centrality measures how close a node is to all other nodes.
 /// Higher values indicate more central nodes.
+///
+/// For graphs with >= [`PARALLEL_THRESHOLD`] nodes the BFS computations for
+/// each source node are executed in parallel using rayon.
 pub fn closeness_centrality(graph: &Graph) -> HashMap<NodeId, f64> {
-    let mut centrality = HashMap::new();
     let n = graph.node_count();
 
     if n <= 1 {
-        for node in graph.nodes() {
-            centrality.insert(node.id, 0.0);
-        }
-        return centrality;
+        return graph.nodes().map(|node| (node.id, 0.0)).collect();
     }
 
-    for node in graph.nodes() {
-        let distances = bfs_distances(graph, node.id);
+    let node_ids: Vec<NodeId> = graph.nodes().map(|n| n.id).collect();
+
+    let compute_one = |&node_id: &NodeId| -> (NodeId, f64) {
+        let distances = bfs_distances(graph, node_id);
         let reachable: usize = distances.values().filter(|&&d| d < usize::MAX).count();
         let total_distance: usize = distances.values().filter(|&&d| d < usize::MAX).sum();
 
@@ -99,35 +110,41 @@ pub fn closeness_centrality(graph: &Graph) -> HashMap<NodeId, f64> {
         } else {
             0.0
         };
+        (node_id, c)
+    };
 
-        centrality.insert(node.id, c);
+    if n >= PARALLEL_THRESHOLD {
+        node_ids.par_iter().map(compute_one).collect()
+    } else {
+        node_ids.iter().map(compute_one).collect()
     }
-
-    centrality
 }
 
-/// Calculate betweenness centrality for all nodes
+/// Calculate betweenness centrality for all nodes using Brandes' algorithm.
 ///
 /// Betweenness centrality measures how often a node lies on shortest paths
 /// between other nodes.
+///
+/// For graphs with >= [`PARALLEL_THRESHOLD`] nodes the outer loop over source
+/// nodes is executed in parallel using rayon. Each thread accumulates a local
+/// partial-centrality map which is then merged into the final result. Because
+/// `Graph` is only accessed through a shared reference (`&Graph`) this is safe.
 pub fn betweenness_centrality(graph: &Graph) -> HashMap<NodeId, f64> {
-    let mut centrality: HashMap<NodeId, f64> = HashMap::new();
+    let nodes: Vec<NodeId> = graph.nodes().map(|n| n.id).collect();
+    let n = nodes.len();
 
-    // Initialize
-    for node in graph.nodes() {
-        centrality.insert(node.id, 0.0);
+    if n == 0 {
+        return HashMap::new();
     }
 
-    let nodes: Vec<NodeId> = graph.nodes().map(|n| n.id).collect();
-
-    for &source in &nodes {
-        // BFS from source
+    /// Compute partial betweenness contribution from a single source using Brandes.
+    fn brandes_single(graph: &Graph, nodes: &[NodeId], source: NodeId) -> HashMap<NodeId, f64> {
         let mut stack = Vec::new();
         let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut sigma: HashMap<NodeId, f64> = HashMap::new(); // Number of shortest paths
+        let mut sigma: HashMap<NodeId, f64> = HashMap::new();
         let mut dist: HashMap<NodeId, i64> = HashMap::new();
 
-        for &node in &nodes {
+        for &node in nodes {
             predecessors.insert(node, Vec::new());
             sigma.insert(node, 0.0);
             dist.insert(node, -1);
@@ -145,14 +162,10 @@ pub fn betweenness_centrality(graph: &Graph) -> HashMap<NodeId, f64> {
 
             for edge in graph.get_outgoing_edges(v) {
                 let w = edge.to;
-
-                // First visit
                 if dist[&w] < 0 {
                     dist.insert(w, v_dist + 1);
                     queue.push_back(w);
                 }
-
-                // Shortest path found
                 if dist[&w] == v_dist + 1 {
                     *sigma.get_mut(&w).unwrap() += sigma[&v];
                     predecessors.get_mut(&w).unwrap().push(v);
@@ -160,25 +173,47 @@ pub fn betweenness_centrality(graph: &Graph) -> HashMap<NodeId, f64> {
             }
         }
 
-        // Accumulation
-        let mut delta: HashMap<NodeId, f64> = nodes.iter().map(|&n| (n, 0.0)).collect();
+        let mut delta: HashMap<NodeId, f64> = nodes.iter().map(|&nd| (nd, 0.0)).collect();
+        let mut partial: HashMap<NodeId, f64> = nodes.iter().map(|&nd| (nd, 0.0)).collect();
 
         while let Some(w) = stack.pop() {
             for &v in &predecessors[&w] {
                 let contribution = (sigma[&v] / sigma[&w]) * (1.0 + delta[&w]);
                 *delta.get_mut(&v).unwrap() += contribution;
             }
-
             if w != source {
-                *centrality.get_mut(&w).unwrap() += delta[&w];
+                *partial.get_mut(&w).unwrap() += delta[&w];
             }
+        }
+
+        partial
+    }
+
+    // Run the outer loop either in parallel or sequentially depending on graph size.
+    let partial_maps: Vec<HashMap<NodeId, f64>> = if n >= PARALLEL_THRESHOLD {
+        nodes
+            .par_iter()
+            .map(|&source| brandes_single(graph, &nodes, source))
+            .collect()
+    } else {
+        nodes
+            .iter()
+            .map(|&source| brandes_single(graph, &nodes, source))
+            .collect()
+    };
+
+    // Merge partial results into the final centrality map.
+    let mut centrality: HashMap<NodeId, f64> = nodes.iter().map(|&nd| (nd, 0.0)).collect();
+    for partial in partial_maps {
+        for (node_id, value) in partial {
+            *centrality.get_mut(&node_id).unwrap() += value;
         }
     }
 
-    // Normalize for directed graph
-    let n = nodes.len() as f64;
-    if n > 2.0 {
-        let norm = 1.0 / ((n - 1.0) * (n - 2.0));
+    // Normalize for directed graph.
+    let n_f = n as f64;
+    if n_f > 2.0 {
+        let norm = 1.0 / ((n_f - 1.0) * (n_f - 2.0));
         for value in centrality.values_mut() {
             *value *= norm;
         }
@@ -223,7 +258,12 @@ pub struct PageRankResult {
     pub converged: bool,
 }
 
-/// Calculate PageRank for all nodes
+/// Calculate PageRank for all nodes.
+///
+/// For graphs with >= [`PARALLEL_THRESHOLD`] nodes the dangling-node sum is
+/// computed in parallel. The per-iteration score update still involves a
+/// sequential merge step (because edge contributions need atomic accumulation),
+/// so only the embarrassingly-parallel parts are parallelised.
 pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
     let nodes: Vec<NodeId> = graph.nodes().map(|n| n.id).collect();
     let n = nodes.len();
@@ -236,10 +276,12 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
         };
     }
 
+    let use_parallel = n >= PARALLEL_THRESHOLD;
+
     let initial_score = 1.0 / n as f64;
     let mut scores: HashMap<NodeId, f64> = nodes.iter().map(|&id| (id, initial_score)).collect();
 
-    // Build out-degree map
+    // Build out-degree map (read-only after construction).
     let out_degree: HashMap<NodeId, usize> = nodes
         .iter()
         .map(|&id| (id, graph.get_outgoing_edges(id).len()))
@@ -248,6 +290,13 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
     let damping = config.damping;
     let teleport = (1.0 - damping) / n as f64;
 
+    // Pre-collect dangling node IDs (nodes with out-degree 0).
+    let dangling_nodes: Vec<NodeId> = nodes
+        .iter()
+        .copied()
+        .filter(|id| out_degree[id] == 0)
+        .collect();
+
     let mut iterations = 0;
     let mut converged = false;
 
@@ -255,7 +304,7 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
         iterations += 1;
         let mut new_scores: HashMap<NodeId, f64> = nodes.iter().map(|&id| (id, teleport)).collect();
 
-        // Calculate contribution from incoming edges
+        // Calculate contribution from incoming edges (sequential — HashMap mutation).
         for edge in graph.edges() {
             let from_degree = out_degree[&edge.from];
             if from_degree > 0 {
@@ -264,19 +313,23 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
             }
         }
 
-        // Handle dangling nodes (nodes with no outgoing edges)
-        let dangling_sum: f64 = nodes
-            .iter()
-            .filter(|&&id| out_degree[&id] == 0)
-            .map(|&id| scores[&id])
-            .sum();
+        // Handle dangling nodes (nodes with no outgoing edges).
+        // The sum over dangling scores is embarrassingly parallel.
+        let dangling_sum: f64 = if use_parallel {
+            dangling_nodes
+                .par_iter()
+                .map(|id| scores[id])
+                .sum()
+        } else {
+            dangling_nodes.iter().map(|id| scores[id]).sum()
+        };
         let dangling_contribution = damping * dangling_sum / n as f64;
 
         for score in new_scores.values_mut() {
             *score += dangling_contribution;
         }
 
-        // Check convergence
+        // Check convergence (L1 norm of score difference).
         let diff: f64 = nodes
             .iter()
             .map(|&id| (new_scores[&id] - scores[&id]).abs())

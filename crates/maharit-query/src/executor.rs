@@ -4,11 +4,17 @@ use maharit_core::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge, FulltextError,
     FulltextManager, Graph, NodeId, PropertyType, PropertyValue, traversal,
 };
+use rayon::prelude::*;
 use regex::Regex;
 use thiserror::Error;
 
 use crate::ast::*;
 use crate::cache::AstCache;
+
+/// Minimum number of candidate nodes required before switching to parallel filtering.
+///
+/// Below this threshold the overhead of spawning rayon tasks exceeds the benefit.
+const PARALLEL_MATCH_THRESHOLD: usize = 500;
 
 /// Compute Levenshtein edit distance between two strings (used for fuzzy CONTAINS).
 fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -2088,6 +2094,10 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<Bindings>, ExecuteError> {
         let mut result = Vec::new();
 
+        // Collect all graph node IDs once for the scan-all path.
+        // We reuse this Vec across bindings to avoid repeated allocations.
+        let all_node_ids: Vec<NodeId> = self.graph.nodes().map(|n| n.id).collect();
+
         for bindings in current_bindings {
             // Check if variable is already bound
             if let Some(var) = &pattern.variable {
@@ -2102,14 +2112,49 @@ impl<'a> Executor<'a> {
                 }
             }
 
-            // Find matching nodes
-            for node in self.graph.nodes() {
-                if self.node_matches_pattern(node.id, pattern, &bindings)? {
+            // Find matching nodes.
+            // For large graphs use parallel filtering to determine which node IDs
+            // match the label/property predicates. Property expression evaluation
+            // only reads the graph, so sharing `&self` across threads is safe here
+            // through the pattern closure.
+            if all_node_ids.len() >= PARALLEL_MATCH_THRESHOLD {
+                // Phase 1 (parallel): determine which node IDs pass label + property filters.
+                // Note: evaluate_expression needs &self; we wrap it in a closure that
+                // captures an immutable `self` reference — safe because all reads are
+                // independent (no mutation occurs during MATCH).
+                let matching_ids: Vec<Result<Option<NodeId>, ExecuteError>> = all_node_ids
+                    .par_iter()
+                    .map(|&node_id| {
+                        if self.node_matches_pattern(node_id, pattern, &bindings)? {
+                            Ok(Some(node_id))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .collect();
+
+                // Phase 2 (sequential): assemble bindings for matched nodes.
+                for res in matching_ids {
+                    let node_id = match res? {
+                        Some(id) => id,
+                        None => continue,
+                    };
                     let mut new_bindings = bindings.clone();
                     if let Some(var) = &pattern.variable {
-                        new_bindings.insert(var.clone(), BindingValue::Node(node.id));
+                        new_bindings.insert(var.clone(), BindingValue::Node(node_id));
                     }
                     result.push(new_bindings);
+                }
+            } else {
+                // Sequential path for small graphs.
+                for &node_id in &all_node_ids {
+                    if self.node_matches_pattern(node_id, pattern, &bindings)? {
+                        let mut new_bindings = bindings.clone();
+                        if let Some(var) = &pattern.variable {
+                            new_bindings.insert(var.clone(), BindingValue::Node(node_id));
+                        }
+                        result.push(new_bindings);
+                    }
                 }
             }
         }

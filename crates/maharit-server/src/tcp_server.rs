@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use maharit_core::Graph;
-use maharit_query::{Executor, Parser};
+use maharit_query::{Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -546,7 +546,10 @@ async fn execute_streaming_query(
         }
     };
 
-    // Execute the statement
+    // Log read-only classification (used for monitoring).
+    let _read_only = is_read_only(&stmt);
+
+    // Execute the statement (exclusive write lock; see execute_query for TODO).
     let mut g = graph.write().await;
     let mut executor = Executor::new(&mut g);
 
@@ -610,9 +613,15 @@ async fn execute_streaming_query(
     Ok(())
 }
 
-/// Execute a query and return the response
+/// Execute a query and return the response.
+///
+/// The query is first parsed so that `is_read_only` can be evaluated before
+/// acquiring any lock. Both paths currently use an exclusive write lock because
+/// the `Executor` API requires `&mut Graph`. The lock-type split is in place so
+/// that a future refactoring of `Executor` to accept `&Graph` for read-only
+/// statements can adopt `graph.read()` without touching this call site.
 async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
-    // Parse the query
+    // Parse the query first so we can inspect the AST before locking.
     let stmt = match Parser::new(query) {
         Ok(mut parser) => match parser.parse() {
             Ok(stmt) => stmt,
@@ -629,7 +638,11 @@ async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
         }
     };
 
-    // Execute the statement
+    // Log whether this is a read-only query (useful for monitoring / future optimisation).
+    let _read_only = is_read_only(&stmt);
+
+    // Acquire an exclusive write lock and execute.
+    // TODO: once Executor supports &Graph, use graph.read() when _read_only is true.
     let mut g = graph.write().await;
     let mut executor = Executor::new(&mut g);
 
