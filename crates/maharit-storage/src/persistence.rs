@@ -8,10 +8,14 @@ use thiserror::Error;
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
-/// フォーマットバージョン（インデックスセクション追加で v2）
-const VERSION: u32 = 2;
+/// フォーマットバージョン（v3: ラベルを Vec<String> として保存）
+const VERSION: u32 = 3;
+/// v2: インデックスセクション追加
+const VERSION_V2: u32 = 2;
 /// 後方互換性のため v1 も読み込み可能にする
 const VERSION_V1: u32 = 1;
+/// BufWriter バッファサイズ（4MB）
+const BUF_CAPACITY: usize = 4 * 1024 * 1024;
 
 /// 永続化エラー
 #[derive(Debug, Error)]
@@ -51,7 +55,7 @@ impl PersistentStorage {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
+        let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
 
         // ヘッダー
         writer.write_all(MAGIC)?;
@@ -66,9 +70,8 @@ impl PersistentStorage {
         // ノードを書き込み
         for node in graph.nodes() {
             Self::write_u64(&mut writer, node.id)?;
-            // Labels are stored as a colon-separated string for backward compatibility.
-            // E.g. "Person:Employee" for multi-label nodes.
-            Self::write_string(&mut writer, &node.labels.join(":"))?;
+            // v3: ラベルを個別に保存（count + each string）
+            Self::write_label_list(&mut writer, &node.labels)?;
             Self::write_properties(&mut writer, &node.properties)?;
         }
 
@@ -108,7 +111,7 @@ impl PersistentStorage {
 
         // バージョンを確認
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION && version != VERSION_V1 {
+        if version != VERSION && version != VERSION_V2 && version != VERSION_V1 {
             return Err(PersistenceError::UnsupportedVersion(version));
         }
 
@@ -122,12 +125,16 @@ impl PersistentStorage {
         // ノードを読み込み
         for _ in 0..node_count {
             let old_id = Self::read_u64(&mut reader)?;
-            // Labels are stored as colon-separated string. Split to support multi-label nodes.
-            let labels_str = Self::read_string(&mut reader)?;
-            let labels: Vec<String> = if labels_str.is_empty() {
-                vec![]
+            // v3: ラベルを個別に読み込み。v1/v2: コロン区切り文字列を分割
+            let labels: Vec<String> = if version >= VERSION {
+                Self::read_label_list(&mut reader)?
             } else {
-                labels_str.split(':').map(|s| s.to_string()).collect()
+                let labels_str = Self::read_string(&mut reader)?;
+                if labels_str.is_empty() {
+                    vec![]
+                } else {
+                    labels_str.split(':').map(|s| s.to_string()).collect()
+                }
             };
             let properties = Self::read_properties(&mut reader)?;
 
@@ -166,7 +173,7 @@ impl PersistentStorage {
         }
 
         // インデックスセクションを読み込み（v2 以降のみ）
-        let index = if version >= VERSION {
+        let index = if version >= VERSION_V2 {
             Self::read_index_section(&mut reader)?
         } else {
             PropertyIndex::new()
@@ -221,6 +228,14 @@ impl PersistentStorage {
         Ok(())
     }
 
+    fn write_label_list<W: Write>(writer: &mut W, labels: &[String]) -> Result<()> {
+        writer.write_all(&(labels.len() as u32).to_le_bytes())?;
+        for label in labels {
+            Self::write_string(writer, label)?;
+        }
+        Ok(())
+    }
+
     fn write_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
         let bytes = s.as_bytes();
         let len = bytes.len() as u32;
@@ -270,6 +285,15 @@ impl PersistentStorage {
     }
 
     // ========== Reader helpers ==========
+
+    fn read_label_list<R: Read>(reader: &mut R) -> Result<Vec<String>> {
+        let count = Self::read_u32(reader)? as usize;
+        let mut labels = Vec::with_capacity(count);
+        for _ in 0..count {
+            labels.push(Self::read_string(reader)?);
+        }
+        Ok(labels)
+    }
 
     fn read_u32<R: Read>(reader: &mut R) -> Result<u32> {
         let mut buf = [0u8; 4];
@@ -535,6 +559,28 @@ mod tests {
 
         let ticker_def = defs.iter().find(|d| d.property == "ticker").unwrap();
         assert!(ticker_def.unique);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_save_load_multi_label_nodes() {
+        let mut graph = Graph::new();
+        let id = graph.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
+        if let Some(node) = graph.get_node_mut(id) {
+            node.set_property("name", "Alice");
+        }
+
+        let path = "/tmp/maharit_test_multi_label.db";
+
+        PersistentStorage::save(&graph, path).unwrap();
+        let loaded = PersistentStorage::load(path).unwrap();
+
+        assert_eq!(loaded.node_count(), 1);
+        let node = loaded.nodes().next().unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+        assert_eq!(node.labels.len(), 2);
 
         std::fs::remove_file(path).ok();
     }
