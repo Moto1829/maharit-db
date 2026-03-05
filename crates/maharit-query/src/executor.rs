@@ -4863,7 +4863,7 @@ mod tests {
         .unwrap();
 
         // Get Alice and Bob IDs
-        let alice_id = graph
+        let _alice_id = graph
             .nodes()
             .find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string())))
             .unwrap()
