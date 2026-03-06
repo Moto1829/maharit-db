@@ -346,6 +346,7 @@ impl TcpServer {
 }
 
 /// Handle a single client connection
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut socket: TcpStream,
     graph: Arc<RwLock<Graph>>,
@@ -595,10 +596,10 @@ async fn execute_streaming_query(
     };
 
     // Emit WAL entries for write operations before releasing the lock.
-    if is_write {
-        if let Some(repl) = replication {
-            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-        }
+    if is_write
+        && let Some(repl) = replication
+    {
+        emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
     }
     drop(g);
 
@@ -703,10 +704,10 @@ async fn execute_query(
     let exec_result = executor.execute(stmt);
 
     // Emit WAL entries for write operations before releasing the lock.
-    if is_write {
-        if let (Ok(_), Some(repl)) = (&exec_result, replication) {
-            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-        }
+    if is_write
+        && let (Ok(_), Some(repl)) = (&exec_result, replication)
+    {
+        emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
     }
     drop(g);
 

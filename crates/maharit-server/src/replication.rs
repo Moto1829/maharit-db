@@ -430,12 +430,12 @@ async fn handle_follower_connection(
     .await?;
 
     // If the follower has no data (LSN == 0), send a full snapshot.
-    if follower_lsn == 0 {
-        if let Some(ref g) = graph {
-            let entries = graph_to_snapshot_entries(g).await;
-            let data = serde_json::to_vec(&entries).unwrap_or_default();
-            send_message(&mut writer, &ReplicationMessage::Snapshot { data }).await?;
-        }
+    if follower_lsn == 0
+        && let Some(ref g) = graph
+    {
+        let entries = graph_to_snapshot_entries(g).await;
+        let data = serde_json::to_vec(&entries).unwrap_or_default();
+        send_message(&mut writer, &ReplicationMessage::Snapshot { data }).await?;
     }
 
     // Register the follower.

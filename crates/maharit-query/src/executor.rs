@@ -1795,11 +1795,11 @@ impl<'a> Executor<'a> {
         for segment in &m.segments {
             all_bindings = self.execute_query_segment(segment, all_bindings)?;
 
-            if let Some(limit) = early_limit {
-                if all_bindings.len() >= limit {
-                    all_bindings.truncate(limit);
-                    break;
-                }
+            if let Some(limit) = early_limit
+                && all_bindings.len() >= limit
+            {
+                all_bindings.truncate(limit);
+                break;
             }
         }
 
@@ -4569,7 +4569,7 @@ impl<'a> Executor<'a> {
                 matches.retain(|new_b| {
                     bindings
                         .iter()
-                        .all(|(k, v)| new_b.get(k).map_or(true, |nv| nv == v))
+                        .all(|(k, v)| new_b.get(k).is_none_or(|nv| nv == v))
                 });
                 Ok(Value::Bool(!matches.is_empty()))
             }
