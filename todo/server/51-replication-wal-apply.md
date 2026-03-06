@@ -1,5 +1,7 @@
 # レプリケーション: フォロワーへの WAL 適用
 
+**Status**: Completed
+
 ## 概要
 
 フォロワーが受信した WAL エントリをローカルのグラフに実際に適用する。
@@ -18,15 +20,15 @@ ReplicationMessage::WalEntry { lsn, entry: _ } => {
 
 ## 実装内容
 
-- [ ] `FollowerReplicationManager` に `Arc<RwLock<Graph>>` を持たせる
-- [ ] `WalEntryData` の各バリアントに対応するグラフ操作を実装
+- [x] `FollowerReplicationManager` に `Arc<RwLock<Graph>>` を持たせる
+- [x] `WalEntryData` の各バリアントに対応するグラフ操作を実装
   - `CreateNode` → `graph.create_node_with_id()`
   - `DeleteNode` → `graph.delete_node()`
   - `CreateEdge` → `graph.create_edge_with_id()`
   - `DeleteEdge` → `graph.delete_edge()`
   - `SetProperty` → `graph.set_node_property()` / `set_edge_property()`
-- [ ] `entry: _` → `entry` に変更し、適用ロジックを追加
-- [ ] 適用失敗時のエラーログを出力（適用はベストエフォートで続行）
+- [x] `entry: _` → `entry` に変更し、適用ロジックを追加
+- [x] 適用失敗時のエラーログを出力（適用はベストエフォートで続行）
 
 ## 依存
 

@@ -1,5 +1,7 @@
 # レプリケーション: フェイルオーバーコマンド
 
+**Status**: Completed
+
 ## 概要
 
 ドキュメント（`advanced/replication.md`）に記載されている
@@ -8,13 +10,13 @@
 
 ## 実装内容
 
-- [ ] CLI に `admin` サブコマンドを追加
-- [ ] `admin promote-to-leader --addr <follower-addr>` を実装
+- [x] CLI に `admin` サブコマンドを追加
+- [x] `admin promote-to-leader --addr <follower-addr>` を実装
   - 対象フォロワーに `PromoteToLeader` メッセージを送信
   - フォロワーが受け取ったら自身のロールを Leader に切り替える
   - 旧リーダーに `Shutdown` を送信（または手動停止）
-- [ ] `ReplicationMessage::PromoteToLeader` を追加
-- [ ] フォロワーがリーダーに昇格する際の状態遷移を実装
+- [x] `ReplicationMessage::PromoteToLeader` を追加
+- [x] フォロワーがリーダーに昇格する際の状態遷移を実装
   - `FollowerReplicationManager` → `LeaderReplicationManager` への切り替え
   - リプリケーションポートのリッスン開始
 

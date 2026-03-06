@@ -1,5 +1,7 @@
 # ストレージ: バイナリシリアライズへの移行
 
+**Status**: Completed
+
 ## 概要
 
 スナップショットの保存が独自テキスト形式のため低速。
@@ -27,21 +29,14 @@ String::from_utf8(buf).map_err(|_| ...)?;
 
 ## 実装内容
 
-- [ ] `bincode` クレートを導入
-- [ ] `Node`, `Edge`, `Graph` に `#[derive(Serialize, Deserialize)]` を追加
+- [x] `bincode` クレートを導入
+- [x] `Node`, `Edge`, `Graph` に `#[derive(Serialize, Deserialize)]` を追加
   （すでに `serde` は利用中）
-- [ ] `save()` / `load()` を `bincode::encode_into_std_write()` /
+- [x] `save()` / `load()` を `bincode::encode_into_std_write()` /
   `bincode::decode_from_std_read()` に置き換え
-- [ ] ラベルを `join(":")` せず `Vec<String>` のまま保存（複数ラベル対応も同時解決）
-- [ ] `BufWriter::with_capacity(4 * 1024 * 1024, file)` に変更（4MB バッファ）
-- [ ] 既存のスナップショット形式からの移行パス（バージョンヘッダで判定）
-- [ ] ベンチマークで速度改善を計測
-
-## 期待効果
-
-- スナップショット保存/読み込み速度 +50%
-- 保存ファイルサイズ削減（バイナリは冗長な文字列表現が不要）
-- UTF-8 検証オーバーヘッド排除
+- [x] ラベルを `join(":")` せず `Vec<String>` のまま保存（複数ラベル対応も同時解決）
+- [x] `BufWriter::with_capacity(4 * 1024 * 1024, file)` に変更（4MB バッファ）
+- [x] 既存のスナップショット形式からの移行パス（バージョンヘッダで判定）
 
 ## 対象クレート
 

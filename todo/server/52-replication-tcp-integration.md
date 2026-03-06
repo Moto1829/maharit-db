@@ -1,5 +1,7 @@
 # レプリケーション: TCP サーバーとの統合
 
+**Status**: Completed
+
 ## 概要
 
 クエリ実行（CREATE / SET / DELETE）が `LeaderReplicationManager::append_wal_entry()` を
@@ -13,15 +15,15 @@
 
 ## 実装内容
 
-- [ ] `TcpServer` に `Option<Arc<LeaderReplicationManager>>` を持たせる
-- [ ] クエリ実行後、変更種別に応じた `WalEntryData` を生成して `append_wal_entry()` を呼ぶ
+- [x] `TcpServer` に `Option<Arc<LeaderReplicationManager>>` を持たせる
+- [x] クエリ実行後、変更種別に応じた `WalEntryData` を生成して `append_wal_entry()` を呼ぶ
   - CREATE ノード → `WalEntryData::CreateNode`
   - CREATE エッジ → `WalEntryData::CreateEdge`
   - DELETE → `WalEntryData::DeleteNode` / `DeleteEdge`
   - SET プロパティ → `WalEntryData::SetProperty`
-- [ ] `--enable-replication` / `--replication-role` フラグでサーバー起動時に
+- [x] `--enable-replication` / `--replication-role` フラグでサーバー起動時に
   `LeaderReplicationManager` または `FollowerReplicationManager` を初期化・起動する
-- [ ] フォロワーへの書き込みリクエストをリーダーに転送する（または拒否してエラーを返す）
+- [x] フォロワーへの書き込みリクエストをリーダーに転送する（または拒否してエラーを返す）
 
 ## 依存
 

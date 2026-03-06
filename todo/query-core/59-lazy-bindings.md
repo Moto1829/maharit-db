@@ -1,5 +1,7 @@
 # クエリエンジン: バインディングの遅延評価
 
+**Status**: Completed
+
 ## 概要
 
 `execute_match()` が各パターンで `Vec<Bindings>` を丸ごと作り直しているため、
@@ -24,22 +26,14 @@ fn execute_match(&mut self, m: MatchStatement) -> Result<ResultSet, ExecuteError
 
 ## 実装内容
 
-- [ ] `match_pattern()` の戻り値をイテレータ（`impl Iterator<Item = Bindings>`）に変更
-- [ ] パターンチェーンを `flat_map` で遅延結合
-  ```rust
-  let bindings_iter = m.patterns.iter().fold(
-      Box::new(std::iter::once(Bindings::new())) as Box<dyn Iterator<Item = Bindings>>,
-      |acc, pattern| Box::new(acc.flat_map(|b| self.match_pattern_iter(pattern, b)))
-  );
-  ```
-- [ ] `LIMIT` 句がある場合は `take(limit)` で早期終了（現状は全件マッチ後に切り捨て）
-- [ ] `WHERE` フィルタをパターンマッチ直後に適用してイテレータを絞る
-- [ ] 既存の全クエリテストが通ること
-
-## 期待効果
-
-- 複合パターンクエリのメモリ使用量 -60%
-- `LIMIT` 付きクエリの速度向上（全件展開が不要になる）
+- [x] `match_patterns_for_binding()` を追加してパターンチェーンを1バインディング単位で処理
+  - 1つの入力バインディングを全パターンに順次チェーンする
+  - 中間展開を1バインディング分に限定し、O(M^N) のピークメモリを回避
+- [x] `execute_match_clause()` で `match_patterns_for_binding()` を使用してバインディング単位に処理
+  - 次の入力バインディングを処理する前に中間展開を破棄
+- [x] `LIMIT` 句がある場合は各セグメント後に `early_limit` で早期終了
+- [x] `WHERE` フィルタをパターンマッチ直後に適用 (`execute_query_segment` 内 `retain()`)
+- [x] 既存の全クエリテストが通ること
 
 ## 対象クレート
 
