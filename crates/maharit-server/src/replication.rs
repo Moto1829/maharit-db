@@ -101,8 +101,13 @@ pub enum WalEntryData {
 /// Messages exchanged between leader and follower over the replication channel
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReplicationMessage {
-    /// Follower -> Leader: initiate a replication session
-    Handshake { follower_id: String },
+    /// Follower -> Leader: initiate a replication session.
+    /// `current_lsn` is the follower's current applied LSN (0 for a new follower).
+    Handshake {
+        follower_id: String,
+        #[serde(default)]
+        current_lsn: u64,
+    },
     /// Leader -> Follower: acknowledge the handshake
     HandshakeAck { leader_id: String },
     /// Leader -> Follower: periodic liveness signal
@@ -117,6 +122,11 @@ pub enum ReplicationMessage {
     WalEntry { lsn: u64, entry: WalEntryData },
     /// Follower -> Leader: confirm WAL entry was applied
     WalAck { follower_id: String, lsn: u64 },
+    /// Leader -> Follower: full graph snapshot (sent to new followers with LSN 0).
+    /// `data` is a JSON-serialized `Vec<WalEntryData>` that recreates the graph.
+    Snapshot { data: Vec<u8> },
+    /// Leader -> Follower: instruct the follower to promote itself to leader.
+    PromoteToLeader,
     /// Leader -> Follower: leader is shutting down
     Shutdown,
 }
@@ -200,6 +210,8 @@ pub struct LeaderReplicationManager {
     shutdown: Arc<AtomicBool>,
     /// Channel used to broadcast (lsn, entry) to all follower handler tasks
     wal_sender: broadcast::Sender<(u64, WalEntryData)>,
+    /// Optional graph reference for sending full snapshots to new followers.
+    graph: Option<Arc<RwLock<Graph>>>,
 }
 
 impl LeaderReplicationManager {
@@ -216,6 +228,20 @@ impl LeaderReplicationManager {
             followers: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             wal_sender,
+            graph: None,
+        }
+    }
+
+    /// Create a leader manager with a graph reference for initial snapshot sync.
+    pub fn with_graph(config: ReplicationConfig, graph: Arc<RwLock<Graph>>) -> Self {
+        let (wal_sender, _) = broadcast::channel(1024);
+        Self {
+            config,
+            lsn: Arc::new(AtomicU64::new(0)),
+            followers: Arc::new(RwLock::new(HashMap::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            wal_sender,
+            graph: Some(graph),
         }
     }
 
@@ -268,6 +294,7 @@ impl LeaderReplicationManager {
         let followers = Arc::clone(&self.followers);
         let shutdown = Arc::clone(&self.shutdown);
         let wal_sender = self.wal_sender.clone();
+        let graph = self.graph.clone();
 
         tokio::spawn(async move {
             loop {
@@ -284,10 +311,11 @@ impl LeaderReplicationManager {
                         let followers2 = Arc::clone(&followers);
                         let shutdown2 = Arc::clone(&shutdown);
                         let wal_rx = wal_sender.subscribe();
+                        let graph2 = graph.clone();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_follower_connection(
-                                socket, config2, lsn2, followers2, shutdown2, wal_rx,
+                                socket, config2, lsn2, followers2, shutdown2, wal_rx, graph2,
                             )
                             .await
                             {
@@ -309,6 +337,60 @@ impl LeaderReplicationManager {
     }
 }
 
+/// Serialize the current graph as a list of WAL entries suitable for snapshot sync.
+async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryData> {
+    let g = graph.read().await;
+    let mut entries = Vec::new();
+
+    for node in g.nodes() {
+        entries.push(WalEntryData::CreateNode {
+            node_id: node.id,
+            labels: node.labels.clone(),
+        });
+        for (key, val) in node.properties.iter() {
+            let value = match val {
+                PropertyValue::Null => "null".to_string(),
+                PropertyValue::Bool(b) => b.to_string(),
+                PropertyValue::Int(n) => n.to_string(),
+                PropertyValue::Float(n) => n.to_string(),
+                PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            };
+            entries.push(WalEntryData::SetProperty {
+                target_id: node.id,
+                is_node: true,
+                key: key.clone(),
+                value,
+            });
+        }
+    }
+
+    for edge in g.edges() {
+        entries.push(WalEntryData::CreateEdge {
+            edge_id: edge.id,
+            from: edge.from,
+            to: edge.to,
+            label: edge.label.clone(),
+        });
+        for (key, val) in edge.properties.iter() {
+            let value = match val {
+                PropertyValue::Null => "null".to_string(),
+                PropertyValue::Bool(b) => b.to_string(),
+                PropertyValue::Int(n) => n.to_string(),
+                PropertyValue::Float(n) => n.to_string(),
+                PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            };
+            entries.push(WalEntryData::SetProperty {
+                target_id: edge.id,
+                is_node: false,
+                key: key.clone(),
+                value,
+            });
+        }
+    }
+
+    entries
+}
+
 /// Handle a single follower connection on the leader side.
 async fn handle_follower_connection(
     mut socket: TcpStream,
@@ -317,13 +399,14 @@ async fn handle_follower_connection(
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
     shutdown: Arc<AtomicBool>,
     mut wal_rx: broadcast::Receiver<(u64, WalEntryData)>,
+    graph: Option<Arc<RwLock<Graph>>>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = socket.split();
 
     // ── Handshake ────────────────────────────────────────────────────────────
     let msg = recv_message(&mut reader).await?;
-    let follower_id = match msg {
-        ReplicationMessage::Handshake { follower_id } => follower_id,
+    let (follower_id, follower_lsn) = match msg {
+        ReplicationMessage::Handshake { follower_id, current_lsn } => (follower_id, current_lsn),
         other => {
             return Err(ReplicationError::ConnectionFailed(format!(
                 "Expected Handshake, got {:?}",
@@ -340,6 +423,15 @@ async fn handle_follower_connection(
     )
     .await?;
 
+    // If the follower has no data (LSN == 0), send a full snapshot.
+    if follower_lsn == 0 {
+        if let Some(ref g) = graph {
+            let entries = graph_to_snapshot_entries(g).await;
+            let data = serde_json::to_vec(&entries).unwrap_or_default();
+            send_message(&mut writer, &ReplicationMessage::Snapshot { data }).await?;
+        }
+    }
+
     // Register the follower.
     {
         let mut guard = followers.write().await;
@@ -347,7 +439,7 @@ async fn handle_follower_connection(
             follower_id.clone(),
             FollowerState {
                 follower_id: follower_id.clone(),
-                last_lsn: 0,
+                last_lsn: follower_lsn,
                 last_heartbeat: Instant::now(),
                 is_alive: true,
             },
@@ -450,6 +542,8 @@ pub struct FollowerReplicationManager {
     last_heartbeat: Arc<RwLock<Instant>>,
     /// Local graph to which WAL entries are applied
     graph: Arc<RwLock<Graph>>,
+    /// Set to `true` when a `PromoteToLeader` message is received.
+    is_promoted: Arc<AtomicBool>,
 }
 
 impl FollowerReplicationManager {
@@ -465,6 +559,7 @@ impl FollowerReplicationManager {
             is_leader_alive: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             graph: Arc::new(RwLock::new(Graph::new())),
+            is_promoted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -476,7 +571,13 @@ impl FollowerReplicationManager {
             is_leader_alive: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             graph,
+            is_promoted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Return `true` if this follower has been instructed to promote to leader.
+    pub fn is_promoted(&self) -> bool {
+        self.is_promoted.load(Ordering::SeqCst)
     }
 
     /// Return a reference to the shared graph held by this follower.
@@ -529,6 +630,7 @@ impl FollowerReplicationManager {
         let is_leader_alive = Arc::clone(&self.is_leader_alive);
         let last_heartbeat = Arc::clone(&self.last_heartbeat);
         let graph = Arc::clone(&self.graph);
+        let is_promoted = Arc::clone(&self.is_promoted);
 
         // ── Receive loop ─────────────────────────────────────────────────────
         tokio::spawn(async move {
@@ -539,6 +641,7 @@ impl FollowerReplicationManager {
                 is_leader_alive,
                 last_heartbeat,
                 graph,
+                is_promoted,
             )
             .await
             {
@@ -626,14 +729,17 @@ async fn run_follower_receive_loop(
     is_leader_alive: Arc<AtomicBool>,
     last_heartbeat: Arc<RwLock<Instant>>,
     graph: Arc<RwLock<Graph>>,
+    is_promoted: Arc<AtomicBool>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = stream.split();
 
     // ── Handshake ────────────────────────────────────────────────────────────
+    let my_lsn = current_lsn.load(Ordering::SeqCst);
     send_message(
         &mut writer,
         &ReplicationMessage::Handshake {
             follower_id: config.node_id.clone(),
+            current_lsn: my_lsn,
         },
     )
     .await?;
@@ -697,6 +803,30 @@ async fn run_follower_receive_loop(
                 }
             }
 
+            ReplicationMessage::Snapshot { data } => {
+                // Apply the full snapshot: deserialize as a list of WAL entries and apply each.
+                match serde_json::from_slice::<Vec<WalEntryData>>(&data) {
+                    Ok(entries) => {
+                        for entry in &entries {
+                            apply_wal_entry(&graph, entry).await;
+                        }
+                        // Advance LSN to the current leader LSN so future WAL entries
+                        // are applied correctly (snapshot is the baseline).
+                        *last_heartbeat.write().await = Instant::now();
+                    }
+                    Err(e) => {
+                        eprintln!("Snapshot deserialization error: {}", e);
+                    }
+                }
+            }
+
+            ReplicationMessage::PromoteToLeader => {
+                // Signal that this follower should become the new leader.
+                is_promoted.store(true, Ordering::SeqCst);
+                is_leader_alive.store(false, Ordering::SeqCst);
+                break;
+            }
+
             ReplicationMessage::Shutdown => {
                 is_leader_alive.store(false, Ordering::SeqCst);
                 break;
@@ -706,6 +836,23 @@ async fn run_follower_receive_loop(
             _ => {}
         }
     }
+
+    Ok(())
+}
+
+/// Send a `PromoteToLeader` message to a follower at the given replication address.
+///
+/// Used by the `admin promote-to-leader` CLI command.
+pub async fn send_promote_to_leader(addr: &str) -> Result<(), ReplicationError> {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .map_err(|e| ReplicationError::ConnectionFailed(e.to_string()))?;
+
+    let data = serde_json::to_vec(&ReplicationMessage::PromoteToLeader)?;
+    let len = data.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&data).await?;
+    stream.flush().await?;
 
     Ok(())
 }
@@ -779,6 +926,7 @@ mod tests {
         let messages = vec![
             ReplicationMessage::Handshake {
                 follower_id: "follower-1".to_string(),
+                current_lsn: 0,
             },
             ReplicationMessage::HandshakeAck {
                 leader_id: "leader-1".to_string(),
@@ -988,5 +1136,99 @@ mod tests {
         };
         let manager = FollowerReplicationManager::with_graph(config, Arc::clone(&shared_graph));
         assert!(Arc::ptr_eq(&manager.graph(), &shared_graph));
+    }
+
+    // 14. Verify handshake includes current_lsn in serialization
+    #[test]
+    fn test_handshake_with_lsn_serialization() {
+        let msg = ReplicationMessage::Handshake {
+            follower_id: "f1".to_string(),
+            current_lsn: 42,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ReplicationMessage = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json, json2);
+        assert!(json.contains("42"));
+    }
+
+    // 15. Verify backward-compat: Handshake without current_lsn defaults to 0
+    #[test]
+    fn test_handshake_backward_compat_default_lsn() {
+        let old_json = r#"{"Handshake":{"follower_id":"f1"}}"#;
+        let msg: ReplicationMessage = serde_json::from_str(old_json).unwrap();
+        match msg {
+            ReplicationMessage::Handshake { current_lsn, .. } => {
+                assert_eq!(current_lsn, 0);
+            }
+            _ => panic!("Expected Handshake"),
+        }
+    }
+
+    // 16. Verify Snapshot and PromoteToLeader message round-trip
+    #[test]
+    fn test_new_message_variants_serialize() {
+        let snapshot = ReplicationMessage::Snapshot {
+            data: b"hello".to_vec(),
+        };
+        let promote = ReplicationMessage::PromoteToLeader;
+
+        for msg in [snapshot, promote] {
+            let json = serde_json::to_string(&msg).unwrap();
+            let back: ReplicationMessage = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    // 17. Verify graph_to_snapshot_entries captures nodes and properties
+    #[tokio::test]
+    async fn test_graph_to_snapshot_entries() {
+        let graph = Arc::new(RwLock::new(Graph::new()));
+        {
+            let mut g = graph.write().await;
+            let id =
+                g.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
+            g.get_node_mut(id)
+                .unwrap()
+                .set_property("name", PropertyValue::String("Alice".to_string()));
+            let b = g.create_node_with_labels(vec!["City".to_string()]);
+            g.create_edge(id, b, "LIVES_IN").unwrap();
+        }
+
+        let entries = graph_to_snapshot_entries(&graph).await;
+        // Should have: 2 CreateNode + 1 SetProperty + 1 CreateEdge = 4
+        assert!(entries.len() >= 4);
+        let create_nodes = entries
+            .iter()
+            .filter(|e| matches!(e, WalEntryData::CreateNode { .. }))
+            .count();
+        assert_eq!(create_nodes, 2);
+        let create_edges = entries
+            .iter()
+            .filter(|e| matches!(e, WalEntryData::CreateEdge { .. }))
+            .count();
+        assert_eq!(create_edges, 1);
+    }
+
+    // 18. Verify FollowerReplicationManager.is_promoted() starts false
+    #[test]
+    fn test_follower_is_promoted_initial() {
+        let config = ReplicationConfig {
+            role: NodeRole::Follower,
+            ..ReplicationConfig::default()
+        };
+        let manager = FollowerReplicationManager::new(config);
+        assert!(!manager.is_promoted());
+    }
+
+    // 19. Verify LeaderReplicationManager::with_graph builds successfully
+    #[test]
+    fn test_leader_with_graph_constructor() {
+        let graph = Arc::new(RwLock::new(Graph::new()));
+        let config = ReplicationConfig::default();
+        let manager = LeaderReplicationManager::with_graph(config, graph);
+        assert!(manager.graph.is_some());
+        assert_eq!(manager.lsn.load(Ordering::SeqCst), 0);
     }
 }

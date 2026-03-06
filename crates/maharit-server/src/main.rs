@@ -20,6 +20,7 @@ fn main() {
             "server" => run_server(&args[2..]),
             "backup" => run_backup(&args[2..]),
             "restore" => run_restore(&args[2..]),
+            "admin" => run_admin(&args[2..]),
             "--help" | "help" => print_main_help(),
             _ => run_repl(),
         }
@@ -351,6 +352,65 @@ fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
+fn run_admin(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("Usage: maharit admin <SUBCOMMAND>");
+        eprintln!("  promote-to-leader --addr <ADDR>  Promote a follower to leader");
+        std::process::exit(1);
+    }
+
+    match args[0].as_str() {
+        "promote-to-leader" => run_admin_promote(&args[1..]),
+        "--help" | "help" => {
+            println!("MaharitDB Admin Commands");
+            println!();
+            println!("SUBCOMMANDS:");
+            println!("  promote-to-leader --addr <ADDR>  Send PromoteToLeader to a follower");
+        }
+        other => {
+            eprintln!("Unknown admin subcommand: {}", other);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_admin_promote(args: &[String]) {
+    let mut addr: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--addr" | "-a" => {
+                if i + 1 < args.len() {
+                    addr = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let addr = match addr {
+        Some(a) => a,
+        None => {
+            eprintln!("Error: --addr <ADDR> is required");
+            eprintln!("Usage: maharit admin promote-to-leader --addr <FOLLOWER_ADDR>");
+            std::process::exit(1);
+        }
+    };
+
+    use crate::replication::send_promote_to_leader;
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+    match rt.block_on(send_promote_to_leader(&addr)) {
+        Ok(()) => println!("PromoteToLeader sent to {}", addr),
+        Err(e) => {
+            eprintln!("Failed to send PromoteToLeader: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn print_main_help() {
     println!("MaharitDB - Graph Database");
     println!();
@@ -362,6 +422,7 @@ fn print_main_help() {
     println!("    server       Start TCP server");
     println!("    backup       Create a database backup");
     println!("    restore      Restore from a backup");
+    println!("    admin        Administrative operations (replication failover, etc.)");
     println!("    help         Print this help message");
 }
 
