@@ -7,13 +7,13 @@
 //! - Connection pool management
 //! - Graceful shutdown
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::Graph;
+use maharit_core::{Graph, NodeId};
 use maharit_query::{Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
+
+use crate::replication::{LeaderReplicationManager, WalEntryData};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -222,6 +224,9 @@ pub struct TcpServer {
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
+    /// Optional leader replication manager: when set, write operations are
+    /// automatically replicated to followers via WAL entries.
+    replication: Option<Arc<LeaderReplicationManager>>,
 }
 
 impl TcpServer {
@@ -233,6 +238,7 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
+            replication: None,
         }
     }
 
@@ -244,7 +250,16 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
+            replication: None,
         }
+    }
+
+    /// Attach a leader replication manager.  Once attached, every successful
+    /// write query automatically appends WAL entries to the manager, which
+    /// broadcasts them to all connected followers.
+    pub fn with_replication(mut self, manager: Arc<LeaderReplicationManager>) -> Self {
+        self.replication = Some(manager);
+        self
     }
 
     /// Start the server
@@ -284,6 +299,7 @@ impl TcpServer {
                     let shutdown = Arc::clone(&self.shutdown);
                     let tx_manager = Arc::clone(&self.tx_manager);
                     let config = self.config.clone();
+                    let replication = self.replication.clone();
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -294,6 +310,7 @@ impl TcpServer {
                             shutdown,
                             tx_manager,
                             config,
+                            replication,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -336,6 +353,7 @@ async fn handle_connection(
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
     config: ServerConfig,
+    replication: Option<Arc<LeaderReplicationManager>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
@@ -383,7 +401,7 @@ async fn handle_connection(
         let response = match request {
             Request::Query { query, tx_id: _ } => {
                 stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                execute_query(&graph, &query).await
+                execute_query(&graph, &query, replication.as_deref()).await
             }
             Request::StreamQuery {
                 query,
@@ -399,6 +417,7 @@ async fn handle_connection(
                     &query,
                     chunk_size,
                     config.write_timeout,
+                    replication.as_deref(),
                 )
                 .await
                 {
@@ -526,6 +545,7 @@ async fn execute_streaming_query(
     query: &str,
     chunk_size: usize,
     write_timeout: Duration,
+    replication: Option<&LeaderReplicationManager>,
 ) -> std::io::Result<()> {
     // Parse the query
     let stmt = match Parser::new(query) {
@@ -547,7 +567,18 @@ async fn execute_streaming_query(
     };
 
     // Log read-only classification (used for monitoring).
-    let _read_only = is_read_only(&stmt);
+    let is_write = !is_read_only(&stmt);
+
+    // Snapshot node/edge IDs before execution for WAL diff (only when needed).
+    let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
+        let g = graph.read().await;
+        (
+            g.nodes().map(|n| n.id).collect::<HashSet<NodeId>>(),
+            g.edges().map(|e| e.id).collect::<HashSet<u64>>(),
+        )
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
 
     // Execute the statement (exclusive write lock; see execute_query for TODO).
     let mut g = graph.write().await;
@@ -562,6 +593,14 @@ async fn execute_streaming_query(
             return send_response(socket, &response, write_timeout).await;
         }
     };
+
+    // Emit WAL entries for write operations before releasing the lock.
+    if is_write {
+        if let Some(repl) = replication {
+            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
+        }
+    }
+    drop(g);
 
     // Convert rows to HashMap format
     let all_rows: Vec<HashMap<String, String>> = result
@@ -620,7 +659,11 @@ async fn execute_streaming_query(
 /// the `Executor` API requires `&mut Graph`. The lock-type split is in place so
 /// that a future refactoring of `Executor` to accept `&Graph` for read-only
 /// statements can adopt `graph.read()` without touching this call site.
-async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
+async fn execute_query(
+    graph: &Arc<RwLock<Graph>>,
+    query: &str,
+    replication: Option<&LeaderReplicationManager>,
+) -> Response {
     // Parse the query first so we can inspect the AST before locking.
     let stmt = match Parser::new(query) {
         Ok(mut parser) => match parser.parse() {
@@ -638,15 +681,36 @@ async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
         }
     };
 
-    // Log whether this is a read-only query (useful for monitoring / future optimisation).
-    let _read_only = is_read_only(&stmt);
+    // Detect write queries for WAL diff tracking.
+    let is_write = !is_read_only(&stmt);
+
+    // Snapshot node/edge IDs before execution for WAL diff (only when needed).
+    let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
+        let g = graph.read().await;
+        (
+            g.nodes().map(|n| n.id).collect::<HashSet<NodeId>>(),
+            g.edges().map(|e| e.id).collect::<HashSet<u64>>(),
+        )
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
 
     // Acquire an exclusive write lock and execute.
-    // TODO: once Executor supports &Graph, use graph.read() when _read_only is true.
+    // TODO: once Executor supports &Graph, use graph.read() when is_write is false.
     let mut g = graph.write().await;
     let mut executor = Executor::new(&mut g);
 
-    match executor.execute(stmt) {
+    let exec_result = executor.execute(stmt);
+
+    // Emit WAL entries for write operations before releasing the lock.
+    if is_write {
+        if let (Ok(_), Some(repl)) = (&exec_result, replication) {
+            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
+        }
+    }
+    drop(g);
+
+    match exec_result {
         Ok(result) => {
             let rows: Vec<HashMap<String, String>> = result
                 .rows
@@ -666,6 +730,64 @@ async fn execute_query(graph: &Arc<RwLock<Graph>>, query: &str) -> Response {
         Err(e) => Response::Error {
             message: format!("Execution error: {}", e),
         },
+    }
+}
+
+/// Compute a diff of node/edge sets before vs after a write operation and emit
+/// corresponding WAL entries to the replication manager.
+///
+/// Detects:
+/// - New nodes (created): emits `WalEntryData::CreateNode`
+/// - Deleted nodes: emits `WalEntryData::DeleteNode`
+/// - New edges (created): emits `WalEntryData::CreateEdge`
+/// - Deleted edges: emits `WalEntryData::DeleteEdge`
+///
+/// Property changes are not tracked automatically (a future improvement could
+/// compare property maps before and after).
+async fn emit_wal_diff(
+    graph: &Graph,
+    node_ids_before: &HashSet<NodeId>,
+    edge_ids_before: &HashSet<u64>,
+    replication: &LeaderReplicationManager,
+) {
+    // Detect new and deleted nodes.
+    for node in graph.nodes() {
+        if !node_ids_before.contains(&node.id) {
+            replication
+                .append_wal_entry(WalEntryData::CreateNode {
+                    node_id: node.id,
+                    labels: node.labels.clone(),
+                })
+                .await;
+        }
+    }
+    for &old_id in node_ids_before {
+        if graph.get_node(old_id).is_none() {
+            replication
+                .append_wal_entry(WalEntryData::DeleteNode { node_id: old_id })
+                .await;
+        }
+    }
+
+    // Detect new and deleted edges.
+    for edge in graph.edges() {
+        if !edge_ids_before.contains(&edge.id) {
+            replication
+                .append_wal_entry(WalEntryData::CreateEdge {
+                    edge_id: edge.id,
+                    from: edge.from,
+                    to: edge.to,
+                    label: edge.label.clone(),
+                })
+                .await;
+        }
+    }
+    for &old_id in edge_ids_before {
+        if graph.get_edge(old_id).is_none() {
+            replication
+                .append_wal_entry(WalEntryData::DeleteEdge { edge_id: old_id })
+                .await;
+        }
     }
 }
 
@@ -895,5 +1017,52 @@ mod tests {
         assert_eq!(stats.next_stream_id(), 0);
         assert_eq!(stats.next_stream_id(), 1);
         assert_eq!(stats.next_stream_id(), 2);
+    }
+
+    // ── Replication integration ──────────────────────────────────────────────
+
+    #[test]
+    fn test_tcp_server_with_replication_builder() {
+        use crate::replication::{LeaderReplicationManager, ReplicationConfig};
+
+        let config = ReplicationConfig::default();
+        let repl = Arc::new(LeaderReplicationManager::new(config));
+        let server = TcpServer::new(ServerConfig::default()).with_replication(Arc::clone(&repl));
+        assert!(server.replication.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_emit_wal_diff_create_node() {
+        use crate::replication::{LeaderReplicationManager, ReplicationConfig};
+
+        let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
+        let mut graph = Graph::new();
+        let empty_nodes: HashSet<NodeId> = HashSet::new();
+        let empty_edges: HashSet<u64> = HashSet::new();
+
+        graph.create_node_with_labels(vec!["Person".to_string()]);
+
+        emit_wal_diff(&graph, &empty_nodes, &empty_edges, &repl).await;
+
+        // WAL LSN should be 1 after one CreateNode entry.
+        assert_eq!(repl.get_stats().current_lsn, 1);
+    }
+
+    #[tokio::test]
+    async fn test_emit_wal_diff_delete_node() {
+        use crate::replication::{LeaderReplicationManager, ReplicationConfig};
+
+        let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
+        let mut graph = Graph::new();
+
+        // Simulate: node 0 existed before but no longer does.
+        let before_nodes: HashSet<NodeId> = [0].iter().copied().collect();
+        let empty_edges: HashSet<u64> = HashSet::new();
+
+        emit_wal_diff(&graph, &before_nodes, &empty_edges, &repl).await;
+
+        // One DeleteNode entry should have been emitted.
+        assert_eq!(repl.get_stats().current_lsn, 1);
+        drop(graph);
     }
 }
