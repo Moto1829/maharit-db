@@ -22,6 +22,7 @@
 - [述語関数](./functions/predicates.md)
 - [集計関数](./functions/aggregation.md)
 - [全文検索関数](./functions/fulltext.md)
+- [テンポラル型関数](./functions/temporal.md)
 
 # インデックス・制約
 
