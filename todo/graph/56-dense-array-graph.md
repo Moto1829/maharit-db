@@ -23,12 +23,12 @@ NodeId / EdgeId は単調増加する整数であるため HashMap は不要。
 
 ## 実装内容
 
-- [ ] `nodes: HashMap<NodeId, Node>` → `nodes: Vec<Option<Node>>` に変更
-- [ ] `edges: HashMap<EdgeId, Edge>` → `edges: Vec<Option<Edge>>` に変更
-- [ ] `outgoing_edges` / `incoming_edges` も `Vec<Vec<EdgeId>>` に変更
-- [ ] 削除済みスロットを再利用するフリーリスト（`Vec<NodeId>`）を追加
-- [ ] `Graph::nodes()` / `edges()` イテレータで `None` スロットをスキップ
-- [ ] 既存の全テスト・全クレートが通ることを確認
+- [x] `nodes: HashMap<NodeId, Node>` → `nodes: Vec<Option<Node>>` に変更
+- [x] `edges: HashMap<EdgeId, Edge>` → `edges: Vec<Option<Edge>>` に変更
+- [x] `outgoing_edges` / `incoming_edges` も `Vec<Vec<EdgeId>>` に変更
+- [x] 削除済みスロットを再利用するフリーリスト（`Vec<NodeId>`）を追加
+- [x] `Graph::nodes()` / `edges()` イテレータで `None` スロットをスキップ
+- [x] 既存の全テスト・全クレートが通ることを確認
 
 ## 期待効果
 

@@ -1,6 +1,6 @@
 # インデックス: ラベル文字列の不要なクローンを削減
 
-**Status**: Completed
+**Status**: In Progress
 
 ## 概要
 
@@ -36,15 +36,15 @@ pub fn add_node_labels(&mut self, node_id: NodeId, labels: &[&str]) {
 
 ## 実装内容
 
-- [ ] `node_to_labels: HashMap<NodeId, Vec<String>>` →
+- [x] `node_to_labels: HashMap<NodeId, Vec<String>>` →
   `HashMap<NodeId, HashSet<String>>` に変更して重複チェックを O(1) に
 - [ ] `entry(label.clone())` を `entry_ref()` または
   `.raw_entry_mut()` で回避（クローンなしの挿入）
-- [ ] `get_nodes_by_label()` の戻り値を
+- [x] `get_nodes_by_label()` の戻り値を
   `impl Iterator<Item = NodeId> + '_` に変更（毎回の Vec 作成を廃止）
 - [ ] `delete_node()` 時の `incoming.retain(|&e| e != edge_id)` を
   `HashSet` で O(1) 削除に変更（`graph.rs` の隣接リスト）
-- [ ] 既存インデックステストが全て通ること
+- [x] 既存インデックステストが全て通ること
 
 ## 期待効果
 

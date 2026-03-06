@@ -31,15 +31,15 @@ fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, &'a Edge)> {
 
 ## 実装内容
 
-- [ ] `get_outgoing_edges()` の戻り値を `impl Iterator<Item = &Edge> + '_` に変更
-- [ ] `get_incoming_edges()` も同様に変更
-- [ ] `Traverser::get_neighbors()` をイテレータチェーンで実装
+- [x] `get_outgoing_edges()` の戻り値を `impl Iterator<Item = &Edge> + '_` に変更
+- [x] `get_incoming_edges()` も同様に変更
+- [x] `Traverser::get_neighbors()` をイテレータチェーンで実装
   （`Vec` 作成をなくし、フィルタリング後の要素を直接スタック/キューに push）
-- [ ] `all_paths_dfs()` で発見パス追加時の `current_path.clone()` を最小化
+- [x] `all_paths_dfs()` で発見パス追加時の `current_path.clone()` を最小化
   （パス長が確定するまで参照のみ保持し、結果追加時のみコピー）
-- [ ] Dijkstra の `distances` / `previous` を `FxHashMap` または
+- [x] Dijkstra の `distances` / `previous` を `FxHashMap` または
   `Vec<Option<f64>>` に変更（稠密 ID を前提）
-- [ ] 既存の traversal テストが全て通ること
+- [x] 既存の traversal テストが全て通ること
 
 ## 期待効果
 
