@@ -81,26 +81,30 @@ impl<'a> Traversal<'a> {
         DfsIterator::new(self)
     }
 
-    fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, &'a Edge)> {
-        let mut neighbors = Vec::new();
+    /// Push filtered neighbors of `node_id` directly into the provided `push` closure.
+    /// Avoids allocating a Vec by inlining the edge traversal and filter logic.
+    fn push_neighbors<F>(&self, node_id: NodeId, mut push: F)
+    where
+        F: FnMut(NodeId),
+    {
+        let graph = &self.graph;
+        let edge_filter = &self.edge_filter;
 
         if self.direction == Direction::Outgoing || self.direction == Direction::Both {
-            for edge in self.graph.get_outgoing_edges(node_id) {
-                if self.edge_filter.as_ref().is_none_or(|f| f(edge)) {
-                    neighbors.push((edge.to, edge));
+            for edge in graph.get_outgoing_edges(node_id) {
+                if edge_filter.as_ref().is_none_or(|f| f(edge)) {
+                    push(edge.to);
                 }
             }
         }
 
         if self.direction == Direction::Incoming || self.direction == Direction::Both {
-            for edge in self.graph.get_incoming_edges(node_id) {
-                if self.edge_filter.as_ref().is_none_or(|f| f(edge)) {
-                    neighbors.push((edge.from, edge));
+            for edge in graph.get_incoming_edges(node_id) {
+                if edge_filter.as_ref().is_none_or(|f| f(edge)) {
+                    push(edge.from);
                 }
             }
         }
-
-        neighbors
     }
 
     fn should_visit_node(&self, node: &Node) -> bool {
@@ -152,14 +156,14 @@ impl<'a> Iterator for BfsIterator<'a> {
                 continue;
             }
 
-            // 隣接ノードをキューに追加
+            // 隣接ノードをキューに追加（Vec アロケーションなし）
             if self.traversal.max_depth.is_none_or(|max| depth < max) {
-                for (neighbor_id, _edge) in self.traversal.get_neighbors(node_id) {
+                self.traversal.push_neighbors(node_id, |neighbor_id| {
                     if !self.visited.contains(&neighbor_id) {
                         self.visited.insert(neighbor_id);
                         self.queue.push_back((neighbor_id, depth + 1));
                     }
-                }
+                });
             }
 
             return Some((node_id, depth));
@@ -213,14 +217,14 @@ impl<'a> Iterator for DfsIterator<'a> {
                 continue;
             }
 
-            // 隣接ノードをスタックに追加
+            // 隣接ノードをスタックに追加（Vec アロケーションなし）
             if self.traversal.max_depth.is_none_or(|max| depth < max) {
-                for (neighbor_id, _edge) in self.traversal.get_neighbors(node_id) {
+                self.traversal.push_neighbors(node_id, |neighbor_id| {
                     if !self.visited.contains(&neighbor_id) {
                         self.visited.insert(neighbor_id);
                         self.stack.push((neighbor_id, depth + 1));
                     }
-                }
+                });
             }
 
             return Some((node_id, depth));
@@ -619,20 +623,24 @@ impl<'a> Dijkstra<'a> {
     }
 
     /// 単一始点から全ノードへの最短距離
+    ///
+    /// 内部で稠密 Vec を使い、ハッシュ計算を排除する。
     pub fn distances_from(&self, from: NodeId) -> HashMap<NodeId, f64> {
-        let mut distances: HashMap<NodeId, f64> = HashMap::new();
+        let n = self.graph.node_capacity();
+        let mut dist_vec = vec![f64::INFINITY; n];
         let mut heap = BinaryHeap::new();
 
-        distances.insert(from, 0.0);
+        if (from as usize) < n {
+            dist_vec[from as usize] = 0.0;
+        }
         heap.push(DijkstraEntry {
             node: from,
             distance: 0.0,
         });
 
         while let Some(DijkstraEntry { node, distance }) = heap.pop() {
-            if let Some(&d) = distances.get(&node)
-                && distance > d
-            {
+            let node_idx = node as usize;
+            if node_idx >= n || distance > dist_vec[node_idx] {
                 continue;
             }
 
@@ -640,9 +648,10 @@ impl<'a> Dijkstra<'a> {
                 let weight = (self.weight_fn)(edge);
                 let next_distance = distance + weight;
                 let neighbor = edge.to;
+                let neighbor_idx = neighbor as usize;
 
-                if !distances.contains_key(&neighbor) || next_distance < distances[&neighbor] {
-                    distances.insert(neighbor, next_distance);
+                if neighbor_idx < n && next_distance < dist_vec[neighbor_idx] {
+                    dist_vec[neighbor_idx] = next_distance;
                     heap.push(DijkstraEntry {
                         node: neighbor,
                         distance: next_distance,
@@ -651,7 +660,15 @@ impl<'a> Dijkstra<'a> {
             }
         }
 
-        distances
+        // Collect finite distances into HashMap for the public API
+        self.graph
+            .nodes()
+            .map(|n| n.id)
+            .filter_map(|id| {
+                let d = dist_vec[id as usize];
+                if d.is_finite() { Some((id, d)) } else { None }
+            })
+            .collect()
     }
 
     fn reconstruct_path(

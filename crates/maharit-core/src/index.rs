@@ -177,12 +177,12 @@ impl LabelIndex {
         }
     }
 
-    /// ラベル（タイプ）でエッジを検索
-    pub fn get_edges_by_type(&self, edge_type: &str) -> Vec<EdgeId> {
+    /// ラベル（タイプ）でエッジをイテレートする（Vec アロケーションなし）
+    pub fn get_edges_by_type(&self, edge_type: &str) -> impl Iterator<Item = EdgeId> + '_ {
         self.edge_labels
             .get(edge_type)
-            .map(|edges| edges.iter().copied().collect())
-            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|edges| edges.iter().copied())
     }
 
     /// ラベルを持つエッジ数をカウント
@@ -268,12 +268,12 @@ mod tests {
         index.add_edge(1, "KNOWS");
         index.add_edge(2, "WORKS_AT");
 
-        let knows = index.get_edges_by_type("KNOWS");
+        let knows: Vec<EdgeId> = index.get_edges_by_type("KNOWS").collect();
         assert_eq!(knows.len(), 2);
         assert!(knows.contains(&0));
         assert!(knows.contains(&1));
 
-        let works_at = index.get_edges_by_type("WORKS_AT");
+        let works_at: Vec<EdgeId> = index.get_edges_by_type("WORKS_AT").collect();
         assert_eq!(works_at.len(), 1);
         assert!(works_at.contains(&2));
     }

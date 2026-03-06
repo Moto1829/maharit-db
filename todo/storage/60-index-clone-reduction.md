@@ -1,5 +1,7 @@
 # インデックス: ラベル文字列の不要なクローンを削減
 
+**Status**: Completed
+
 ## 概要
 
 `LabelIndex::add_node_labels()` でラベル文字列が3回以上クローンされており、
