@@ -1725,11 +1725,47 @@ impl<'a> Executor<'a> {
     // ========== MATCH ==========
 
     fn execute_match(&mut self, m: MatchStatement) -> Result<ResultSet, ExecuteError> {
-        // Process each segment
+        // Detect an early-termination limit: applicable only when there is no ORDER BY
+        // and no aggregation, since both require collecting all rows before outputting.
+        let has_aggregation = m
+            .return_clause
+            .items
+            .iter()
+            .any(|item| matches!(item, ReturnItem::Aggregate(_)));
+
+        let early_limit: Option<usize> =
+            if !has_aggregation && m.return_clause.order_by.is_none() {
+                m.return_clause
+                    .limit
+                    .as_ref()
+                    .and_then(|e| self.resolve_skip_limit(e).ok())
+                    .map(|n| {
+                        // Include SKIP in the early cutoff so ORDER-agnostic queries
+                        // still yield the correct slice.
+                        let skip = m
+                            .return_clause
+                            .skip
+                            .as_ref()
+                            .and_then(|e| self.resolve_skip_limit(e).ok())
+                            .unwrap_or(0) as usize;
+                        n as usize + skip
+                    })
+            } else {
+                None
+            };
+
+        // Process each segment, applying the early cutoff after each one.
         let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
 
         for segment in &m.segments {
             all_bindings = self.execute_query_segment(segment, all_bindings)?;
+
+            if let Some(limit) = early_limit {
+                if all_bindings.len() >= limit {
+                    all_bindings.truncate(limit);
+                    break;
+                }
+            }
         }
 
         // Execute CALL subquery if present
@@ -2047,12 +2083,17 @@ impl<'a> Executor<'a> {
 
             Ok(result)
         } else {
-            // Regular MATCH: filter out non-matches
-            let mut matches = current_bindings;
-            for pattern in &clause.patterns {
-                matches = self.match_pattern(pattern, matches)?;
+            // Regular MATCH: process each input binding lazily through all patterns.
+            // Processing one binding at a time reduces peak memory for multi-pattern
+            // queries, since the intermediate expansion of one binding is discarded
+            // before the next input binding is processed. This avoids the O(M^N) peak
+            // that would occur if we fully expanded all bindings after each pattern step.
+            let mut result = Vec::new();
+            for b in current_bindings {
+                let expanded = self.match_patterns_for_binding(&clause.patterns, b)?;
+                result.extend(expanded);
             }
-            Ok(matches)
+            Ok(result)
         }
     }
 
@@ -2065,6 +2106,27 @@ impl<'a> Executor<'a> {
             Pattern::Node(node_pattern) => self.match_node_pattern(node_pattern, current_bindings),
             Pattern::Path(path_pattern) => self.match_path_pattern(path_pattern, current_bindings),
         }
+    }
+
+    /// Chains a single binding through multiple patterns lazily.
+    ///
+    /// Unlike [`match_pattern`] (which processes all input bindings as a batch),
+    /// this method threads one input binding through each pattern in sequence and
+    /// short-circuits as soon as any pattern produces zero matches, avoiding
+    /// unnecessary work and reducing peak memory usage for multi-pattern queries.
+    fn match_patterns_for_binding(
+        &self,
+        patterns: &[Pattern],
+        initial: Bindings,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        let mut matches = vec![initial];
+        for pattern in patterns {
+            if matches.is_empty() {
+                break;
+            }
+            matches = self.match_pattern(pattern, matches)?;
+        }
+        Ok(matches)
     }
 
     fn match_node_pattern(
@@ -10016,5 +10078,69 @@ mod tests {
             result.rows[0].columns[0],
             Value::String("Alice".to_string())
         );
+    }
+
+    // ========== Lazy binding (task 59) ==========
+
+    #[test]
+    fn test_lazy_binding_limit_early_termination() {
+        // Verify that LIMIT N without ORDER BY terminates early:
+        // only N rows should be returned even if more exist.
+        let mut graph = Graph::new();
+        for i in 0..10 {
+            let id = graph.create_node("Item");
+            graph
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("n", PropertyValue::Int(i));
+        }
+
+        let result = execute(&mut graph, "MATCH (n:Item) RETURN n.n LIMIT 3").unwrap();
+        assert_eq!(result.row_count(), 3);
+    }
+
+    #[test]
+    fn test_lazy_binding_multi_pattern_correctness() {
+        // Multi-pattern MATCH should return correct results with lazy per-binding expansion.
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("v", PropertyValue::Int(1));
+        let b = graph.create_node("B");
+        graph
+            .get_node_mut(b)
+            .unwrap()
+            .set_property("v", PropertyValue::Int(2));
+        graph.create_edge(a, b, "TO").unwrap();
+
+        // Two patterns: node pattern + path pattern
+        let result = execute(
+            &mut graph,
+            "MATCH (a:A), (a)-[:TO]->(b:B) RETURN a.v, b.v",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));
+    }
+
+    #[test]
+    fn test_lazy_binding_limit_with_aggregation_unchanged() {
+        // Aggregation must still collect all rows (no early cutoff).
+        let mut graph = Graph::new();
+        for i in 0..5 {
+            let id = graph.create_node("N");
+            graph
+                .get_node_mut(id)
+                .unwrap()
+                .set_property("v", PropertyValue::Int(i));
+        }
+
+        let result = execute(&mut graph, "MATCH (n:N) RETURN count(n) LIMIT 1").unwrap();
+        // count must be 5, not 1 (limit does not truncate before aggregation)
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(5));
     }
 }
