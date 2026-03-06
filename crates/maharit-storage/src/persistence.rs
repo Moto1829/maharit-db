@@ -4,18 +4,57 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use maharit_core::{Graph, IndexDefinition, PropertyIndex, PropertyValue};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
-/// フォーマットバージョン（v3: ラベルを Vec<String> として保存）
-const VERSION: u32 = 3;
+/// フォーマットバージョン（v4: bincode シリアライズ）
+const VERSION: u32 = 4;
+/// v3: ラベルを Vec<String> として保存
+const VERSION_V3: u32 = 3;
 /// v2: インデックスセクション追加
 const VERSION_V2: u32 = 2;
 /// 後方互換性のため v1 も読み込み可能にする
 const VERSION_V1: u32 = 1;
 /// BufWriter バッファサイズ（4MB）
 const BUF_CAPACITY: usize = 4 * 1024 * 1024;
+
+// ==================== Bincode-serializable snapshot types ====================
+
+/// ノードの bincode シリアライズ用表現
+#[derive(Serialize, Deserialize)]
+struct SNode {
+    id: u64,
+    labels: Vec<String>,
+    properties: HashMap<String, PropertyValue>,
+}
+
+/// エッジの bincode シリアライズ用表現
+#[derive(Serialize, Deserialize)]
+struct SEdge {
+    id: u64,
+    label: String,
+    from: u64,
+    to: u64,
+    properties: HashMap<String, PropertyValue>,
+}
+
+/// インデックス定義の bincode シリアライズ用表現
+#[derive(Serialize, Deserialize)]
+struct SIndex {
+    label: String,
+    property: String,
+    unique: bool,
+}
+
+/// スナップショット全体
+#[derive(Serialize, Deserialize)]
+struct SSnapshot {
+    nodes: Vec<SNode>,
+    edges: Vec<SEdge>,
+    indexes: Vec<SIndex>,
+}
 
 /// 永続化エラー
 #[derive(Debug, Error)]
@@ -48,44 +87,59 @@ impl PersistentStorage {
         Self::save_with_index(graph, &empty_index, path)
     }
 
-    /// グラフとプロパティインデックスをファイルに保存
+    /// グラフとプロパティインデックスをファイルに保存（bincode v4 フォーマット）
     pub fn save_with_index(
         graph: &Graph,
         index: &PropertyIndex,
         path: impl AsRef<Path>,
     ) -> Result<()> {
+        // Build serializable snapshot
+        let nodes: Vec<SNode> = graph
+            .nodes()
+            .map(|n| SNode {
+                id: n.id,
+                labels: n.labels.clone(),
+                properties: n.properties.as_ref().clone(),
+            })
+            .collect();
+
+        let edges: Vec<SEdge> = graph
+            .edges()
+            .map(|e| SEdge {
+                id: e.id,
+                label: e.label.clone(),
+                from: e.from,
+                to: e.to,
+                properties: e.properties.as_ref().clone(),
+            })
+            .collect();
+
+        let indexes: Vec<SIndex> = index
+            .list_indexes()
+            .into_iter()
+            .map(|def| SIndex {
+                label: def.label.clone(),
+                property: def.property.clone(),
+                unique: def.unique,
+            })
+            .collect();
+
+        let snapshot = SSnapshot { nodes, edges, indexes };
+
+        let encoded = bincode::serialize(&snapshot)
+            .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
+
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
 
-        // ヘッダー
+        // Header: magic + version
         writer.write_all(MAGIC)?;
         writer.write_all(&VERSION.to_le_bytes())?;
 
-        // ノード数とエッジ数
-        let node_count = graph.node_count() as u64;
-        let edge_count = graph.edge_count() as u64;
-        writer.write_all(&node_count.to_le_bytes())?;
-        writer.write_all(&edge_count.to_le_bytes())?;
-
-        // ノードを書き込み
-        for node in graph.nodes() {
-            Self::write_u64(&mut writer, node.id)?;
-            // v3: ラベルを個別に保存（count + each string）
-            Self::write_label_list(&mut writer, &node.labels)?;
-            Self::write_properties(&mut writer, &node.properties)?;
-        }
-
-        // エッジを書き込み
-        for edge in graph.edges() {
-            Self::write_u64(&mut writer, edge.id)?;
-            Self::write_u64(&mut writer, edge.from)?;
-            Self::write_u64(&mut writer, edge.to)?;
-            Self::write_string(&mut writer, &edge.label)?;
-            Self::write_properties(&mut writer, &edge.properties)?;
-        }
-
-        // インデックスセクションを書き込み
-        Self::write_index_section(&mut writer, index)?;
+        // Length-prefixed bincode payload
+        let payload_len = encoded.len() as u64;
+        writer.write_all(&payload_len.to_le_bytes())?;
+        writer.write_all(&encoded)?;
 
         writer.flush()?;
         Ok(())
@@ -111,10 +165,17 @@ impl PersistentStorage {
 
         // バージョンを確認
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION && version != VERSION_V2 && version != VERSION_V1 {
+
+        if version == VERSION {
+            // v4: bincode format
+            return Self::load_bincode(reader);
+        }
+
+        if version != VERSION_V3 && version != VERSION_V2 && version != VERSION_V1 {
             return Err(PersistenceError::UnsupportedVersion(version));
         }
 
+        // Legacy v1/v2/v3 loading
         // ノード数とエッジ数
         let node_count = Self::read_u64(&mut reader)?;
         let edge_count = Self::read_u64(&mut reader)?;
@@ -126,7 +187,7 @@ impl PersistentStorage {
         for _ in 0..node_count {
             let old_id = Self::read_u64(&mut reader)?;
             // v3: ラベルを個別に読み込み。v1/v2: コロン区切り文字列を分割
-            let labels: Vec<String> = if version >= VERSION {
+            let labels: Vec<String> = if version >= VERSION_V3 {
                 Self::read_label_list(&mut reader)?
             } else {
                 let labels_str = Self::read_string(&mut reader)?;
@@ -182,22 +243,61 @@ impl PersistentStorage {
         Ok((graph, index))
     }
 
-    // ========== Index section ==========
+    /// v4 (bincode) フォーマットからグラフとインデックスを読み込む
+    fn load_bincode<R: Read>(mut reader: R) -> Result<(Graph, PropertyIndex)> {
+        // Read length-prefixed payload
+        let mut len_bytes = [0u8; 8];
+        reader.read_exact(&mut len_bytes)?;
+        let payload_len = u64::from_le_bytes(len_bytes) as usize;
 
-    fn write_index_section<W: Write>(writer: &mut W, index: &PropertyIndex) -> Result<()> {
-        let definitions = index.list_indexes();
-        let count = definitions.len() as u32;
-        writer.write_all(&count.to_le_bytes())?;
+        let mut encoded = vec![0u8; payload_len];
+        reader.read_exact(&mut encoded)?;
 
-        for def in definitions {
-            Self::write_string(writer, &def.label)?;
-            Self::write_string(writer, &def.property)?;
-            // unique フラグを保存
-            writer.write_all(&[if def.unique { 1u8 } else { 0u8 }])?;
+        let snapshot: SSnapshot = bincode::deserialize(&encoded)
+            .map_err(|e| PersistenceError::CorruptedData(format!("bincode deserialize: {}", e)))?;
+
+        let mut graph = Graph::new();
+        let mut id_map: HashMap<u64, u64> = HashMap::new();
+
+        for snode in snapshot.nodes {
+            let new_id = graph.create_node_with_labels(snode.labels);
+            id_map.insert(snode.id, new_id);
+            if let Some(node) = graph.get_node_mut(new_id) {
+                for (k, v) in snode.properties {
+                    node.set_property(k, v);
+                }
+            }
         }
 
-        Ok(())
+        for sedge in snapshot.edges {
+            let from = *id_map.get(&sedge.from).ok_or_else(|| {
+                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.from))
+            })?;
+            let to = *id_map.get(&sedge.to).ok_or_else(|| {
+                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.to))
+            })?;
+            let edge_id = graph.create_edge(from, to, &sedge.label)?;
+            if let Some(edge) = graph.get_edge_mut(edge_id) {
+                for (k, v) in sedge.properties {
+                    edge.set_property(k, v);
+                }
+            }
+        }
+
+        let mut index = PropertyIndex::new();
+        for si in snapshot.indexes {
+            let def = if si.unique {
+                IndexDefinition::unique(si.label, si.property)
+            } else {
+                IndexDefinition::new(si.label, si.property)
+            };
+            index.create_index(def);
+        }
+
+        Ok((graph, index))
     }
+
+    // ========== Index section (used for legacy v1/v2/v3 reading) ==========
 
     fn read_index_section<R: Read>(reader: &mut R) -> Result<PropertyIndex> {
         let count = Self::read_u32(reader)? as usize;
@@ -221,84 +321,7 @@ impl PersistentStorage {
         Ok(index)
     }
 
-    // ========== Writer helpers ==========
-
-    fn write_u64<W: Write>(writer: &mut W, value: u64) -> Result<()> {
-        writer.write_all(&value.to_le_bytes())?;
-        Ok(())
-    }
-
-    fn write_label_list<W: Write>(writer: &mut W, labels: &[String]) -> Result<()> {
-        writer.write_all(&(labels.len() as u32).to_le_bytes())?;
-        for label in labels {
-            Self::write_string(writer, label)?;
-        }
-        Ok(())
-    }
-
-    fn write_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
-        let bytes = s.as_bytes();
-        let len = bytes.len() as u32;
-        writer.write_all(&len.to_le_bytes())?;
-        writer.write_all(bytes)?;
-        Ok(())
-    }
-
-    fn write_properties<W: Write>(
-        writer: &mut W,
-        props: &HashMap<String, PropertyValue>,
-    ) -> Result<()> {
-        let count = props.len() as u32;
-        writer.write_all(&count.to_le_bytes())?;
-
-        for (key, value) in props {
-            Self::write_string(writer, key)?;
-            Self::write_property_value(writer, value)?;
-        }
-
-        Ok(())
-    }
-
-    fn write_property_value<W: Write>(writer: &mut W, value: &PropertyValue) -> Result<()> {
-        match value {
-            PropertyValue::Null => {
-                writer.write_all(&[0u8])?;
-            }
-            PropertyValue::Bool(b) => {
-                writer.write_all(&[1u8])?;
-                writer.write_all(&[if *b { 1 } else { 0 }])?;
-            }
-            PropertyValue::Int(n) => {
-                writer.write_all(&[2u8])?;
-                writer.write_all(&n.to_le_bytes())?;
-            }
-            PropertyValue::Float(n) => {
-                writer.write_all(&[3u8])?;
-                writer.write_all(&n.to_le_bytes())?;
-            }
-            PropertyValue::String(s) => {
-                writer.write_all(&[4u8])?;
-                Self::write_string(writer, s)?;
-            }
-            PropertyValue::Date(d) => {
-                writer.write_all(&[5u8])?;
-                writer.write_all(&d.to_le_bytes())?;
-            }
-            PropertyValue::DateTime(ms) => {
-                writer.write_all(&[6u8])?;
-                writer.write_all(&ms.to_le_bytes())?;
-            }
-            PropertyValue::Duration { months, days, millis } => {
-                writer.write_all(&[7u8])?;
-                writer.write_all(&months.to_le_bytes())?;
-                writer.write_all(&days.to_le_bytes())?;
-                writer.write_all(&millis.to_le_bytes())?;
-            }
-        }
-        Ok(())
-    }
-
-    // ========== Reader helpers ==========
+    // ========== Reader helpers (used for legacy v1/v2/v3 loading) ==========
 
     fn read_label_list<R: Read>(reader: &mut R) -> Result<Vec<String>> {
         let count = Self::read_u32(reader)? as usize;

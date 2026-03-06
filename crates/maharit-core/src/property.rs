@@ -1,7 +1,9 @@
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Serialize};
+
 /// プロパティの値を表す列挙型
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PropertyValue {
     Null,
     Bool(bool),
