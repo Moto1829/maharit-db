@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use maharit_core::{Graph, PropertyValue};
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -74,8 +76,8 @@ impl Default for ReplicationConfig {
 /// WAL (Write-Ahead Log) entry payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntryData {
-    /// A node was created
-    CreateNode { node_id: u64, label: String },
+    /// A node was created (supports multiple labels)
+    CreateNode { node_id: u64, labels: Vec<String> },
     /// A node was deleted
     DeleteNode { node_id: u64 },
     /// An edge was created
@@ -446,6 +448,8 @@ pub struct FollowerReplicationManager {
     is_leader_alive: Arc<AtomicBool>,
     /// Timestamp of the most recent heartbeat (or connection time)
     last_heartbeat: Arc<RwLock<Instant>>,
+    /// Local graph to which WAL entries are applied
+    graph: Arc<RwLock<Graph>>,
 }
 
 impl FollowerReplicationManager {
@@ -460,7 +464,24 @@ impl FollowerReplicationManager {
             // Not connected yet, so the leader is not alive.
             is_leader_alive: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
+            graph: Arc::new(RwLock::new(Graph::new())),
         }
+    }
+
+    /// Create a follower manager that applies WAL entries to an existing shared graph.
+    pub fn with_graph(config: ReplicationConfig, graph: Arc<RwLock<Graph>>) -> Self {
+        Self {
+            config,
+            current_lsn: Arc::new(AtomicU64::new(0)),
+            is_leader_alive: Arc::new(AtomicBool::new(false)),
+            last_heartbeat: Arc::new(RwLock::new(Instant::now())),
+            graph,
+        }
+    }
+
+    /// Return a reference to the shared graph held by this follower.
+    pub fn graph(&self) -> Arc<RwLock<Graph>> {
+        Arc::clone(&self.graph)
     }
 
     /// Return `true` if the leader is considered reachable.
@@ -507,6 +528,7 @@ impl FollowerReplicationManager {
         let current_lsn = Arc::clone(&self.current_lsn);
         let is_leader_alive = Arc::clone(&self.is_leader_alive);
         let last_heartbeat = Arc::clone(&self.last_heartbeat);
+        let graph = Arc::clone(&self.graph);
 
         // ── Receive loop ─────────────────────────────────────────────────────
         tokio::spawn(async move {
@@ -516,6 +538,7 @@ impl FollowerReplicationManager {
                 current_lsn,
                 is_leader_alive,
                 last_heartbeat,
+                graph,
             )
             .await
             {
@@ -543,6 +566,58 @@ impl FollowerReplicationManager {
     }
 }
 
+/// Apply a single WAL entry to the local graph (best-effort; errors are logged).
+async fn apply_wal_entry(graph: &Arc<RwLock<Graph>>, entry: &WalEntryData) {
+    let mut g = graph.write().await;
+    match entry {
+        WalEntryData::CreateNode { node_id, labels } => {
+            g.create_node_with_id_and_labels(*node_id, labels.clone());
+        }
+        WalEntryData::DeleteNode { node_id } => {
+            g.delete_node(*node_id);
+        }
+        WalEntryData::CreateEdge { from, to, label, .. } => {
+            if let Err(e) = g.create_edge(*from, *to, label) {
+                eprintln!("WAL apply: create_edge failed: {}", e);
+            }
+        }
+        WalEntryData::DeleteEdge { edge_id } => {
+            g.delete_edge(*edge_id);
+        }
+        WalEntryData::SetProperty {
+            target_id,
+            is_node,
+            key,
+            value,
+        } => {
+            // Property values are serialised as JSON strings for portability.
+            let prop_val = serde_json::from_str::<serde_json::Value>(value)
+                .map(|v| match v {
+                    serde_json::Value::Null => PropertyValue::Null,
+                    serde_json::Value::Bool(b) => PropertyValue::Bool(b),
+                    serde_json::Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            PropertyValue::Int(i)
+                        } else {
+                            PropertyValue::Float(n.as_f64().unwrap_or(0.0))
+                        }
+                    }
+                    serde_json::Value::String(s) => PropertyValue::String(s),
+                    _ => PropertyValue::String(value.clone()),
+                })
+                .unwrap_or_else(|_| PropertyValue::String(value.clone()));
+
+            if *is_node {
+                if let Some(node) = g.get_node_mut(*target_id) {
+                    node.set_property(key, prop_val);
+                }
+            } else if let Some(edge) = g.get_edge_mut(*target_id) {
+                edge.set_property(key, prop_val);
+            }
+        }
+    }
+}
+
 /// Core receive loop executed in a background task on the follower.
 async fn run_follower_receive_loop(
     mut stream: TcpStream,
@@ -550,6 +625,7 @@ async fn run_follower_receive_loop(
     current_lsn: Arc<AtomicU64>,
     is_leader_alive: Arc<AtomicBool>,
     last_heartbeat: Arc<RwLock<Instant>>,
+    graph: Arc<RwLock<Graph>>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = stream.split();
 
@@ -606,9 +682,9 @@ async fn run_follower_receive_loop(
                 }
             }
 
-            ReplicationMessage::WalEntry { lsn, entry: _ } => {
-                // In a full implementation the entry would be applied to the
-                // local graph here.  For now we just advance the LSN counter.
+            ReplicationMessage::WalEntry { lsn, entry } => {
+                // Apply the WAL entry to the local graph (best-effort).
+                apply_wal_entry(&graph, &entry).await;
                 current_lsn.store(lsn, Ordering::SeqCst);
                 *last_heartbeat.write().await = Instant::now();
 
@@ -673,7 +749,7 @@ mod tests {
     fn test_wal_entry_data_variants() {
         let create_node = WalEntryData::CreateNode {
             node_id: 1,
-            label: "Person".to_string(),
+            labels: vec!["Person".to_string()],
         };
         let delete_node = WalEntryData::DeleteNode { node_id: 1 };
         let create_edge = WalEntryData::CreateEdge {
@@ -720,7 +796,7 @@ mod tests {
                 lsn: 1,
                 entry: WalEntryData::CreateNode {
                     node_id: 99,
-                    label: "Test".to_string(),
+                    labels: vec!["Test".to_string()],
                 },
             },
             ReplicationMessage::WalAck {
@@ -803,7 +879,7 @@ mod tests {
         let lsn1 = manager
             .append_wal_entry(WalEntryData::CreateNode {
                 node_id: 1,
-                label: "Person".to_string(),
+                labels: vec!["Person".to_string()],
             })
             .await;
         assert_eq!(lsn1, 1);
@@ -811,7 +887,7 @@ mod tests {
         let lsn2 = manager
             .append_wal_entry(WalEntryData::CreateNode {
                 node_id: 2,
-                label: "City".to_string(),
+                labels: vec!["City".to_string()],
             })
             .await;
         assert_eq!(lsn2, 2);
@@ -827,5 +903,90 @@ mod tests {
         assert_eq!(lsn3, 3);
 
         assert_eq!(manager.lsn.load(Ordering::SeqCst), 3);
+    }
+
+    // 10. Verify apply_wal_entry creates nodes, edges, and sets properties
+    #[tokio::test]
+    async fn test_apply_wal_entry_create_node_multilabel() {
+        let graph = Arc::new(RwLock::new(Graph::new()));
+
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::CreateNode {
+                node_id: 0,
+                labels: vec!["Person".to_string(), "Employee".to_string()],
+            },
+        )
+        .await;
+
+        let g = graph.read().await;
+        assert_eq!(g.node_count(), 1);
+        let node = g.get_node(0).unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_wal_entry_set_property() {
+        let graph = Arc::new(RwLock::new(Graph::new()));
+
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::CreateNode {
+                node_id: 0,
+                labels: vec!["Person".to_string()],
+            },
+        )
+        .await;
+
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::SetProperty {
+                target_id: 0,
+                is_node: true,
+                key: "name".to_string(),
+                value: "\"Alice\"".to_string(),
+            },
+        )
+        .await;
+
+        let g = graph.read().await;
+        let node = g.get_node(0).unwrap();
+        assert_eq!(
+            node.get_property("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_wal_entry_delete_node() {
+        let graph = Arc::new(RwLock::new(Graph::new()));
+
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::CreateNode {
+                node_id: 0,
+                labels: vec!["N".to_string()],
+            },
+        )
+        .await;
+
+        apply_wal_entry(&graph, &WalEntryData::DeleteNode { node_id: 0 }).await;
+
+        let g = graph.read().await;
+        assert_eq!(g.node_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_follower_manager_with_graph() {
+        let shared_graph = Arc::new(RwLock::new(Graph::new()));
+        let config = ReplicationConfig {
+            role: NodeRole::Follower,
+            node_id: "follower-1".to_string(),
+            leader_address: Some("127.0.0.1:7699".to_string()),
+            ..ReplicationConfig::default()
+        };
+        let manager = FollowerReplicationManager::with_graph(config, Arc::clone(&shared_graph));
+        assert!(Arc::ptr_eq(&manager.graph(), &shared_graph));
     }
 }
