@@ -846,7 +846,18 @@ impl Parser {
             return Err(self.unexpected_token("("));
         }
 
+        let saved_pos = self.pos;
         let var = self.expect_ident()?;
+
+        // テンポラル関数 (date/datetime/duration) は BinaryOp に参加できるため
+        // parse_expression に委譲する
+        if matches!(var.to_lowercase().as_str(), "date" | "datetime" | "duration")
+            && self.check(TokenKind::LParen)
+        {
+            self.pos = saved_pos;
+            let expr = self.parse_expression()?;
+            return Ok(ReturnItem::Expr(expr));
+        }
 
         // Check for subquery forms: EXISTS/COUNT/COLLECT followed by '{'
         if self.check(TokenKind::LBrace) {
@@ -1132,6 +1143,30 @@ impl Parser {
                     _ => unreachable!(),
                 };
                 return Ok(ReturnItem::Function(scalar));
+            }
+            // テンポラル型関数
+            "date" => {
+                let arg = if self.check(TokenKind::RParen) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expression()?))
+                };
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::DateFunc(arg)));
+            }
+            "datetime" => {
+                let arg = if self.check(TokenKind::RParen) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expression()?))
+                };
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::DateTimeFunc(arg)));
+            }
+            "duration" => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(ReturnItem::Function(ScalarFunction::DurationFunc(Box::new(arg))));
             }
             // リスト操作関数: 1引数
             "head" | "tail" => {
@@ -2572,6 +2607,32 @@ impl Parser {
                             let expr = Box::new(self.parse_expression()?);
                             self.expect(TokenKind::RParen)?;
                             return Ok(Expression::IsEmpty(expr));
+                        }
+                        "date" => {
+                            self.advance(); // consume '('
+                            let arg = if self.check(TokenKind::RParen) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expression()?))
+                            };
+                            self.expect(TokenKind::RParen)?;
+                            return Ok(Expression::ScalarFn(ScalarFunction::DateFunc(arg)));
+                        }
+                        "datetime" => {
+                            self.advance(); // consume '('
+                            let arg = if self.check(TokenKind::RParen) {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expression()?))
+                            };
+                            self.expect(TokenKind::RParen)?;
+                            return Ok(Expression::ScalarFn(ScalarFunction::DateTimeFunc(arg)));
+                        }
+                        "duration" => {
+                            self.advance(); // consume '('
+                            let arg = self.parse_expression()?;
+                            self.expect(TokenKind::RParen)?;
+                            return Ok(Expression::ScalarFn(ScalarFunction::DurationFunc(Box::new(arg))));
                         }
                         _ => {} // fall through to subquery/property/variable handling
                     }

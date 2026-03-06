@@ -280,6 +280,20 @@ impl PersistentStorage {
                 writer.write_all(&[4u8])?;
                 Self::write_string(writer, s)?;
             }
+            PropertyValue::Date(d) => {
+                writer.write_all(&[5u8])?;
+                writer.write_all(&d.to_le_bytes())?;
+            }
+            PropertyValue::DateTime(ms) => {
+                writer.write_all(&[6u8])?;
+                writer.write_all(&ms.to_le_bytes())?;
+            }
+            PropertyValue::Duration { months, days, millis } => {
+                writer.write_all(&[7u8])?;
+                writer.write_all(&months.to_le_bytes())?;
+                writer.write_all(&days.to_le_bytes())?;
+                writer.write_all(&millis.to_le_bytes())?;
+            }
         }
         Ok(())
     }
@@ -352,6 +366,27 @@ impl PersistentStorage {
             4 => {
                 let s = Self::read_string(reader)?;
                 Ok(PropertyValue::String(s))
+            }
+            5 => {
+                let mut buf = [0u8; 4];
+                reader.read_exact(&mut buf)?;
+                Ok(PropertyValue::Date(i32::from_le_bytes(buf)))
+            }
+            6 => {
+                let mut buf = [0u8; 8];
+                reader.read_exact(&mut buf)?;
+                Ok(PropertyValue::DateTime(i64::from_le_bytes(buf)))
+            }
+            7 => {
+                let mut buf4 = [0u8; 4];
+                let mut buf8 = [0u8; 8];
+                reader.read_exact(&mut buf4)?;
+                let months = i32::from_le_bytes(buf4);
+                reader.read_exact(&mut buf4)?;
+                let days = i32::from_le_bytes(buf4);
+                reader.read_exact(&mut buf8)?;
+                let millis = i64::from_le_bytes(buf8);
+                Ok(PropertyValue::Duration { months, days, millis })
             }
             t => Err(PersistenceError::CorruptedData(format!(
                 "unknown property type: {}",

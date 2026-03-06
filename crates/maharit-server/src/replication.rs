@@ -354,6 +354,9 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
                 PropertyValue::Int(n) => n.to_string(),
                 PropertyValue::Float(n) => n.to_string(),
                 PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+                PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                    serde_json::to_string(&val.to_string()).unwrap_or_default()
+                }
             };
             entries.push(WalEntryData::SetProperty {
                 target_id: node.id,
@@ -378,6 +381,9 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
                 PropertyValue::Int(n) => n.to_string(),
                 PropertyValue::Float(n) => n.to_string(),
                 PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+                PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                    serde_json::to_string(&val.to_string()).unwrap_or_default()
+                }
             };
             entries.push(WalEntryData::SetProperty {
                 target_id: edge.id,

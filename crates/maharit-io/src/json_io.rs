@@ -261,6 +261,9 @@ impl JsonExporter {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             PropertyValue::String(s) => serde_json::Value::String(s.clone()),
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                serde_json::Value::String(value.to_string())
+            }
         }
     }
 

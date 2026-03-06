@@ -18,7 +18,7 @@ pub use constraint::{
 pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;
-pub use property::PropertyValue;
+pub use property::{temporal, PropertyValue};
 pub use property_index::{IndexDefinition, PropertyIndex, PropertyKey};
 pub use traversal::{
     AStar, Dijkstra, Direction, HeuristicFn, Path, Traversal, WeightFn, WeightedPath, all_paths,

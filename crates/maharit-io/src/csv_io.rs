@@ -265,6 +265,9 @@ impl CsvExporter {
             PropertyValue::Int(n) => n.to_string(),
             PropertyValue::Float(n) => n.to_string(),
             PropertyValue::String(s) => s.clone(),
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                v.to_string()
+            }
         }
     }
 }

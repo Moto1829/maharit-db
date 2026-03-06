@@ -135,6 +135,9 @@ impl DotExporter {
                     s.clone()
                 }
             }
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                v.to_string()
+            }
         }
     }
 

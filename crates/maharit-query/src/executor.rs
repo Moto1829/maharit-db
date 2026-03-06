@@ -117,6 +117,16 @@ pub enum Value {
         nodes: Vec<NodeId>,
         edges: Vec<u64>,
     },
+    /// 日付 (1970-01-01 からの日数)
+    Date(i32),
+    /// 日時 (Unix エポックからのミリ秒)
+    DateTime(i64),
+    /// 期間
+    Duration {
+        months: i32,
+        days: i32,
+        millis: i64,
+    },
 }
 
 impl std::fmt::Display for Value {
@@ -148,6 +158,17 @@ impl std::fmt::Display for Value {
             Value::Path { nodes, edges } => {
                 write!(f, "Path(nodes: {:?}, edges: {:?})", nodes, edges)
             }
+            Value::Date(days) => {
+                let (y, m, d) = maharit_core::temporal::days_to_ymd(*days);
+                write!(f, "{:04}-{:02}-{:02}", y, m, d)
+            }
+            Value::DateTime(ms) => {
+                let (y, mo, d, h, mi, s, frac) = maharit_core::temporal::millis_to_datetime(*ms);
+                write!(f, "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, mi, s, frac)
+            }
+            Value::Duration { months, days, millis } => {
+                write!(f, "{}", maharit_core::temporal::duration_to_string(*months, *days, *millis))
+            }
         }
     }
 }
@@ -160,6 +181,13 @@ impl From<&PropertyValue> for Value {
             PropertyValue::Int(n) => Value::Int(*n),
             PropertyValue::Float(n) => Value::Float(*n),
             PropertyValue::String(s) => Value::String(s.clone()),
+            PropertyValue::Date(d) => Value::Date(*d),
+            PropertyValue::DateTime(ms) => Value::DateTime(*ms),
+            PropertyValue::Duration { months, days, millis } => Value::Duration {
+                months: *months,
+                days: *days,
+                millis: *millis,
+            },
         }
     }
 }
@@ -1716,6 +1744,13 @@ impl<'a> Executor<'a> {
             Value::Int(n) => Ok(PropertyValue::Int(*n)),
             Value::Float(n) => Ok(PropertyValue::Float(*n)),
             Value::String(s) => Ok(PropertyValue::String(s.clone())),
+            Value::Date(d) => Ok(PropertyValue::Date(*d)),
+            Value::DateTime(ms) => Ok(PropertyValue::DateTime(*ms)),
+            Value::Duration { months, days, millis } => Ok(PropertyValue::Duration {
+                months: *months,
+                days: *days,
+                millis: *millis,
+            }),
             _ => Err(ExecuteError::TypeError(
                 "cannot convert to property value".to_string(),
             )),
@@ -2054,6 +2089,9 @@ impl<'a> Executor<'a> {
             ScalarFunction::Tail(_) => "tail".to_string(),
             ScalarFunction::Range(..) => "range".to_string(),
             ScalarFunction::Reduce { .. } => "reduce".to_string(),
+            ScalarFunction::DateFunc(_) => "date".to_string(),
+            ScalarFunction::DateTimeFunc(_) => "datetime".to_string(),
+            ScalarFunction::DurationFunc(_) => "duration".to_string(),
         }
     }
 
@@ -2887,6 +2925,9 @@ impl<'a> Executor<'a> {
                     }
                 }
                 ScalarFunction::Reduce { .. } => "reduce(...)".to_string(),
+                ScalarFunction::DateFunc(_) => "date(...)".to_string(),
+                ScalarFunction::DateTimeFunc(_) => "datetime(...)".to_string(),
+                ScalarFunction::DurationFunc(_) => "duration(...)".to_string(),
             },
         }
     }
@@ -3814,6 +3855,72 @@ impl<'a> Executor<'a> {
                 }
                 Ok(acc)
             }
+            ScalarFunction::DateFunc(arg) => {
+                use maharit_core::temporal;
+                use std::time::SystemTime;
+                match arg {
+                    None => {
+                        let ms = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let days = (ms / 86_400_000) as i32;
+                        Ok(Value::Date(days))
+                    }
+                    Some(expr) => {
+                        let val = self.evaluate_expression(expr, bindings)?;
+                        match val {
+                            Value::String(s) => {
+                                match temporal::parse_date(&s) {
+                                    Some(d) => Ok(Value::Date(d)),
+                                    None => Err(ExecuteError::TypeError(format!("invalid date string: {}", s))),
+                                }
+                            }
+                            Value::Date(d) => Ok(Value::Date(d)),
+                            _ => Err(ExecuteError::TypeError("date() requires a string argument".to_string())),
+                        }
+                    }
+                }
+            }
+            ScalarFunction::DateTimeFunc(arg) => {
+                use maharit_core::temporal;
+                use std::time::SystemTime;
+                match arg {
+                    None => {
+                        let ms = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        Ok(Value::DateTime(ms))
+                    }
+                    Some(expr) => {
+                        let val = self.evaluate_expression(expr, bindings)?;
+                        match val {
+                            Value::String(s) => {
+                                match temporal::parse_datetime(&s) {
+                                    Some(ms) => Ok(Value::DateTime(ms)),
+                                    None => Err(ExecuteError::TypeError(format!("invalid datetime string: {}", s))),
+                                }
+                            }
+                            Value::DateTime(ms) => Ok(Value::DateTime(ms)),
+                            _ => Err(ExecuteError::TypeError("datetime() requires a string argument".to_string())),
+                        }
+                    }
+                }
+            }
+            ScalarFunction::DurationFunc(expr) => {
+                use maharit_core::temporal;
+                let val = self.evaluate_expression(expr, bindings)?;
+                match val {
+                    Value::String(s) => {
+                        match temporal::parse_duration(&s) {
+                            Some((months, days, millis)) => Ok(Value::Duration { months, days, millis }),
+                            None => Err(ExecuteError::TypeError(format!("invalid duration string: {}", s))),
+                        }
+                    }
+                    _ => Err(ExecuteError::TypeError("duration() requires a string argument".to_string())),
+                }
+            }
         }
     }
 
@@ -4466,6 +4573,7 @@ impl<'a> Executor<'a> {
                 });
                 Ok(Value::Bool(!matches.is_empty()))
             }
+            Expression::ScalarFn(func) => self.evaluate_scalar_function(func, bindings),
         }
     }
 
@@ -4533,9 +4641,55 @@ impl<'a> Executor<'a> {
                     result.extend(b.iter().cloned());
                     return Ok(Value::List(result));
                 }
+                // テンポラル演算: Date + Duration, DateTime + Duration
+                match (left, right) {
+                    (Value::Date(d), Value::Duration { months, days, millis }) => {
+                        use maharit_core::temporal;
+                        let new_days = temporal::add_duration_to_date(*d, *months, *days, *millis);
+                        return Ok(Value::Date(new_days));
+                    }
+                    (Value::DateTime(ms), Value::Duration { months, days, millis }) => {
+                        use maharit_core::temporal;
+                        let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
+                        let base_days = temporal::ymd_to_days(y, mo, day);
+                        let new_days = temporal::add_duration_to_date(base_days, *months, *days, 0);
+                        let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
+                        let new_ms = temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) + millis;
+                        return Ok(Value::DateTime(new_ms));
+                    }
+                    _ => {}
+                }
                 self.arithmetic_op(left, right, |a, b| a + b, |a, b| a + b)
             }
-            BinaryOp::Sub => self.arithmetic_op(left, right, |a, b| a - b, |a, b| a - b),
+            BinaryOp::Sub => {
+                // テンポラル演算: Date - Date = Duration, DateTime - DateTime = Duration
+                match (left, right) {
+                    (Value::Date(a), Value::Date(b)) => {
+                        let diff_days = a - b;
+                        return Ok(Value::Duration { months: 0, days: diff_days, millis: 0 });
+                    }
+                    (Value::DateTime(a), Value::DateTime(b)) => {
+                        let diff_ms = a - b;
+                        return Ok(Value::Duration { months: 0, days: 0, millis: diff_ms });
+                    }
+                    (Value::Date(d), Value::Duration { months, days, millis }) => {
+                        use maharit_core::temporal;
+                        let new_days = temporal::add_duration_to_date(*d, -*months, -*days, -*millis);
+                        return Ok(Value::Date(new_days));
+                    }
+                    (Value::DateTime(ms), Value::Duration { months, days, millis }) => {
+                        use maharit_core::temporal;
+                        let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
+                        let base_days = temporal::ymd_to_days(y, mo, day);
+                        let new_days = temporal::add_duration_to_date(base_days, -*months, -*days, 0);
+                        let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
+                        let new_ms = temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) - millis;
+                        return Ok(Value::DateTime(new_ms));
+                    }
+                    _ => {}
+                }
+                self.arithmetic_op(left, right, |a, b| a - b, |a, b| a - b)
+            }
             BinaryOp::Mul => self.arithmetic_op(left, right, |a, b| a * b, |a, b| a * b),
             BinaryOp::Div => self.arithmetic_op(left, right, |a, b| a / b, |a, b| a / b),
             BinaryOp::Regex => match (left, right) {
@@ -4596,6 +4750,12 @@ impl<'a> Executor<'a> {
             }
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Node(a), Value::Node(b)) => a == b,
+            (Value::Date(a), Value::Date(b)) => a == b,
+            (Value::DateTime(a), Value::DateTime(b)) => a == b,
+            (Value::Duration { months: ma, days: da, millis: msa },
+             Value::Duration { months: mb, days: db, millis: msb }) => {
+                ma == mb && da == db && msa == msb
+            }
             _ => false,
         }
     }
@@ -4616,6 +4776,8 @@ impl<'a> Executor<'a> {
                 .partial_cmp(&(*b as f64))
                 .unwrap_or(std::cmp::Ordering::Equal),
             (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Date(a), Value::Date(b)) => a.cmp(b),
+            (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
             _ => return Err(ExecuteError::TypeError("cannot compare values".to_string())),
         };
 
@@ -10142,5 +10304,174 @@ mod tests {
         // count must be 5, not 1 (limit does not truncate before aggregation)
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(5));
+    }
+
+    // ========== Task 50: Temporal Types ==========
+
+    #[test]
+    fn test_date_func_no_arg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN date()").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Date(d) => assert!(*d > 0, "date should be after epoch"),
+            other => panic!("expected Date, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_date_func_string_arg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN date(\"2024-01-15\")").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Date(d) => {
+                let (y, m, day) = maharit_core::temporal::days_to_ymd(*d);
+                assert_eq!(y, 2024);
+                assert_eq!(m, 1);
+                assert_eq!(day, 15);
+            }
+            other => panic!("expected Date, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_datetime_func_no_arg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN datetime()").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::DateTime(ms) => assert!(*ms > 0),
+            other => panic!("expected DateTime, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_datetime_func_string_arg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN datetime(\"2024-06-15T12:30:00Z\")",
+        )
+        .unwrap();
+        match &result.rows[0].columns[0] {
+            Value::DateTime(ms) => {
+                let (y, mo, d, h, mi, s, _) = maharit_core::temporal::millis_to_datetime(*ms);
+                assert_eq!(y, 2024);
+                assert_eq!(mo, 6);
+                assert_eq!(d, 15);
+                assert_eq!(h, 12);
+                assert_eq!(mi, 30);
+                assert_eq!(s, 0);
+            }
+            other => panic!("expected DateTime, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duration_func_string_arg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN duration(\"P1Y2M3D\")").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Duration { months, days, millis } => {
+                assert_eq!(*months, 14); // 1*12 + 2
+                assert_eq!(*days, 3);
+                assert_eq!(*millis, 0);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duration_with_time() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:T) RETURN duration(\"PT2H30M\")").unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Duration { months, days, millis } => {
+                assert_eq!(*months, 0);
+                assert_eq!(*days, 0);
+                assert_eq!(*millis, 2 * 3_600_000 + 30 * 60_000);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_date_comparison() {
+        let mut graph = Graph::new();
+        let nid = graph.create_node("Event");
+        graph
+            .get_node_mut(nid)
+            .unwrap()
+            .set_property("date", PropertyValue::Date(
+                maharit_core::temporal::ymd_to_days(2024, 6, 15)
+            ));
+        // Should match: 2024-06-15 >= 2024-01-01
+        let result = execute(
+            &mut graph,
+            "MATCH (e:Event) WHERE e.date >= date(\"2024-01-01\") RETURN e.date",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Should not match: 2024-06-15 >= 2025-01-01
+        let result2 = execute(
+            &mut graph,
+            "MATCH (e:Event) WHERE e.date >= date(\"2025-01-01\") RETURN e.date",
+        )
+        .unwrap();
+        assert_eq!(result2.row_count(), 0);
+    }
+
+    #[test]
+    fn test_date_arithmetic() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        // date("2024-01-01") + duration("P1D") should be 2024-01-02
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN date(\"2024-01-01\") + duration(\"P1D\")",
+        )
+        .unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Date(d) => {
+                let (y, m, day) = maharit_core::temporal::days_to_ymd(*d);
+                assert_eq!(y, 2024);
+                assert_eq!(m, 1);
+                assert_eq!(day, 2);
+            }
+            other => panic!("expected Date, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_date_subtraction() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        // date("2024-01-10") - date("2024-01-01") = duration of 9 days
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN date(\"2024-01-10\") - date(\"2024-01-01\")",
+        )
+        .unwrap();
+        match &result.rows[0].columns[0] {
+            Value::Duration { months: 0, days: 9, millis: 0 } => {}
+            other => panic!("expected Duration{{days:9}}, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_temporal_create_and_persist() {
+        let mut graph = Graph::new();
+        let days = maharit_core::temporal::ymd_to_days(2024, 3, 15);
+        let nid = graph.create_node("Event");
+        graph
+            .get_node_mut(nid)
+            .unwrap()
+            .set_property("date", PropertyValue::Date(days));
+        let node = graph.get_node(nid).unwrap();
+        assert_eq!(node.get_property("date"), Some(&PropertyValue::Date(days)));
     }
 }

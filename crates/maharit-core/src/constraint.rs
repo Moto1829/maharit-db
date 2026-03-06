@@ -533,6 +533,9 @@ impl ConstraintManager {
                 PropertyValue::Int(_) => "INTEGER",
                 PropertyValue::Float(_) => "FLOAT",
                 PropertyValue::String(_) => "STRING",
+                PropertyValue::Date(_) => "DATE",
+                PropertyValue::DateTime(_) => "DATETIME",
+                PropertyValue::Duration { .. } => "DURATION",
             };
             return Err(ConstraintError::TypeViolation {
                 name: constraint.name.clone(),

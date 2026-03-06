@@ -141,10 +141,8 @@ impl GraphMlImporter {
                             let label_str = current_node_label
                                 .clone()
                                 .unwrap_or_else(|| "Node".to_string());
-                            let labels: Vec<String> = label_str
-                                .split(':')
-                                .map(|s| s.to_string())
-                                .collect();
+                            let labels: Vec<String> =
+                                label_str.split(':').map(|s| s.to_string()).collect();
                             let internal_id = graph.create_node_with_labels(labels);
                             id_map.insert(node_id.clone(), internal_id);
                             nodes_imported += 1;
@@ -192,10 +190,8 @@ impl GraphMlImporter {
                             let label_str = current_node_label
                                 .take()
                                 .unwrap_or_else(|| "Node".to_string());
-                            let labels: Vec<String> = label_str
-                                .split(':')
-                                .map(|s| s.to_string())
-                                .collect();
+                            let labels: Vec<String> =
+                                label_str.split(':').map(|s| s.to_string()).collect();
                             let internal_id = graph.create_node_with_labels(labels);
                             id_map.insert(node_id.clone(), internal_id);
 
@@ -451,6 +447,7 @@ impl GraphMlExporter {
             PropertyValue::Int(_) => "long",
             PropertyValue::Float(_) => "double",
             PropertyValue::String(_) => "string",
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => "string",
         }
     }
 
@@ -486,6 +483,9 @@ impl GraphMlExporter {
             PropertyValue::Int(n) => n.to_string(),
             PropertyValue::Float(n) => n.to_string(),
             PropertyValue::String(s) => s.clone(),
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                value.to_string()
+            }
         }
     }
 }

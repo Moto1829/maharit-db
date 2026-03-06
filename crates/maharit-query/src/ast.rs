@@ -522,6 +522,12 @@ pub enum ScalarFunction {
         list: Box<Expression>,
         body: Box<Expression>,
     },
+    /// date() or date("YYYY-MM-DD") or date({year, month, day})
+    DateFunc(Option<Box<Expression>>),
+    /// datetime() or datetime("ISO8601")
+    DateTimeFunc(Option<Box<Expression>>),
+    /// duration("P...") or duration({years, months, days, hours, minutes, seconds})
+    DurationFunc(Box<Expression>),
 }
 
 /// リスト述語関数の種類
@@ -577,6 +583,8 @@ pub enum Expression {
     IsEmpty(Box<Expression>),
     /// パターン述語: WHERE (n)-->() or WHERE (n)-[:KNOWS]->(m)
     PatternPredicate(Vec<Pattern>),
+    /// 式コンテキストで使えるスカラー関数
+    ScalarFn(ScalarFunction),
 }
 
 /// CASE式

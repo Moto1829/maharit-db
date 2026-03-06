@@ -120,6 +120,9 @@ impl From<&PropertyValue> for RowValue {
             PropertyValue::Float(v) => RowValue::Int(*v as i64),
             PropertyValue::String(s) => RowValue::Text(s.clone()),
             PropertyValue::Bool(b) => RowValue::Bool(*b),
+            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                RowValue::Text(pv.to_string())
+            }
         }
     }
 }
