@@ -50,6 +50,7 @@
 # API リファレンス
 
 - [Rust クライアント](./api/rust-client.md)
+- [Python クライアント](./api/python-client.md)
 - [TCP プロトコル仕様](./api/protocol.md)
 
 # グラフアルゴリズム
