@@ -1,5 +1,7 @@
 # サーバー: RwLock<Graph> の粒度を細かくする
 
+**Status**: Completed (Option B — read-only executor with shared lock)
+
 ## 概要
 
 グラフ全体を `Arc<RwLock<Graph>>` 1つで管理しているため、

@@ -581,27 +581,48 @@ async fn execute_streaming_query(
         (HashSet::new(), HashSet::new())
     };
 
-    // Execute the statement (exclusive write lock; see execute_query for TODO).
-    let mut g = graph.write().await;
-    let mut executor = Executor::new(&mut g);
-
-    let result = match executor.execute(stmt) {
-        Ok(result) => result,
-        Err(e) => {
-            let response = Response::Error {
-                message: format!("Execution error: {}", e),
-            };
-            return send_response(socket, &response, write_timeout).await;
+    // For read-only queries use a shared read lock so multiple reads can run
+    // concurrently.  Write queries still require an exclusive write lock.
+    // Executors are scoped within braces so the raw pointer is dropped before
+    // any `.await` point, keeping the future `Send`.
+    let result = if is_write {
+        let mut g = graph.write().await;
+        let exec_result = {
+            let mut executor = Executor::new(&mut g);
+            executor.execute(stmt)
+        }; // executor dropped here
+        let r = match exec_result {
+            Ok(r) => r,
+            Err(e) => {
+                let response = Response::Error {
+                    message: format!("Execution error: {}", e),
+                };
+                return send_response(socket, &response, write_timeout).await;
+            }
+        };
+        if let Some(repl) = replication {
+            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
+        }
+        r
+    } else {
+        let g = graph.read().await;
+        // SAFETY: `is_read_only(&stmt)` returned true, so the executor will
+        // not call any mutation methods on the graph.  The read lock guarantees
+        // no concurrent writer can modify the graph while we execute.
+        let exec_result = {
+            let mut executor = unsafe { Executor::new_readonly(&g) };
+            executor.execute(stmt)
+        }; // executor (with *mut Graph) dropped before any .await
+        match exec_result {
+            Ok(r) => r,
+            Err(e) => {
+                let response = Response::Error {
+                    message: format!("Execution error: {}", e),
+                };
+                return send_response(socket, &response, write_timeout).await;
+            }
         }
     };
-
-    // Emit WAL entries for write operations before releasing the lock.
-    if is_write
-        && let Some(repl) = replication
-    {
-        emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-    }
-    drop(g);
 
     // Convert rows to HashMap format
     let all_rows: Vec<HashMap<String, String>> = result
@@ -696,20 +717,31 @@ async fn execute_query(
         (HashSet::new(), HashSet::new())
     };
 
-    // Acquire an exclusive write lock and execute.
-    // TODO: once Executor supports &Graph, use graph.read() when is_write is false.
-    let mut g = graph.write().await;
-    let mut executor = Executor::new(&mut g);
-
-    let exec_result = executor.execute(stmt);
-
-    // Emit WAL entries for write operations before releasing the lock.
-    if is_write
-        && let (Ok(_), Some(repl)) = (&exec_result, replication)
-    {
-        emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-    }
-    drop(g);
+    // For read-only queries use a shared read lock so multiple reads can run
+    // concurrently.  Write queries still require an exclusive write lock.
+    // The executor is scoped so it is dropped before any `.await` point,
+    // keeping the spawned future `Send`.
+    let exec_result = if is_write {
+        let mut g = graph.write().await;
+        let result = {
+            let mut executor = Executor::new(&mut g);
+            executor.execute(stmt)
+        }; // executor dropped here — no raw pointer across the await below
+        if let (Ok(_), Some(repl)) = (&result, replication) {
+            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
+        }
+        result
+    } else {
+        let g = graph.read().await;
+        // SAFETY: `is_read_only(&stmt)` returned true, so the executor will
+        // not call any mutation methods on the graph.  The read lock guarantees
+        // no concurrent writer can modify the graph while we execute.
+        let result = {
+            let mut executor = unsafe { Executor::new_readonly(&g) };
+            executor.execute(stmt)
+        }; // executor (containing *mut Graph) dropped before any .await
+        result
+    };
 
     match exec_result {
         Ok(result) => {

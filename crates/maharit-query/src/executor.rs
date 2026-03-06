@@ -252,20 +252,102 @@ type Bindings = HashMap<String, BindingValue>;
 
 /// クエリエグゼキュータ
 pub struct Executor<'a> {
-    graph: &'a mut Graph,
+    /// Raw pointer to the graph.  Always non-null and valid for the lifetime `'a`.
+    ///
+    /// Stored as `*mut Graph` so the same field can hold the graph for both
+    /// writable and read-only executors:
+    ///
+    /// * **Writable** (`readonly == false`): originally derived from `&'a mut Graph`.
+    ///   `graph_mut()` may produce `&mut Graph` because the caller holds an
+    ///   exclusive write lock.
+    ///
+    /// * **Read-only** (`readonly == true`): originally derived from `&'a Graph`.
+    ///   Only `graph_ref()` (which produces `&Graph`) is ever called; the
+    ///   `*mut` cast in `new_readonly` is a pointer cast (not a reference
+    ///   cast) and therefore does not create UB by itself.
+    graph: *mut Graph,
+    readonly: bool,
+    _marker: std::marker::PhantomData<&'a ()>,
     constraints: ConstraintManager,
     fulltext: FulltextManager,
     params: HashMap<String, Value>,
 }
 
+// SAFETY: The raw `*mut Graph` pointer inside `Executor` is derived from a
+// valid `&mut Graph` or `&Graph` and is only ever accessed through the
+// `graph_ref()` / `graph_mut()` helpers, which enforce the correct access
+// mode.  The underlying `Graph` type is `Sync` (no interior mutability), so
+// sharing `&Executor<'_>` across threads — as rayon does for parallel
+// pattern matching — is safe.
+unsafe impl<'a> Sync for Executor<'a> {}
+
 impl<'a> Executor<'a> {
     pub fn new(graph: &'a mut Graph) -> Self {
         Self {
-            graph,
+            graph: graph as *mut Graph,
+            readonly: false,
+            _marker: std::marker::PhantomData,
             constraints: ConstraintManager::new(),
             fulltext: FulltextManager::new(),
             params: HashMap::new(),
         }
+    }
+
+    /// Create an `Executor` for read-only query evaluation.
+    ///
+    /// Allows the caller to pass a shared `&Graph` reference (e.g. obtained
+    /// from a `RwLockReadGuard`) without requiring an exclusive write lock.
+    /// Multiple read-only executors can therefore run concurrently against the
+    /// same graph.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee **both** of the following:
+    ///
+    /// 1. The query is confirmed to be read-only by [`maharit_query::is_read_only`].
+    /// 2. The graph will not be mutated (by any thread) while this executor is
+    ///    alive — typically enforced by holding a `RwLockReadGuard`.
+    ///
+    /// Only `graph_ref()` is called in read-only mode; the `graph_mut()`
+    /// accessor is never reachable through read-only statement handlers.
+    pub unsafe fn new_readonly(graph: &'a Graph) -> Self {
+        // Pointer cast from *const to *mut is legal and does not by itself
+        // create undefined behaviour.  UB would only arise if we subsequently
+        // derived `&mut Graph` from this pointer while another reference exists,
+        // which we never do in readonly mode.
+        Self {
+            graph: graph as *const Graph as *mut Graph,
+            readonly: true,
+            _marker: std::marker::PhantomData,
+            constraints: ConstraintManager::new(),
+            fulltext: FulltextManager::new(),
+            params: HashMap::new(),
+        }
+    }
+
+    /// Return a shared reference to the graph.
+    ///
+    /// Safe to call in both writable and read-only mode.
+    #[inline]
+    fn graph_ref(&self) -> &Graph {
+        // SAFETY: `self.graph` is always a valid, non-null, properly aligned
+        // pointer derived from either `&mut Graph` or `&Graph`.  Creating `&T`
+        // from a raw pointer is safe as long as the pointee is valid, which it
+        // is for the entire lifetime `'a`.
+        unsafe { &*self.graph }
+    }
+
+    /// Return an exclusive reference to the graph.
+    ///
+    /// Must only be called when `self.readonly == false`, i.e. the executor was
+    /// created with an exclusive write lock on the graph.
+    #[inline]
+    fn graph_mut(&mut self) -> &mut Graph {
+        debug_assert!(!self.readonly, "write operation called on read-only executor");
+        // SAFETY: In non-readonly mode `self.graph` was derived from `&mut
+        // Graph` held through an exclusive write lock, so no other mutable or
+        // shared references to the graph exist for the duration of this call.
+        unsafe { &mut *self.graph }
     }
 
     /// パラメータ付きクエリを実行
@@ -482,9 +564,9 @@ impl<'a> Executor<'a> {
 
                         // Validate endpoint label constraints before creating edge
                         self.constraints
-                            .validate_edge_create(self.graph, &edge_label, from, to)?;
+                            .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
 
-                        let edge_id = self.graph.create_edge(from, to, edge_label)?;
+                        let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
                         // Evaluate and set edge properties
                         let edge_props: Vec<(String, PropertyValue)> = segment
@@ -498,7 +580,7 @@ impl<'a> Executor<'a> {
                             })
                             .collect::<Result<_, ExecuteError>>()?;
 
-                        if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+                        if let Some(edge) = self.graph_mut().get_edge_mut(edge_id) {
                             for (key, prop_val) in edge_props {
                                 edge.set_property(key, prop_val);
                             }
@@ -544,12 +626,12 @@ impl<'a> Executor<'a> {
 
         // Validate constraints before creating (using primary label)
         self.constraints
-            .validate_node_create(self.graph, &primary_label, &props, None)?;
+            .validate_node_create(self.graph_ref(),&primary_label, &props, None)?;
 
-        let node_id = self.graph.create_node_with_labels(labels.clone());
+        let node_id = self.graph_mut().create_node_with_labels(labels.clone());
 
         // Set properties
-        if let Some(node) = self.graph.get_node_mut(node_id) {
+        if let Some(node) = self.graph_mut().get_node_mut(node_id) {
             for (key, prop_val) in &evaluated_props {
                 node.set_property(key.clone(), prop_val.clone());
             }
@@ -619,7 +701,7 @@ impl<'a> Executor<'a> {
         // Delete edges first
         let mut deleted_edges = 0;
         for edge_id in edges_to_delete {
-            if self.graph.delete_edge(edge_id).is_some() {
+            if self.graph_mut().delete_edge(edge_id).is_some() {
                 deleted_edges += 1;
             }
         }
@@ -629,13 +711,13 @@ impl<'a> Executor<'a> {
         for node_id in nodes_to_delete {
             if d.delete_clause.detach {
                 // delete_node already handles related edges
-                if self.graph.delete_node(node_id).is_some() {
+                if self.graph_mut().delete_node(node_id).is_some() {
                     deleted_nodes += 1;
                 }
             } else {
                 // Check if node has edges
-                let has_edges = self.graph.get_outgoing_edges(node_id).next().is_some()
-                    || self.graph.get_incoming_edges(node_id).next().is_some();
+                let has_edges = self.graph_ref().get_outgoing_edges(node_id).next().is_some()
+                    || self.graph_ref().get_incoming_edges(node_id).next().is_some();
 
                 if has_edges {
                     // In a real Cypher implementation, this would be an error
@@ -643,7 +725,7 @@ impl<'a> Executor<'a> {
                     continue;
                 }
 
-                if self.graph.delete_node(node_id).is_some() {
+                if self.graph_mut().delete_node(node_id).is_some() {
                     deleted_nodes += 1;
                 }
             }
@@ -767,9 +849,9 @@ impl<'a> Executor<'a> {
 
                         // Validate endpoint label constraints before creating edge
                         self.constraints
-                            .validate_edge_create(self.graph, &edge_label, from, to)?;
+                            .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
 
-                        let edge_id = self.graph.create_edge(from, to, edge_label)?;
+                        let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
                         // Evaluate and set edge properties
                         let edge_props: Vec<(String, PropertyValue)> = segment
@@ -783,7 +865,7 @@ impl<'a> Executor<'a> {
                             })
                             .collect::<Result<_, ExecuteError>>()?;
 
-                        if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+                        if let Some(edge) = self.graph_mut().get_edge_mut(edge_id) {
                             for (key, prop_val) in edge_props {
                                 edge.set_property(key, prop_val);
                             }
@@ -854,20 +936,20 @@ impl<'a> Executor<'a> {
                         match binding_value {
                             BindingValue::Node(node_id) => {
                                 // Validate constraint before setting
-                                if let Some(node) = self.graph.get_node(*node_id) {
+                                if let Some(node) = self.graph_ref().get_node(*node_id) {
                                     self.constraints.validate_property_set(
-                                        self.graph,
+                                        self.graph_ref(),
                                         node,
                                         property,
                                         &prop_value,
                                     )?;
                                 }
-                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                if let Some(node) = self.graph_mut().get_node_mut(*node_id) {
                                     node.set_property(property, prop_value);
                                 }
                             }
                             BindingValue::Edge(edge_id) => {
-                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                if let Some(edge) = self.graph_mut().get_edge_mut(*edge_id) {
                                     edge.set_property(property, prop_value);
                                 }
                             }
@@ -897,20 +979,20 @@ impl<'a> Executor<'a> {
                             BindingValue::Node(node_id) => {
                                 // Validate constraints for each new property
                                 for (key, prop_val) in &evaluated {
-                                    if let Some(node) = self.graph.get_node(*node_id) {
+                                    if let Some(node) = self.graph_ref().get_node(*node_id) {
                                         self.constraints.validate_property_set(
-                                            self.graph, node, key, prop_val,
+                                            self.graph_ref(), node, key, prop_val,
                                         )?;
                                     }
                                 }
-                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                if let Some(node) = self.graph_mut().get_node_mut(*node_id) {
                                     for (key, prop_val) in evaluated {
                                         node.set_property(key, prop_val);
                                     }
                                 }
                             }
                             BindingValue::Edge(edge_id) => {
-                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                if let Some(edge) = self.graph_mut().get_edge_mut(*edge_id) {
                                     for (key, prop_val) in evaluated {
                                         edge.set_property(key, prop_val);
                                     }
@@ -930,7 +1012,7 @@ impl<'a> Executor<'a> {
 
                         match binding_value {
                             BindingValue::Node(node_id) => {
-                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                if let Some(node) = self.graph_mut().get_node_mut(*node_id) {
                                     // Add the new label if not already present (Vec-based).
                                     node.add_label(new_label.clone());
                                 }
@@ -1063,9 +1145,9 @@ impl<'a> Executor<'a> {
 
                     // Validate endpoint label constraints before creating edge
                     self.constraints
-                        .validate_edge_create(self.graph, &edge_label, from, to)?;
+                        .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
 
-                    let edge_id = self.graph.create_edge(from, to, edge_label)?;
+                    let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
                     // Evaluate and set edge properties
                     let edge_props: Vec<(String, PropertyValue)> = segment
@@ -1079,7 +1161,7 @@ impl<'a> Executor<'a> {
                         })
                         .collect::<Result<_, ExecuteError>>()?;
 
-                    if let Some(edge) = self.graph.get_edge_mut(edge_id) {
+                    if let Some(edge) = self.graph_mut().get_edge_mut(edge_id) {
                         for (key, prop_val) in edge_props {
                             edge.set_property(key, prop_val);
                         }
@@ -1126,15 +1208,15 @@ impl<'a> Executor<'a> {
                         match binding_value {
                             BindingValue::Node(node_id) => {
                                 // Validate constraint before removing
-                                if let Some(node) = self.graph.get_node(*node_id) {
+                                if let Some(node) = self.graph_ref().get_node(*node_id) {
                                     self.constraints.validate_property_remove(node, prop)?;
                                 }
-                                if let Some(node) = self.graph.get_node_mut(*node_id) {
+                                if let Some(node) = self.graph_mut().get_node_mut(*node_id) {
                                     node.remove_property(prop);
                                 }
                             }
                             BindingValue::Edge(edge_id) => {
-                                if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                                if let Some(edge) = self.graph_mut().get_edge_mut(*edge_id) {
                                     edge.remove_property(prop);
                                 }
                             }
@@ -1150,7 +1232,7 @@ impl<'a> Executor<'a> {
                             .get(var)
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
                         if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node())
-                            && let Some(node) = self.graph.get_node_mut(node_id)
+                            && let Some(node) = self.graph_mut().get_node_mut(node_id)
                         {
                             node.remove_label(label);
                         }
@@ -1329,15 +1411,15 @@ impl<'a> Executor<'a> {
 
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 self.constraints.validate_property_remove(node, prop)?;
                             }
-                            if let Some(node) = self.graph.get_node_mut(*node_id) {
+                            if let Some(node) = self.graph_mut().get_node_mut(*node_id) {
                                 node.remove_property(prop);
                             }
                         }
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge_mut(*edge_id) {
+                            if let Some(edge) = self.graph_mut().get_edge_mut(*edge_id) {
                                 edge.remove_property(prop);
                             }
                         }
@@ -1350,7 +1432,7 @@ impl<'a> Executor<'a> {
                 }
                 RemoveItem::Label(var, label) => {
                     if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
-                        if let Some(node) = self.graph.get_node_mut(node_id) {
+                        if let Some(node) = self.graph_mut().get_node_mut(node_id) {
                             node.remove_label(label);
                         }
                     } else {
@@ -1389,17 +1471,17 @@ impl<'a> Executor<'a> {
         }
 
         for edge_id in edges_to_delete {
-            self.graph.delete_edge(edge_id);
+            self.graph_mut().delete_edge(edge_id);
         }
 
         for node_id in nodes_to_delete {
             if delete.detach {
-                self.graph.delete_node(node_id);
+                self.graph_mut().delete_node(node_id);
             } else {
-                let has_edges = self.graph.get_outgoing_edges(node_id).next().is_some()
-                    || self.graph.get_incoming_edges(node_id).next().is_some();
+                let has_edges = self.graph_ref().get_outgoing_edges(node_id).next().is_some()
+                    || self.graph_ref().get_incoming_edges(node_id).next().is_some();
                 if !has_edges {
-                    self.graph.delete_node(node_id);
+                    self.graph_mut().delete_node(node_id);
                 }
             }
         }
@@ -1527,14 +1609,14 @@ impl<'a> Executor<'a> {
 
         // Index existing nodes that match the label
         let node_ids: Vec<NodeId> = self
-            .graph
+            .graph_ref()
             .nodes()
             .filter(|n| n.has_label(&cfi.label))
             .map(|n| n.id)
             .collect();
 
         for node_id in node_ids {
-            if let Some(node) = self.graph.get_node(node_id) {
+            if let Some(node) = self.graph_ref().get_node(node_id) {
                 let props = Arc::clone(&node.properties);
                 self.fulltext.index_node(node_id, &cfi.label, &props);
             }
@@ -1686,8 +1768,8 @@ impl<'a> Executor<'a> {
     // ========== EXPLAIN / PROFILE ==========
 
     fn execute_explain(&self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
-        let node_count = self.graph.node_count() as u64;
-        let edge_count = self.graph.edge_count() as u64;
+        let node_count = self.graph_ref().node_count() as u64;
+        let edge_count = self.graph_ref().edge_count() as u64;
         let plan = crate::planner::build_plan(&stmt, node_count, edge_count);
         let plan_text = format!("{}", plan);
 
@@ -1702,8 +1784,8 @@ impl<'a> Executor<'a> {
     }
 
     fn execute_profile(&mut self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
-        let node_count = self.graph.node_count() as u64;
-        let edge_count = self.graph.edge_count() as u64;
+        let node_count = self.graph_ref().node_count() as u64;
+        let edge_count = self.graph_ref().edge_count() as u64;
         let mut plan = crate::planner::build_plan(&stmt, node_count, edge_count);
 
         // Execute the statement and measure time
@@ -2176,7 +2258,7 @@ impl<'a> Executor<'a> {
 
         // Collect all graph node IDs once for the scan-all path.
         // We reuse this Vec across bindings to avoid repeated allocations.
-        let all_node_ids: Vec<NodeId> = self.graph.nodes().map(|n| n.id).collect();
+        let all_node_ids: Vec<NodeId> = self.graph_ref().nodes().map(|n| n.id).collect();
 
         for bindings in current_bindings {
             // Check if variable is already bound
@@ -2432,12 +2514,12 @@ impl<'a> Executor<'a> {
 
     fn get_edges_by_direction(&self, node_id: NodeId, direction: EdgeDirection) -> Vec<&Edge> {
         match direction {
-            EdgeDirection::Outgoing => self.graph.get_outgoing_edges(node_id).collect(),
-            EdgeDirection::Incoming => self.graph.get_incoming_edges(node_id).collect(),
+            EdgeDirection::Outgoing => self.graph_ref().get_outgoing_edges(node_id).collect(),
+            EdgeDirection::Incoming => self.graph_ref().get_incoming_edges(node_id).collect(),
             EdgeDirection::Both => self
-                .graph
+                .graph_ref()
                 .get_outgoing_edges(node_id)
-                .chain(self.graph.get_incoming_edges(node_id))
+                .chain(self.graph_ref().get_incoming_edges(node_id))
                 .collect(),
         }
     }
@@ -2462,7 +2544,7 @@ impl<'a> Executor<'a> {
         pattern: &NodePattern,
         bindings: &Bindings,
     ) -> Result<bool, ExecuteError> {
-        let node = match self.graph.get_node(node_id) {
+        let node = match self.graph_ref().get_node(node_id) {
             Some(n) => n,
             None => return Ok(false),
         };
@@ -2942,7 +3024,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 Ok(Value::NodeData {
                                     id: *node_id,
                                     labels: node.labels.clone(),
@@ -2970,7 +3052,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 if let Some(value) = node.get_property(prop) {
                                     Ok(Value::from(value))
                                 } else {
@@ -2990,7 +3072,7 @@ impl<'a> Executor<'a> {
                 // For *, we return the first bound node variable
                 for binding_value in bindings.values() {
                     if let BindingValue::Node(node_id) = binding_value
-                        && let Some(node) = self.graph.get_node(*node_id)
+                        && let Some(node) = self.graph_ref().get_node(*node_id)
                     {
                         return Ok(Value::NodeData {
                             id: *node_id,
@@ -3023,7 +3105,7 @@ impl<'a> Executor<'a> {
                         let node_values: Vec<Value> = nodes
                             .iter()
                             .map(|&node_id| {
-                                if let Some(node) = self.graph.get_node(node_id) {
+                                if let Some(node) = self.graph_ref().get_node(node_id) {
                                     Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
@@ -3088,7 +3170,7 @@ impl<'a> Executor<'a> {
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
-                if let Some(path) = traversal::shortest_path(self.graph, start_id, end_id) {
+                if let Some(path) = traversal::shortest_path(self.graph_ref(),start_id, end_id) {
                     let edges = self.extract_edge_ids(&path.nodes);
                     Ok(Value::Path {
                         nodes: path.nodes,
@@ -3108,7 +3190,7 @@ impl<'a> Executor<'a> {
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
-                let paths = traversal::all_shortest_paths(self.graph, start_id, end_id);
+                let paths = traversal::all_shortest_paths(self.graph_ref(),start_id, end_id);
                 let path_values: Vec<Value> = paths
                     .into_iter()
                     .map(|path| {
@@ -3468,7 +3550,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge(*edge_id) {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 Ok(Value::String(edge.label.clone()))
                             } else {
                                 Ok(Value::Null)
@@ -3486,9 +3568,9 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge(*edge_id) {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 let node_id = edge.from;
-                                if let Some(node) = self.graph.get_node(node_id) {
+                                if let Some(node) = self.graph_ref().get_node(node_id) {
                                     Ok(Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
@@ -3513,9 +3595,9 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge(*edge_id) {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 let node_id = edge.to;
-                                if let Some(node) = self.graph.get_node(node_id) {
+                                if let Some(node) = self.graph_ref().get_node(node_id) {
                                     Ok(Value::NodeData {
                                         id: node_id,
                                         labels: node.labels.clone(),
@@ -3540,7 +3622,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 let labels: Vec<Value> = node
                                     .labels
                                     .iter()
@@ -3563,7 +3645,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 let props: Vec<Value> = node
                                     .properties
                                     .iter()
@@ -3577,7 +3659,7 @@ impl<'a> Executor<'a> {
                             }
                         }
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge(*edge_id) {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 let props: Vec<Value> = edge
                                     .properties
                                     .iter()
@@ -3602,7 +3684,7 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph.get_node(*node_id) {
+                            if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 let keys: Vec<Value> = node
                                     .properties
                                     .keys()
@@ -3614,7 +3696,7 @@ impl<'a> Executor<'a> {
                             }
                         }
                         BindingValue::Edge(edge_id) => {
-                            if let Some(edge) = self.graph.get_edge(*edge_id) {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 let keys: Vec<Value> = edge
                                     .properties
                                     .keys()
@@ -3931,7 +4013,7 @@ impl<'a> Executor<'a> {
             let from = window[0];
             let to = window[1];
             // Find edge from 'from' to 'to'
-            for edge in self.graph.get_outgoing_edges(from) {
+            for edge in self.graph_ref().get_outgoing_edges(from) {
                 if edge.to == to {
                     edges.push(edge.id);
                     break;
@@ -4362,7 +4444,7 @@ impl<'a> Executor<'a> {
                     .ok_or_else(|| ExecuteError::TypeError("expected node".to_string()))?;
 
                 let node = self
-                    .graph
+                    .graph_ref()
                     .get_node(node_id)
                     .ok_or_else(|| ExecuteError::TypeError("node not found".to_string()))?;
 
