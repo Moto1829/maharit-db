@@ -1,5 +1,7 @@
 # 日時型（テンポラル型）
 
+**Status**: Completed
+
 ## 概要
 Cypher の日時型（`date()`, `datetime()`, `duration()`）を実装する。
 現在は `timestamp()`（Unix ミリ秒整数）のみ対応。

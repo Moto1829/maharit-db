@@ -1,5 +1,7 @@
 # TLS/SSL対応
 
+**Status**: Completed
+
 ## 概要
 TCPサーバーとクライアント間の通信をTLS/SSLで暗号化する。
 

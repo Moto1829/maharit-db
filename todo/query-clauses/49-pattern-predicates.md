@@ -1,5 +1,7 @@
 # WHERE 句内パターン述語
 
+**Status**: Completed
+
 ## 概要
 `WHERE` 句の中でグラフパターンを条件式として使用できるようにする。
 Neo4j Cypher では `WHERE (n)-->()` や `WHERE NOT (n)-[:KNOWS]->(m)` のような
