@@ -46,7 +46,17 @@ fn run_repl() {
 }
 
 fn run_server(args: &[String]) {
+    use crate::replication::{
+        FollowerReplicationManager, LeaderReplicationManager, NodeRole, ReplicationConfig,
+    };
+    use std::sync::Arc;
+
     let mut config = ServerConfig::default();
+
+    // Replication options
+    let mut replication_role: Option<String> = None;
+    let mut replication_bind: Option<String> = None;
+    let mut leader_addr: Option<String> = None;
 
     // Parse arguments
     let mut i = 0;
@@ -75,6 +85,24 @@ fn run_server(args: &[String]) {
                     i += 1;
                 }
             }
+            "--replication-role" => {
+                if i + 1 < args.len() {
+                    replication_role = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--replication-bind" => {
+                if i + 1 < args.len() {
+                    replication_bind = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--leader-addr" => {
+                if i + 1 < args.len() {
+                    leader_addr = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             "--help" => {
                 print_server_help();
                 return;
@@ -84,15 +112,82 @@ fn run_server(args: &[String]) {
         i += 1;
     }
 
-    let server = TcpServer::new(config);
-
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    rt.block_on(async {
-        if let Err(e) = server.start().await {
-            eprintln!("Server error: {}", e);
+
+    match replication_role.as_deref() {
+        Some("leader") => {
+            let bind = replication_bind
+                .unwrap_or_else(|| "127.0.0.1:7688".to_string());
+            let repl_config = ReplicationConfig {
+                role: NodeRole::Leader,
+                replication_bind_address: bind,
+                leader_address: None,
+                ..Default::default()
+            };
+            let graph = Arc::new(tokio::sync::RwLock::new(maharit_core::Graph::new()));
+            let leader = Arc::new(LeaderReplicationManager::with_graph(
+                repl_config,
+                Arc::clone(&graph),
+            ));
+            let leader_clone = Arc::clone(&leader);
+            let server = TcpServer::new(config).with_replication(Arc::clone(&leader));
+            rt.block_on(async move {
+                tokio::spawn(async move {
+                    if let Err(e) = leader_clone.start().await {
+                        eprintln!("Replication leader error: {}", e);
+                    }
+                });
+                if let Err(e) = server.start().await {
+                    eprintln!("Server error: {}", e);
+                    std::process::exit(1);
+                }
+            });
+        }
+        Some("follower") => {
+            let la = match leader_addr {
+                Some(a) => a,
+                None => {
+                    eprintln!("Error: --leader-addr <ADDR> is required for follower role");
+                    std::process::exit(1);
+                }
+            };
+            let bind = replication_bind
+                .unwrap_or_else(|| "127.0.0.1:7689".to_string());
+            let repl_config = ReplicationConfig {
+                role: NodeRole::Follower,
+                replication_bind_address: bind,
+                leader_address: Some(la),
+                ..Default::default()
+            };
+            let follower = Arc::new(FollowerReplicationManager::new(repl_config));
+            let follower_clone = Arc::clone(&follower);
+            let server = TcpServer::new(config);
+            rt.block_on(async move {
+                tokio::spawn(async move {
+                    if let Err(e) = follower_clone.start().await {
+                        eprintln!("Replication follower error: {}", e);
+                    }
+                });
+                if let Err(e) = server.start().await {
+                    eprintln!("Server error: {}", e);
+                    std::process::exit(1);
+                }
+            });
+        }
+        Some(other) => {
+            eprintln!("Unknown replication role: {}. Use 'leader' or 'follower'.", other);
             std::process::exit(1);
         }
-    });
+        None => {
+            let server = TcpServer::new(config);
+            rt.block_on(async {
+                if let Err(e) = server.start().await {
+                    eprintln!("Server error: {}", e);
+                    std::process::exit(1);
+                }
+            });
+        }
+    }
 }
 
 fn run_backup(args: &[String]) {
@@ -462,8 +557,15 @@ fn print_server_help() {
     println!("    maharit server [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    -h, --host <HOST>            Host to bind to (default: 127.0.0.1)");
-    println!("    -p, --port <PORT>            Port to listen on (default: 7687)");
-    println!("    -c, --max-connections <N>    Maximum concurrent connections (default: 100)");
-    println!("    --help                       Print this help message");
+    println!("    -h, --host <HOST>                Host to bind to (default: 127.0.0.1)");
+    println!("    -p, --port <PORT>                Port to listen on (default: 7687)");
+    println!("    -c, --max-connections <N>        Maximum concurrent connections (default: 100)");
+    println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
+    println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
+    println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
+    println!("    --help                           Print this help message");
+    println!();
+    println!("EXAMPLES:");
+    println!("    maharit server --replication-role leader --replication-bind 0.0.0.0:7688");
+    println!("    maharit server --replication-role follower --leader-addr 192.168.1.1:7688 --port 7690");
 }
