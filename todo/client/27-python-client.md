@@ -8,28 +8,28 @@ PythonからMaharitDBに接続するためのクライアントライブラリ�
 ## 実装内容
 
 ### 接続管理
-- [ ] 同期API
-- [ ] 非同期API（asyncio対応）
+- [x] 同期API
+- [x] 非同期API（asyncio対応）
 - [ ] コネクションプール
 - [ ] 自動再接続
 
 ### クエリ実行
-- [ ] クエリの実行と結果取得
-- [ ] パラメータバインド
-- [ ] トランザクション対応
+- [x] クエリの実行と結果取得
+- [x] パラメータバインド
+- [x] トランザクション対応
 
 ### 結果の扱い
-- [ ] Pythonオブジェクトへの変換
-- [ ] pandas DataFrame対応
-- [ ] イテレータ/ジェネレータ対応
+- [x] Pythonオブジェクトへの変換
+- [x] pandas DataFrame対応
+- [x] イテレータ/ジェネレータ対応
 
 ### 型変換
-- [ ] PropertyValue <-> Python型のマッピング
-- [ ] Node/Edge のPython表現
+- [x] PropertyValue <-> Python型のマッピング（JSON経由）
+- [ ] Node/Edge のPython表現（専用クラス）
 
 ## 実装方法
 - [ ] PyO3によるRustバインディング
-- [ ] または純粋Pythonでのプロトコル実装
+- [x] または純粋Pythonでのプロトコル実装
 
 ## API例
 ```python
@@ -55,7 +55,7 @@ df = client.query("MATCH (n:Person) RETURN n.name, n.age").to_dataframe()
 ## パッケージング
 - [ ] PyPI公開（`pip install maharit`）
 - [ ] ドキュメント（Sphinx）
-- [ ] サンプルコード
+- [x] サンプルコード（README.md）
 
 ## 依存
 - `12-tcp-server.md` が完了していること

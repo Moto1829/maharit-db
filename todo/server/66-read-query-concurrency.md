@@ -1,6 +1,6 @@
 # Task 66: Read Query Concurrency Optimization
 
-**Status**: Completed (infrastructure implemented; executor refactoring deferred)
+**Status**: Completed
 
 ## Summary
 
@@ -26,16 +26,12 @@ read execution in `crates/maharit-server/src/tcp_server.rs` and
   now (see note below).
 - `execute_streaming_query`: same `is_read_only` classification applied.
 
-## Note on Executor API Limitation
+## Note
 
-The `Executor::new(&mut Graph)` API requires an exclusive mutable reference.
-Changing the lock to `graph.read()` for read-only queries would require either:
-- Creating a `Executor::new_read_only(&Graph)` variant, or
-- Wrapping `Graph` in `std::cell::UnsafeCell` on the server side.
-
-Both approaches would require significant refactoring. The `is_read_only`
-function and parse-before-lock structure are in place so this can be added
-in a follow-up task without touching the server call sites.
+The `Executor::new_readonly(&Graph)` variant was added in task 58, enabling
+`graph.read()` for read-only queries on the server side. The `is_read_only`
+classification added here is used by `tcp_server.rs` to route queries to the
+appropriate lock path.
 
 ## Tests
 

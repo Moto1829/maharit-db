@@ -9,10 +9,10 @@ mdBook で作成したドキュメントを GitHub Pages で自動ビルド・�
 ## 実装内容
 
 ### GitHub Actions ワークフロー
-- [ ] `.github/workflows/docs.yml` を作成
-- [ ] `docs/` 配下の変更時のみビルドをトリガー
-- [ ] `peaceiris/actions-mdbook` で mdbook をインストール・ビルド
-- [ ] `peaceiris/actions-gh-pages` で `gh-pages` ブランチにデプロイ
+- [x] `.github/workflows/docs.yml` を作成
+- [x] `docs/` 配下の変更時のみビルドをトリガー
+- [x] `peaceiris/actions-mdbook` で mdbook をインストール・ビルド
+- [x] `peaceiris/actions-gh-pages` で `gh-pages` ブランチにデプロイ
 
 ### GitHub リポジトリ設定
 - [ ] リポジトリの Settings > Pages > Source を `gh-pages` ブランチに設定
@@ -58,7 +58,7 @@ jobs:
 
 ### オプション対応
 - [ ] カスタムドメインの設定（`docs/CNAME` ファイル）
-- [ ] `book.toml` に `git-repository-url` を実際のリポジトリ URL で設定
+- [x] `book.toml` に `git-repository-url` を実際のリポジトリ URL で設定
 
 ## 依存
 - `46-mdbook-documentation.md` の mdBook セットアップ（`book.toml` と `docs/src/` の作成）が完了していること

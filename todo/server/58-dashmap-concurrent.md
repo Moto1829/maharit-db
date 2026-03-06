@@ -23,19 +23,19 @@ let response = execute_query(&graph, &query).await;  // 他の全接続をブロ
 
 ## 実装内容
 
-### 案A: DashMap の導入（推奨）
+### 案A: DashMap の導入（未実装）
 
 - [ ] `maharit-core` の `nodes` / `edges` を `DashMap<NodeId, Node>` に変更
   （または `Graph` 全体をシャード化した構造体でラップ）
 - [ ] 読み取り専用クエリは複数同時実行可能にする
 - [ ] 書き込みクエリは影響するシャードのみロック
 
-### 案B: MVCC スナップショット読み取り
+### 案B: 読み取り専用エグゼキューター（実装済）
 
-- [ ] 読み取りクエリ開始時にグラフのスナップショット（`Arc` クローン）を取得
-- [ ] スナップショットに対してロックなしで読み取り実行
-- [ ] 書き込みは元の `RwLock<Graph>` に対して排他的に行う
-- [ ] `maharit-storage` の MVCC（既存）と連携
+- [x] 読み取りクエリに `graph.read()` を使用（共有ロック）
+- [x] `Executor::new_readonly(&Graph)` で不変参照からエグゼキューターを生成
+- [x] 書き込みクエリは `graph.write()` で排他ロック
+- [x] `is_read_only()` で読み取り/書き込みクエリを分類
 
 ## 期待効果
 
