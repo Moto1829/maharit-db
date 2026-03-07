@@ -15,11 +15,11 @@ Cypher の日時型（`date()`, `datetime()`, `duration()`）を実装する。
 ### 組み込み関数
 
 - [x] `date()` - 現在日付、または `date("2024-01-15")` でパース
-- [ ] `date({year, month, day})` - マップから構築（Map式未サポートのため保留）
+- [x] `date({year, month, day})` - マップから構築（Expression::Map を追加）
 - [x] `datetime()` - 現在日時（UTC）
 - [x] `datetime("2024-01-15T12:00:00Z")` - ISO 8601 文字列からパース
 - [x] `duration("P1Y2M3D")` - ISO 8601 期間文字列からパース
-- [ ] `duration({years, months, days, hours, minutes, seconds})` - マップから構築（同上）
+- [x] `duration({years, months, days, hours, minutes, seconds})` - マップから構築
 
 ### 日時演算
 

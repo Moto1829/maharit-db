@@ -583,6 +583,8 @@ pub enum Expression {
     IsEmpty(Box<Expression>),
     /// パターン述語: WHERE (n)-->() or WHERE (n)-[:KNOWS]->(m)
     PatternPredicate(Vec<Pattern>),
+    /// マップリテラル: {key: expr, ...}
+    Map(HashMap<String, Expression>),
     /// 式コンテキストで使えるスカラー関数
     ScalarFn(ScalarFunction),
 }

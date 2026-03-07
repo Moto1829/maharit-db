@@ -127,6 +127,8 @@ pub enum Value {
         days: i32,
         millis: i64,
     },
+    /// マップ値: {key: value, ...}
+    Map(std::collections::HashMap<String, Value>),
 }
 
 impl std::fmt::Display for Value {
@@ -168,6 +170,16 @@ impl std::fmt::Display for Value {
             }
             Value::Duration { months, days, millis } => {
                 write!(f, "{}", maharit_core::temporal::duration_to_string(*months, *days, *millis))
+            }
+            Value::Map(map) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, "}}")
             }
         }
     }
@@ -3965,7 +3977,20 @@ impl<'a> Executor<'a> {
                                 }
                             }
                             Value::Date(d) => Ok(Value::Date(d)),
-                            _ => Err(ExecuteError::TypeError("date() requires a string argument".to_string())),
+                            Value::Map(map) => {
+                                let get_i32 = |key: &str| -> Option<i32> {
+                                    match map.get(key) {
+                                        Some(Value::Int(n)) => Some(*n as i32),
+                                        _ => None,
+                                    }
+                                };
+                                let year = get_i32("year").unwrap_or(1970);
+                                let month = get_i32("month").unwrap_or(1);
+                                let day = get_i32("day").unwrap_or(1);
+                                let days = temporal::ymd_to_days(year, month, day);
+                                Ok(Value::Date(days))
+                            }
+                            _ => Err(ExecuteError::TypeError("date() requires a string or map argument".to_string())),
                         }
                     }
                 }
@@ -4006,7 +4031,34 @@ impl<'a> Executor<'a> {
                             None => Err(ExecuteError::TypeError(format!("invalid duration string: {}", s))),
                         }
                     }
-                    _ => Err(ExecuteError::TypeError("duration() requires a string argument".to_string())),
+                    Value::Map(map) => {
+                        let get_i64 = |key: &str| -> i64 {
+                            match map.get(key) {
+                                Some(Value::Int(n)) => *n,
+                                _ => 0,
+                            }
+                        };
+                        let years = get_i64("years");
+                        let months_v = get_i64("months");
+                        let weeks = get_i64("weeks");
+                        let days = get_i64("days");
+                        let hours = get_i64("hours");
+                        let minutes = get_i64("minutes");
+                        let seconds = get_i64("seconds");
+                        let milliseconds = get_i64("milliseconds");
+                        let total_months = (years * 12 + months_v) as i32;
+                        let total_days = (weeks * 7 + days) as i32;
+                        let total_millis = hours * 3_600_000
+                            + minutes * 60_000
+                            + seconds * 1_000
+                            + milliseconds;
+                        Ok(Value::Duration {
+                            months: total_months,
+                            days: total_days,
+                            millis: total_millis,
+                        })
+                    }
+                    _ => Err(ExecuteError::TypeError("duration() requires a string or map argument".to_string())),
                 }
             }
         }
@@ -4718,6 +4770,13 @@ impl<'a> Executor<'a> {
                         .all(|(k, v)| new_b.get(k).is_none_or(|nv| nv == v))
                 });
                 Ok(Value::Bool(!matches.is_empty()))
+            }
+            Expression::Map(map) => {
+                let mut result = std::collections::HashMap::new();
+                for (k, v) in map {
+                    result.insert(k.clone(), self.evaluate_expression(v, bindings)?);
+                }
+                Ok(Value::Map(result))
             }
             Expression::ScalarFn(func) => self.evaluate_scalar_function(func, bindings),
         }
@@ -10666,6 +10725,35 @@ mod tests {
         assert_eq!(result.rows[0].columns[3], Value::Int(4));  // hours
         assert_eq!(result.rows[0].columns[4], Value::Int(5));  // minutes
         assert_eq!(result.rows[0].columns[5], Value::Int(6));  // seconds
+    }
+
+    #[test]
+    fn test_date_from_map() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) WITH date({year: 2024, month: 3, day: 7}) AS d RETURN d.year, d.month, d.day",
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2024));
+        assert_eq!(result.rows[0].columns[1], Value::Int(3));
+        assert_eq!(result.rows[0].columns[2], Value::Int(7));
+    }
+
+    #[test]
+    fn test_duration_from_map() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            "MATCH (n:T) WITH duration({years: 1, months: 2, days: 3, hours: 4, minutes: 5, seconds: 6}) AS dur RETURN dur.years, dur.months, dur.days, dur.hours",
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));
+        assert_eq!(result.rows[0].columns[2], Value::Int(3));
+        assert_eq!(result.rows[0].columns[3], Value::Int(4));
     }
 
     #[test]

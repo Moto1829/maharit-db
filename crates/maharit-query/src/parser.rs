@@ -2548,6 +2548,11 @@ impl Parser {
                 // List literal: [expr, expr, ...]
                 self.parse_list_expression()
             }
+            Some(TokenKind::LBrace) => {
+                // Map literal: {key: expr, key: expr, ...}
+                let props = self.parse_properties()?;
+                Ok(Expression::Map(props))
+            }
             Some(TokenKind::Case) => self.parse_case_expression(),
             Some(TokenKind::All) => {
                 // `all` is a keyword token, handle as list predicate function

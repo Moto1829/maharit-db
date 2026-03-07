@@ -76,7 +76,7 @@ maharit-db の公式ドキュメントを mdBook で作成し、公開できる�
 - [x] `docs/` ディレクトリに `book.toml` を作成
 - [x] `docs/src/` に各章の Markdown を作成
 - [x] `docs/src/SUMMARY.md` に目次を定義
-- [ ] GitHub Actions で自動ビルド・公開（gh-pages）
+- [x] GitHub Actions で自動ビルド・公開（gh-pages）
 
 ## book.toml 例
 ```toml
