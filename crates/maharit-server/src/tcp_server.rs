@@ -23,6 +23,7 @@ use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
 
 use crate::replication::{LeaderReplicationManager, WalEntryData};
+use crate::tracing_setup::TracingConfig;
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -264,7 +265,11 @@ impl TcpServer {
 
     /// Start the server
     pub async fn start(&self) -> std::io::Result<()> {
+        // Initialise structured tracing (JSON to stderr; honours RUST_LOG env var)
+        let _tracing_guard = TracingConfig::default().init();
+
         let listener = TcpListener::bind(&self.config.bind_address).await?;
+        tracing::info!(address = %self.config.bind_address, "Server listening");
         println!("Server listening on {}", self.config.bind_address);
 
         // Create shutdown broadcast channel
@@ -289,6 +294,7 @@ impl TcpServer {
 
             match accept_result {
                 Ok(Ok((socket, addr))) => {
+                    tracing::info!(peer = %addr, "Client connected");
                     self.stats.total_connections.fetch_add(1, Ordering::SeqCst);
                     self.stats
                         .current_connections
@@ -316,7 +322,10 @@ impl TcpServer {
                         .await;
 
                         if let Err(e) = result {
+                            tracing::warn!(peer = %addr, error = %e, "Connection error");
                             eprintln!("Connection error from {}: {}", addr, e);
+                        } else {
+                            tracing::info!(peer = %addr, "Client disconnected");
                         }
 
                         stats.current_connections.fetch_sub(1, Ordering::SeqCst);
@@ -402,7 +411,12 @@ async fn handle_connection(
         let response = match request {
             Request::Query { query, tx_id: _ } => {
                 stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                execute_query(&graph, &query, replication.as_deref()).await
+                let span = tracing::info_span!("query", query = %query);
+                let _enter = span.enter();
+                let start = std::time::Instant::now();
+                let resp = execute_query(&graph, &query, replication.as_deref()).await;
+                tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
+                resp
             }
             Request::StreamQuery {
                 query,
@@ -410,6 +424,7 @@ async fn handle_connection(
                 chunk_size,
             } => {
                 stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                tracing::info!(query = %query, "streaming query");
                 // Execute streaming query
                 if let Err(e) = execute_streaming_query(
                     &mut socket,

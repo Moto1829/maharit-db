@@ -19,8 +19,8 @@
 - [x] カスタムラベル
 
 ### OpenTelemetry対応（将来的）
-- [ ] トレーシング
-- [ ] 分散トレーシング
+- [x] トレーシング（structured tracing; OTLP endpoint configured, JSON to stderr）
+- [ ] 分散トレーシング（OTLP/gRPC export requires `otlp` feature – future work）
 
 ### ヘルスチェック
 - [x] `/health` エンドポイント
