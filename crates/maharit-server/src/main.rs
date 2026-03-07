@@ -49,6 +49,7 @@ fn run_server(args: &[String]) {
     use crate::replication::{
         FollowerReplicationManager, LeaderReplicationManager, NodeRole, ReplicationConfig,
     };
+    use maharit_storage::PersistentStorage;
     use std::sync::Arc;
 
     let mut config = ServerConfig::default();
@@ -57,6 +58,9 @@ fn run_server(args: &[String]) {
     let mut replication_role: Option<String> = None;
     let mut replication_bind: Option<String> = None;
     let mut leader_addr: Option<String> = None;
+
+    // Persistence option
+    let mut data_path: Option<String> = None;
 
     // Parse arguments
     let mut i = 0;
@@ -82,6 +86,12 @@ fn run_server(args: &[String]) {
                     if let Ok(n) = args[i + 1].parse() {
                         config.max_connections = n;
                     }
+                    i += 1;
+                }
+            }
+            "--data" | "-d" => {
+                if i + 1 < args.len() {
+                    data_path = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -112,6 +122,29 @@ fn run_server(args: &[String]) {
         i += 1;
     }
 
+    // Resolve data path: --data > MAHARIT_DATA env var > default "maharit.db"
+    let data_path = data_path
+        .or_else(|| std::env::var("MAHARIT_DATA").ok())
+        .unwrap_or_else(|| "maharit.db".to_string());
+
+    // Load graph from file or start with empty graph
+    let graph = if std::path::Path::new(&data_path).exists() {
+        match PersistentStorage::load(&data_path) {
+            Ok(g) => {
+                println!("Loaded database from {}", data_path);
+                g
+            }
+            Err(e) => {
+                eprintln!("Failed to load database from {}: {}", data_path, e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("Starting with empty database (will save to {})", data_path);
+        maharit_core::Graph::new()
+    };
+
+    let graph_arc = Arc::new(tokio::sync::RwLock::new(graph));
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
 
     match replication_role.as_deref() {
@@ -124,14 +157,17 @@ fn run_server(args: &[String]) {
                 leader_address: None,
                 ..Default::default()
             };
-            let graph = Arc::new(tokio::sync::RwLock::new(maharit_core::Graph::new()));
             let leader = Arc::new(LeaderReplicationManager::with_graph(
                 repl_config,
-                Arc::clone(&graph),
+                Arc::clone(&graph_arc),
             ));
             let leader_clone = Arc::clone(&leader);
-            let server = TcpServer::new(config).with_replication(Arc::clone(&leader));
+            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
+                .with_replication(Arc::clone(&leader));
+            let graph_for_signal = Arc::clone(&graph_arc);
+            let path_for_signal = data_path.clone();
             rt.block_on(async move {
+                spawn_shutdown_handler(graph_for_signal, path_for_signal);
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
                         eprintln!("Replication leader error: {}", e);
@@ -161,8 +197,11 @@ fn run_server(args: &[String]) {
             };
             let follower = Arc::new(FollowerReplicationManager::new(repl_config));
             let follower_clone = Arc::clone(&follower);
-            let server = TcpServer::new(config);
+            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let graph_for_signal = Arc::clone(&graph_arc);
+            let path_for_signal = data_path.clone();
             rt.block_on(async move {
+                spawn_shutdown_handler(graph_for_signal, path_for_signal);
                 tokio::spawn(async move {
                     if let Err(e) = follower_clone.start().await {
                         eprintln!("Replication follower error: {}", e);
@@ -179,14 +218,51 @@ fn run_server(args: &[String]) {
             std::process::exit(1);
         }
         None => {
-            let server = TcpServer::new(config);
-            rt.block_on(async {
+            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let graph_for_signal = Arc::clone(&graph_arc);
+            let path_for_signal = data_path.clone();
+            rt.block_on(async move {
+                spawn_shutdown_handler(graph_for_signal, path_for_signal);
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
                     std::process::exit(1);
                 }
             });
         }
+    }
+}
+
+/// Spawn a background task that waits for SIGINT/SIGTERM, saves the database, then exits.
+fn spawn_shutdown_handler(
+    graph: std::sync::Arc<tokio::sync::RwLock<maharit_core::Graph>>,
+    data_path: String,
+) {
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        println!("\nShutting down, saving database to {}...", data_path);
+        let g = graph.read().await;
+        match maharit_storage::PersistentStorage::save(&g, &data_path) {
+            Ok(()) => println!("Database saved successfully."),
+            Err(e) => eprintln!("Warning: Failed to save database: {}", e),
+        }
+        std::process::exit(0);
+    });
+}
+
+/// Wait for Ctrl-C (SIGINT) or SIGTERM.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
     }
 }
 
@@ -566,6 +642,8 @@ fn print_server_help() {
     println!("    maharit server [OPTIONS]");
     println!();
     println!("OPTIONS:");
+    println!("    -d, --data <PATH>                Database file path (default: maharit.db, env: MAHARIT_DATA)");
+    println!("                                     Loaded on startup if exists; saved on shutdown.");
     println!("    -h, --host <HOST>                Host to bind to (default: 127.0.0.1)");
     println!("    -p, --port <PORT>                Port to listen on (default: 7687)");
     println!("    -c, --max-connections <N>        Maximum concurrent connections (default: 100)");

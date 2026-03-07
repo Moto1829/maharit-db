@@ -255,6 +255,23 @@ impl TcpServer {
         }
     }
 
+    /// Create a server with a shared graph Arc (for sharing with signal handlers)
+    pub fn with_graph_arc(config: ServerConfig, graph: Arc<RwLock<Graph>>) -> Self {
+        Self {
+            config,
+            graph,
+            stats: Arc::new(ServerStats::default()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            tx_manager: Arc::new(TransactionManager::new()),
+            replication: None,
+        }
+    }
+
+    /// Return a clone of the graph Arc
+    pub fn graph_arc(&self) -> Arc<RwLock<Graph>> {
+        Arc::clone(&self.graph)
+    }
+
     /// Attach a leader replication manager.  Once attached, every successful
     /// write query automatically appends WAL entries to the manager, which
     /// broadcasts them to all connected followers.

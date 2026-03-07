@@ -19,11 +19,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: maharit-db-server
-    command: ["/app/maharit", "server", "--host", "0.0.0.0", "--port", "7687"]
+    command: ["/app/maharit", "server", "--host", "0.0.0.0", "--port", "7687", "--data", "/data/maharit.db"]
     volumes:
       - maharit-data:/data
     environment:
-      - MAHARIT_DATA_DIR=/data
+      - MAHARIT_DATA=/data/maharit.db
     ports:
       - "7687:7687"
 
