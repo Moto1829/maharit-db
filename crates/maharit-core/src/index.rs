@@ -38,11 +38,14 @@ impl LabelIndex {
                 continue;
             }
             // Forward index: label → node set
-            // entry() needs an owned key; one allocation per new label
-            self.node_labels
-                .entry(label.to_string())
-                .or_default()
-                .insert(node_id);
+            // Avoid allocating a String when the label key already exists.
+            if let Some(set) = self.node_labels.get_mut(label) {
+                set.insert(node_id);
+            } else {
+                let mut set = HashSet::new();
+                set.insert(node_id);
+                self.node_labels.insert(label.to_string(), set);
+            }
             // Reverse index: node → label set (HashSet deduplicates in O(1))
             self.node_to_labels
                 .entry(node_id)

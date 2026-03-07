@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::traversal::Traversal;
@@ -96,9 +96,9 @@ pub struct Graph {
     /// EdgeId をインデックスとするエッジ配列（削除済みは None）
     edges: Vec<Option<Edge>>,
     /// ノードから出るエッジのリスト（NodeId をインデックス）
-    outgoing_edges: Vec<Vec<EdgeId>>,
+    outgoing_edges: Vec<HashSet<EdgeId>>,
     /// ノードに入るエッジのリスト（NodeId をインデックス）
-    incoming_edges: Vec<Vec<EdgeId>>,
+    incoming_edges: Vec<HashSet<EdgeId>>,
     /// 削除済みノードスロットの再利用リスト
     node_free_list: Vec<NodeId>,
     /// 削除済みエッジスロットの再利用リスト
@@ -134,8 +134,8 @@ impl Graph {
                 labels,
                 properties: Arc::new(HashMap::new()),
             });
-            self.outgoing_edges[freed as usize] = Vec::new();
-            self.incoming_edges[freed as usize] = Vec::new();
+            self.outgoing_edges[freed as usize] = HashSet::new();
+            self.incoming_edges[freed as usize] = HashSet::new();
             freed
         } else {
             // Append a new slot
@@ -145,8 +145,8 @@ impl Graph {
                 labels,
                 properties: Arc::new(HashMap::new()),
             }));
-            self.outgoing_edges.push(Vec::new());
-            self.incoming_edges.push(Vec::new());
+            self.outgoing_edges.push(HashSet::new());
+            self.incoming_edges.push(HashSet::new());
             id
         };
         self.node_count += 1;
@@ -178,8 +178,8 @@ impl Graph {
         if idx >= self.nodes.len() {
             let new_len = idx + 1;
             self.nodes.resize_with(new_len, || None);
-            self.outgoing_edges.resize_with(new_len, Vec::new);
-            self.incoming_edges.resize_with(new_len, Vec::new);
+            self.outgoing_edges.resize_with(new_len, HashSet::new);
+            self.incoming_edges.resize_with(new_len, HashSet::new);
         }
 
         // Remove from free list if it was there (slot is being explicitly assigned)
@@ -190,8 +190,8 @@ impl Graph {
             labels,
             properties: Arc::new(HashMap::new()),
         });
-        self.outgoing_edges[idx] = Vec::new();
-        self.incoming_edges[idx] = Vec::new();
+        self.outgoing_edges[idx] = HashSet::new();
+        self.incoming_edges[idx] = HashSet::new();
         self.node_count += 1;
         id
     }
@@ -220,7 +220,7 @@ impl Graph {
                 let to = slot.as_ref().unwrap().to;
                 slot.take();
                 if (to as usize) < self.incoming_edges.len() {
-                    self.incoming_edges[to as usize].retain(|&e| e != edge_id);
+                    self.incoming_edges[to as usize].remove(&edge_id);
                 }
                 self.edge_free_list.push(edge_id);
                 self.edge_count -= 1;
@@ -234,7 +234,7 @@ impl Graph {
                 let from = slot.as_ref().unwrap().from;
                 slot.take();
                 if (from as usize) < self.outgoing_edges.len() {
-                    self.outgoing_edges[from as usize].retain(|&e| e != edge_id);
+                    self.outgoing_edges[from as usize].remove(&edge_id);
                 }
                 self.edge_free_list.push(edge_id);
                 self.edge_count -= 1;
@@ -284,8 +284,8 @@ impl Graph {
             id
         };
 
-        self.outgoing_edges[from as usize].push(id);
-        self.incoming_edges[to as usize].push(id);
+        self.outgoing_edges[from as usize].insert(id);
+        self.incoming_edges[to as usize].insert(id);
         self.edge_count += 1;
 
         Ok(id)
@@ -306,36 +306,32 @@ impl Graph {
         let slot = self.edges.get_mut(id as usize)?;
         let edge = slot.take()?;
         if (edge.from as usize) < self.outgoing_edges.len() {
-            self.outgoing_edges[edge.from as usize].retain(|&e| e != id);
+            self.outgoing_edges[edge.from as usize].remove(&id);
         }
         if (edge.to as usize) < self.incoming_edges.len() {
-            self.incoming_edges[edge.to as usize].retain(|&e| e != id);
+            self.incoming_edges[edge.to as usize].remove(&id);
         }
         self.edge_free_list.push(id);
         self.edge_count -= 1;
         Some(edge)
     }
 
-    /// ノードから出るエッジをイテレートする（Vec アロケーションなし）
+    /// ノードから出るエッジをイテレートする（アロケーションなし）
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> impl Iterator<Item = &Edge> + '_ {
-        let ids = self
-            .outgoing_edges
+        self.outgoing_edges
             .get(node_id as usize)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        ids.iter()
-            .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
+            .into_iter()
+            .flat_map(|set| set.iter().copied())
+            .filter_map(|id| self.edges.get(id as usize)?.as_ref())
     }
 
-    /// ノードに入るエッジをイテレートする（Vec アロケーションなし）
+    /// ノードに入るエッジをイテレートする（アロケーションなし）
     pub fn get_incoming_edges(&self, node_id: NodeId) -> impl Iterator<Item = &Edge> + '_ {
-        let ids = self
-            .incoming_edges
+        self.incoming_edges
             .get(node_id as usize)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        ids.iter()
-            .filter_map(|&id| self.edges.get(id as usize)?.as_ref())
+            .into_iter()
+            .flat_map(|set| set.iter().copied())
+            .filter_map(|id| self.edges.get(id as usize)?.as_ref())
     }
 
     /// NodeId の上限（稠密インデックス用）。現在の Vec キャパシティに等しい。
