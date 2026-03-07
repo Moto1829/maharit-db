@@ -1,7 +1,5 @@
 # Task 65: Parallel MATCH Candidate Filtering
 
-**Status**: Completed
-
 ## Summary
 
 Parallelized the node candidate scan in `match_node_pattern()` in

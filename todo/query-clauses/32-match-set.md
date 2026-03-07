@@ -1,7 +1,5 @@
 # MATCH + SET 複合クエリ
 
-**Status**: Completed
-
 ## 概要
 MATCHで取得したノード・エッジのプロパティをSET句で更新する複合クエリを実装する。
 現在SETはDELETE文の前処理としてのみ動作するが、単独のMATCH + SET + RETURNをサポートする。

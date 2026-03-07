@@ -1,7 +1,5 @@
 # GitHub Pages でドキュメントを公開
 
-**Status**: Completed
-
 ## 概要
 mdBook で作成したドキュメントを GitHub Pages で自動ビルド・公開する。
 `main` ブランチへの push 時に自動でデプロイされる仕組みを構築する。

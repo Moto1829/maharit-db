@@ -1,7 +1,5 @@
 # グラフ構造: HashMap を稠密配列に変更
 
-**Status**: Completed
-
 ## 概要
 
 `NodeId` / `EdgeId` は連番整数なのに `HashMap` で管理しているため、

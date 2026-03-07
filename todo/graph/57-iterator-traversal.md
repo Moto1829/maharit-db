@@ -1,7 +1,5 @@
 # トラバーサル: Vec アロケーションをイテレータ設計に変更
 
-**Status**: Completed
-
 ## 概要
 
 `get_outgoing_edges()` / `get_incoming_edges()` が毎回 `Vec` を生成するため、

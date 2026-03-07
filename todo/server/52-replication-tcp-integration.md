@@ -1,7 +1,5 @@
 # レプリケーション: TCP サーバーとの統合
 
-**Status**: Completed
-
 ## 概要
 
 クエリ実行（CREATE / SET / DELETE）が `LeaderReplicationManager::append_wal_entry()` を

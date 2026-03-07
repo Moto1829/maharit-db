@@ -1,7 +1,5 @@
 # 17-docker: Docker対応
 
-**Status**: Completed
-
 ## 概要
 maharit-dbをDockerコンテナで実行できるようにする。
 

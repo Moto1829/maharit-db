@@ -1,7 +1,5 @@
 # レプリケーション: WalEntryData の複数ラベル対応
 
-**Status**: Completed
-
 ## 概要
 
 タスク 48（複数ラベル）で `Node.labels: Vec<String>` になったが、

@@ -1,7 +1,5 @@
 # Task 63: Graph Algorithm Parallelization
 
-**Status**: Completed
-
 ## Summary
 
 Parallelized graph algorithms in `crates/maharit-core/src/algorithms.rs` using `rayon`.

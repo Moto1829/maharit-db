@@ -1,7 +1,5 @@
 # クエリエンジン: バインディングの遅延評価
 
-**Status**: Completed
-
 ## 概要
 
 `execute_match()` が各パターンで `Vec<Bindings>` を丸ごと作り直しているため、

@@ -1,7 +1,5 @@
 # Task 66: Read Query Concurrency Optimization
 
-**Status**: Completed
-
 ## Summary
 
 Added read-only query classification infrastructure to enable future concurrent

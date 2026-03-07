@@ -1,7 +1,5 @@
 # Pythonクライアント
 
-**Status**: Completed
-
 ## 概要
 PythonからMaharitDBに接続するためのクライアントライブラリを実装する。
 

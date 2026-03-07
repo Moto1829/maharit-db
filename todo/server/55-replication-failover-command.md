@@ -1,7 +1,5 @@
 # レプリケーション: フェイルオーバーコマンド
 
-**Status**: Completed
-
 ## 概要
 
 ドキュメント（`advanced/replication.md`）に記載されている

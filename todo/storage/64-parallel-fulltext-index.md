@@ -1,7 +1,5 @@
 # Task 64: Parallel Fulltext Index Building
 
-**Status**: Completed
-
 ## Summary
 
 Parallelized the tokenization phase of fulltext index construction in
