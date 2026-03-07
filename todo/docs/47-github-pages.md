@@ -10,52 +10,48 @@ mdBook で作成したドキュメントを GitHub Pages で自動ビルド・�
 - [x] `.github/workflows/docs.yml` を作成
 - [x] `docs/` 配下の変更時のみビルドをトリガー
 - [x] `peaceiris/actions-mdbook` で mdbook をインストール・ビルド
-- [x] `peaceiris/actions-gh-pages` で `gh-pages` ブランチにデプロイ
+- [x] ~~`peaceiris/actions-gh-pages` で `gh-pages` ブランチにデプロイ~~ → 方針変更（下記参照）
+
+### 方針変更: `actions/deploy-pages` 方式に移行
+現状、GitHub Pages が main ブランチの `docs/` を Jekyll で直接処理してしまい、
+mdBook ソース内の Cypher クエリ（`{{name: ...}}`）が Liquid 構文エラーになる。
+
+**採用方針**: `actions/upload-pages-artifact` + `actions/deploy-pages`（GitHub 推奨の現行方式）
+- gh-pages ブランチ不要
+- mdBook ビルド結果のみをデプロイ
+- Jekyll が介在しない
+
+- [ ] `.github/workflows/docs.yml` を `actions/deploy-pages` 方式に更新
+  ```yaml
+  permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+  jobs:
+    deploy:
+      environment:
+        name: github-pages
+        url: ${{ steps.deployment.outputs.page_url }}
+      steps:
+        - uses: actions/checkout@v4
+        - uses: peaceiris/actions-mdbook@v2
+          with:
+            mdbook-version: latest
+        - run: mdbook build docs/
+        - uses: actions/configure-pages@v5
+        - uses: actions/upload-pages-artifact@v3
+          with:
+            path: ./docs/book
+        - id: deployment
+          uses: actions/deploy-pages@v4
+  ```
 
 ### GitHub リポジトリ設定
-- [ ] リポジトリの Settings > Pages > Source を `gh-pages` ブランチに設定
-- [ ] 公開 URL の確認（`https://<user>.github.io/maharit-db/`）
-
-### ワークフロー設定例
-```yaml
-# .github/workflows/docs.yml
-name: Deploy mdBook to GitHub Pages
-
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'docs/**'
-      - '.github/workflows/docs.yml'
-  workflow_dispatch:  # 手動実行も可能
-
-permissions:
-  contents: write
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: latest
-
-      - name: Build mdBook
-        run: mdbook build docs/
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs/book
-          publish_branch: gh-pages
-```
+- [ ] Settings > Pages > Source を **「GitHub Actions」** に変更（「Deploy from a branch」から変更）
+- [ ] 公開 URL の確認（`https://moto1829.github.io/maharit-db/`）
 
 ### オプション対応
-- [ ] カスタムドメインの設定（`docs/CNAME` ファイル）
 - [x] `book.toml` に `git-repository-url` を実際のリポジトリ URL で設定
 
 ## 依存
