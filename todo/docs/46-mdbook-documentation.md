@@ -50,15 +50,15 @@ maharit-db の公式ドキュメントを mdBook で作成し、公開できる�
 - [x] トランザクション（BEGIN / COMMIT / ROLLBACK）
 - [x] MVCC（スナップショット分離）
 - [x] レプリケーション（リーダー/フォロワー）
-- [ ] シャーディング（maharit-cluster）
+- [x] シャーディング（maharit-cluster）
 - [x] クエリ最適化（EXPLAIN / PROFILE）
 
 ### API リファレンス
 - [x] Rust クライアント（maharit-client）の使い方
 - [x] TCP プロトコル仕様
-- [ ] Python クライアント（maharit-python）の使い方
-- [ ] Python クライアント: 同期 / 非同期 API
-- [ ] Python クライアント: pandas DataFrame 連携
+- [x] Python クライアント（maharit-python）の使い方
+- [x] Python クライアント: 同期 / 非同期 API
+- [x] Python クライアント: pandas DataFrame 連携
 
 ### グラフアルゴリズム
 - [x] 最短経路（shortest_path）

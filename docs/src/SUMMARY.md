@@ -45,6 +45,7 @@
 
 - [トランザクション](./advanced/transactions.md)
 - [レプリケーション](./advanced/replication.md)
+- [シャーディング](./advanced/sharding.md)
 - [クエリ最適化（EXPLAIN / PROFILE）](./advanced/query-optimization.md)
 
 # API リファレンス
