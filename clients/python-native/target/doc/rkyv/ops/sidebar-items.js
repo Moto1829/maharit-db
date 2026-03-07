@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArchivedBound"],"struct":["ArchivedRange","ArchivedRangeFrom","ArchivedRangeFull","ArchivedRangeInclusive","ArchivedRangeTo","ArchivedRangeToInclusive"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KOREAN_READING_FORM_TOKEN_FILTER_NAME"],"struct":["KoreanReadingFormTokenFilter"],"type":["KoreanReadingFormTokenFilterConfig"]};

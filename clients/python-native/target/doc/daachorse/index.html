@@ -1,0 +1,136 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="🐎 daachorse: Double-Array Aho-Corasick"><title>daachorse - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="daachorse" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0 (254b59607 2026-01-19)" data-channel="1.93.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-a3946164.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-a410ff4d.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate daachorse</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../daachorse/index.html">daachorse</a><span class="version">1.0.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#-daachorse-double-array-aho-corasick" title="🐎 daachorse: Double-Array Aho-Corasick">🐎 daachorse: Double-Array Aho-Corasick</a><ul><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#example-finding-overlapped-occurrences" title="Example: Finding overlapped occurrences">Example: Finding overlapped occurrences</a></li><li><a href="#example-finding-non-overlapped-occurrences-with-standard-matching" title="Example: Finding non-overlapped occurrences with standard matching">Example: Finding non-overlapped occurrences with standard matching</a></li><li><a href="#example-finding-non-overlapped-occurrences-with-longest-matching" title="Example: Finding non-overlapped occurrences with longest matching">Example: Finding non-overlapped occurrences with longest matching</a></li><li><a href="#example-finding-non-overlapped-occurrences-with-leftmost-first-matching" title="Example: Finding non-overlapped occurrences with leftmost-first matching">Example: Finding non-overlapped occurrences with leftmost-first matching</a></li><li><a href="#example-associating-arbitrary-values-with-patterns" title="Example: Associating arbitrary values with patterns">Example: Associating arbitrary values with patterns</a></li><li><a href="#example-building-faster-automaton-on-multibyte-characters" title="Example: Building faster automaton on multibyte characters">Example: Building faster automaton on multibyte characters</a></li></ul></li></ul><h3><a href="#reexports">Crate Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>daachorse</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/daachorse/lib.rs.html#1-422">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="-daachorse-double-array-aho-corasick"><a class="doc-anchor" href="#-daachorse-double-array-aho-corasick">§</a>🐎 daachorse: Double-Array Aho-Corasick</h2>
+<p>A fast implementation of the Aho-Corasick algorithm
+using the compact double-array data structure.</p>
+<h3 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h3>
+<p>Daachorse is a crate for fast multiple pattern matching using the
+<a href="https://dl.acm.org/doi/10.1145/360825.360855">Aho-Corasick algorithm</a>, running in linear time
+over the length of the input text. This crate uses the
+<a href="https://doi.org/10.1016/j.ipm.2006.04.004">compact double-array data structure</a> for
+implementing the pattern match automaton for time and memory efficiency. The data structure not
+only supports constant-time state-to-state traversal but also represents each state in the
+space of only 12 bytes.</p>
+<p>The main technical ideas behind this library appear in
+<a href="https://doi.org/10.48550/arXiv.2207.13870">this paper</a>.</p>
+<h3 id="example-finding-overlapped-occurrences"><a class="doc-anchor" href="#example-finding-overlapped-occurrences">§</a>Example: Finding overlapped occurrences</h3>
+<p>To search for all occurrences of registered patterns that allow for positional overlap in the
+input text, use <a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.find_overlapping_iter" title="method daachorse::bytewise::DoubleArrayAhoCorasick::find_overlapping_iter"><code>DoubleArrayAhoCorasick::find_overlapping_iter()</code></a>.</p>
+<p>When you use <a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.new" title="associated function daachorse::bytewise::DoubleArrayAhoCorasick::new"><code>DoubleArrayAhoCorasick::new()</code></a> for construction, the library assigns a unique
+identifier to each pattern in the input order. The match result has the byte positions of the
+occurrence and its identifier.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::DoubleArrayAhoCorasick;
+
+<span class="kw">let </span>patterns = <span class="macro">vec!</span>[<span class="string">"bcd"</span>, <span class="string">"ab"</span>, <span class="string">"a"</span>];
+<span class="kw">let </span>pma = DoubleArrayAhoCorasick::new(patterns).unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.find_overlapping_iter(<span class="string">"abcd"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">1</span>, <span class="number">2</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">2</span>, <span class="number">1</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">1</span>, <span class="number">4</span>, <span class="number">0</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div><h3 id="example-finding-non-overlapped-occurrences-with-standard-matching"><a class="doc-anchor" href="#example-finding-non-overlapped-occurrences-with-standard-matching">§</a>Example: Finding non-overlapped occurrences with standard matching</h3>
+<p>If you do not want to allow positional overlap, use <a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.find_iter" title="method daachorse::bytewise::DoubleArrayAhoCorasick::find_iter"><code>DoubleArrayAhoCorasick::find_iter()</code></a>
+instead.</p>
+<p>This function performs the search on the Aho-Corasick automaton and reports patterns first
+found in each iteration.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::DoubleArrayAhoCorasick;
+
+<span class="kw">let </span>patterns = <span class="macro">vec!</span>[<span class="string">"bcd"</span>, <span class="string">"ab"</span>, <span class="string">"a"</span>];
+<span class="kw">let </span>pma = DoubleArrayAhoCorasick::new(patterns).unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.find_iter(<span class="string">"abcd"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">1</span>, <span class="number">2</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">1</span>, <span class="number">4</span>, <span class="number">0</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div><h3 id="example-finding-non-overlapped-occurrences-with-longest-matching"><a class="doc-anchor" href="#example-finding-non-overlapped-occurrences-with-longest-matching">§</a>Example: Finding non-overlapped occurrences with longest matching</h3>
+<p>If you want to search for the longest pattern without positional overlap in each iteration, use
+<a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.leftmost_find_iter" title="method daachorse::bytewise::DoubleArrayAhoCorasick::leftmost_find_iter"><code>DoubleArrayAhoCorasick::leftmost_find_iter()</code></a> with specifying
+<a href="enum.MatchKind.html#variant.LeftmostLongest" title="variant daachorse::MatchKind::LeftmostLongest"><code>MatchKind::LeftmostLongest</code></a> in the construction.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::{DoubleArrayAhoCorasickBuilder, MatchKind};
+
+<span class="kw">let </span>patterns = <span class="macro">vec!</span>[<span class="string">"ab"</span>, <span class="string">"a"</span>, <span class="string">"abcd"</span>];
+<span class="kw">let </span>pma = DoubleArrayAhoCorasickBuilder::new()
+    .match_kind(MatchKind::LeftmostLongest)
+    .build(<span class="kw-2">&amp;</span>patterns)
+    .unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.leftmost_find_iter(<span class="string">"abcd"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">4</span>, <span class="number">2</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div><h3 id="example-finding-non-overlapped-occurrences-with-leftmost-first-matching"><a class="doc-anchor" href="#example-finding-non-overlapped-occurrences-with-leftmost-first-matching">§</a>Example: Finding non-overlapped occurrences with leftmost-first matching</h3>
+<p>If you want to find the earliest registered pattern among ones starting from the search
+position, use <a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.leftmost_find_iter" title="method daachorse::bytewise::DoubleArrayAhoCorasick::leftmost_find_iter"><code>DoubleArrayAhoCorasick::leftmost_find_iter()</code></a> with specifying
+<a href="enum.MatchKind.html#variant.LeftmostFirst" title="variant daachorse::MatchKind::LeftmostFirst"><code>MatchKind::LeftmostFirst</code></a>.</p>
+<p>This semantic is the so-called <em>leftmost first match</em>, a tricky search option supported in the
+<a href="https://github.com/BurntSushi/aho-corasick">aho-corasick</a> crate. For example, in the
+following code, <code>ab</code> is reported because it is the earliest registered one.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::{DoubleArrayAhoCorasickBuilder, MatchKind};
+
+<span class="kw">let </span>patterns = <span class="macro">vec!</span>[<span class="string">"ab"</span>, <span class="string">"a"</span>, <span class="string">"abcd"</span>];
+<span class="kw">let </span>pma = DoubleArrayAhoCorasickBuilder::new()
+    .match_kind(MatchKind::LeftmostFirst)
+    .build(<span class="kw-2">&amp;</span>patterns)
+    .unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.leftmost_find_iter(<span class="string">"abcd"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">2</span>, <span class="number">0</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div><h3 id="example-associating-arbitrary-values-with-patterns"><a class="doc-anchor" href="#example-associating-arbitrary-values-with-patterns">§</a>Example: Associating arbitrary values with patterns</h3>
+<p>To build the automaton from pairs of a pattern and user-defined value, instead of assigning
+identifiers automatically, use <a href="bytewise/struct.DoubleArrayAhoCorasick.html#method.with_values" title="associated function daachorse::bytewise::DoubleArrayAhoCorasick::with_values"><code>DoubleArrayAhoCorasick::with_values()</code></a>.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::DoubleArrayAhoCorasick;
+
+<span class="kw">let </span>patvals = <span class="macro">vec!</span>[(<span class="string">"bcd"</span>, <span class="number">0</span>), (<span class="string">"ab"</span>, <span class="number">10</span>), (<span class="string">"a"</span>, <span class="number">20</span>)];
+<span class="kw">let </span>pma = DoubleArrayAhoCorasick::with_values(patvals).unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.find_overlapping_iter(<span class="string">"abcd"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">1</span>, <span class="number">20</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">2</span>, <span class="number">10</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">1</span>, <span class="number">4</span>, <span class="number">0</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div><h3 id="example-building-faster-automaton-on-multibyte-characters"><a class="doc-anchor" href="#example-building-faster-automaton-on-multibyte-characters">§</a>Example: Building faster automaton on multibyte characters</h3>
+<p>To build a faster automaton on multibyte characters, use <a href="charwise/struct.CharwiseDoubleArrayAhoCorasick.html" title="struct daachorse::charwise::CharwiseDoubleArrayAhoCorasick"><code>CharwiseDoubleArrayAhoCorasick</code></a>
+instead.</p>
+<p>The standard version <a href="bytewise/struct.DoubleArrayAhoCorasick.html" title="struct daachorse::bytewise::DoubleArrayAhoCorasick"><code>DoubleArrayAhoCorasick</code></a> handles strings as UTF-8 sequences and defines
+transition labels using byte values. On the other hand, <a href="charwise/struct.CharwiseDoubleArrayAhoCorasick.html" title="struct daachorse::charwise::CharwiseDoubleArrayAhoCorasick"><code>CharwiseDoubleArrayAhoCorasick</code></a> uses
+Unicode code point values, reducing the number of transitions and faster matching.</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>daachorse::CharwiseDoubleArrayAhoCorasick;
+
+<span class="kw">let </span>patterns = <span class="macro">vec!</span>[<span class="string">"全世界"</span>, <span class="string">"世界"</span>, <span class="string">"に"</span>];
+<span class="kw">let </span>pma = CharwiseDoubleArrayAhoCorasick::new(patterns).unwrap();
+
+<span class="kw">let </span><span class="kw-2">mut </span>it = pma.find_iter(<span class="string">"全世界中に"</span>);
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">0</span>, <span class="number">9</span>, <span class="number">0</span>), (m.start(), m.end(), m.value()));
+
+<span class="kw">let </span>m = it.next().unwrap();
+<span class="macro">assert_eq!</span>((<span class="number">12</span>, <span class="number">15</span>, <span class="number">2</span>), (m.start(), m.end(), m.value()));
+
+<span class="macro">assert_eq!</span>(<span class="prelude-val">None</span>, it.next());</code></pre></div></div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.DoubleArrayAhoCorasick"><code>pub use bytewise::<a class="struct" href="bytewise/struct.DoubleArrayAhoCorasick.html" title="struct daachorse::bytewise::DoubleArrayAhoCorasick">DoubleArrayAhoCorasick</a>;</code></dt><dt id="reexport.DoubleArrayAhoCorasickBuilder"><code>pub use bytewise::<a class="struct" href="bytewise/struct.DoubleArrayAhoCorasickBuilder.html" title="struct daachorse::bytewise::DoubleArrayAhoCorasickBuilder">DoubleArrayAhoCorasickBuilder</a>;</code></dt><dt id="reexport.CharwiseDoubleArrayAhoCorasick"><code>pub use charwise::<a class="struct" href="charwise/struct.CharwiseDoubleArrayAhoCorasick.html" title="struct daachorse::charwise::CharwiseDoubleArrayAhoCorasick">CharwiseDoubleArrayAhoCorasick</a>;</code></dt><dt id="reexport.CharwiseDoubleArrayAhoCorasickBuilder"><code>pub use charwise::<a class="struct" href="charwise/struct.CharwiseDoubleArrayAhoCorasickBuilder.html" title="struct daachorse::charwise::CharwiseDoubleArrayAhoCorasickBuilder">CharwiseDoubleArrayAhoCorasickBuilder</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="bytewise/index.html" title="mod daachorse::bytewise">bytewise</a></dt><dd>A byte-wise version of the Double-Array Aho-Corasick.</dd><dt><a class="mod" href="charwise/index.html" title="mod daachorse::charwise">charwise</a></dt><dd>A character-wise version for faster matching on multibyte characters.</dd><dt><a class="mod" href="errors/index.html" title="mod daachorse::errors">errors</a></dt><dd>Definition of errors.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Match.html" title="struct daachorse::Match">Match</a></dt><dd>Match result.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.MatchKind.html" title="enum daachorse::MatchKind">Match<wbr>Kind</a></dt><dd>A search option of the Aho-Corasick automaton
+specified in <a href="bytewise/struct.DoubleArrayAhoCorasickBuilder.html#method.match_kind" title="method daachorse::bytewise::DoubleArrayAhoCorasickBuilder::match_kind"><code>DoubleArrayAhoCorasickBuilder::match_kind</code></a>.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.Serializable.html" title="trait daachorse::Serializable">Serializable</a></dt><dd>Trait indicating serializability.</dd></dl></section></div></main></body></html>

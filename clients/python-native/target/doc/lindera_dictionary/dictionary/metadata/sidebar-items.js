@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ArchivedMetadata","ArchivedModelInfo","Metadata","MetadataResolver","ModelInfo","ModelInfoResolver"]};

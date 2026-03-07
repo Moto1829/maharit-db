@@ -26,7 +26,7 @@ PythonからMaharitDBに接続するためのクライアントライブラリ�
 - [x] Node/Edge のPython表現（専用クラス）
 
 ## 実装方法
-- [ ] PyO3によるRustバインディング
+- [x] PyO3によるRustバインディング（clients/python-native/ に実装）
 - [x] または純粋Pythonでのプロトコル実装
 
 ## API例

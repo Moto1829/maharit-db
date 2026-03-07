@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Direction"],"fn":["all_paths","all_shortest_paths","has_path","shortest_path"],"struct":["AStar","BfsIterator","DfsIterator","Dijkstra","Path","Traversal","WeightedPath"],"type":["HeuristicFn","WeightFn"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Bool","DefaultNiche","NaN","Null","Zero"],"trait":["Niching","SharedNiching"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KOREAN_STOP_TAGS_TOKEN_FILTER_NAME"],"struct":["KoreanStopTagsTokenFilter"],"type":["KoreanStopTagsTokenFilterConfig"]};

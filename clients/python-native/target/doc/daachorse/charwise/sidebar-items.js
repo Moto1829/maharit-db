@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["iter"],"struct":["CharwiseDoubleArrayAhoCorasick","CharwiseDoubleArrayAhoCorasickBuilder"]};

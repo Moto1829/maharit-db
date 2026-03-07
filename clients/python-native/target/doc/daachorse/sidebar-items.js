@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MatchKind"],"mod":["bytewise","charwise","errors"],"struct":["Match"],"trait":["Serializable"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["allocator","sharing","writer"],"struct":["Serializer"],"trait":["Allocator","Positional","Sharing","SharingExt","Writer","WriterExt"]};

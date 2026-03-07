@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DaachorseError"],"struct":["AutomatonScaleError","DuplicatePatternError","InvalidArgumentError","InvalidConversionError"],"type":["Result"]};

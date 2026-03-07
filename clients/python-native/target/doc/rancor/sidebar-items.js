@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Infallible","Panic"],"fn":["unreachable_checked"],"macro":["fail"],"struct":["BoxedError","Error","Failure","Strategy"],"trait":["Fallible","Never","OptionExt","ResultExt","Source","Trace"]};

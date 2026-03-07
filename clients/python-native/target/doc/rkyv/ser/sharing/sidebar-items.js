@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SharingState"],"struct":["Share","Unshare"],"trait":["Sharing","SharingExt"]};

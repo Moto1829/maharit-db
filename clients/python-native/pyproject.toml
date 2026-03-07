@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "maharit-native"
+version = "0.1.0"
+description = "High-performance native Python extension for MaharitDB graph operations"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["graph", "database", "native", "maharitdb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+
+[project.urls]
+Homepage = "https://github.com/Moto1829/maharit-db"
+Repository = "https://github.com/Moto1829/maharit-db"
+
+[tool.maturin]
+python-source = "python"
+module-name = "maharit_native._core"
+features = ["pyo3/extension-module"]

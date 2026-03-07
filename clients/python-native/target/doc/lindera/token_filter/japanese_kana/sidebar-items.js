@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JAPANESE_KANA_TOKEN_FILTER_NAME"],"enum":["KanaKind"],"struct":["JapaneseKanaTokenFilter"],"type":["JapaneseKanaTokenFilterConfig"]};

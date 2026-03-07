@@ -1,0 +1,143 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="rkyv is a zero-copy deserialization framework for Rust."><title>rkyv - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="rkyv" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0 (254b59607 2026-01-19)" data-channel="1.93.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-a3946164.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-a410ff4d.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="icon" href="
+    data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0
+    26.458 26.458&#39;%3E%3Cpath d=&#39;M0 0v26.458h26.458V0zm9.175 3.772l8.107 8.106
+    2.702-2.702 2.702 13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#39;/%3E
+    %3C/svg%3E
+"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate rkyv</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><a class="logo-container" href="../rkyv/index.html"><img src="
+    data:image/svg+xml,%3Csvg xmlns=&#34;http://www.w3.org/2000/svg&#34; width=&#34;100&#34;
+    height=&#34;100&#34; viewBox=&#34;0 0 26.458 26.458&#34;%3E%3Cpath d=&#34;M0
+    0v26.458h26.458V0zm9.175 3.772l8.107 8.106 2.702-2.702 2.702
+    13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#34;/%3E%3C/svg%3E
+" alt="logo"></a><h2><a href="../rkyv/index.html">rkyv</a><span class="version">0.8.15</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#components" title="Components">Components</a></li><li><a href="#features" title="Features">Features</a><ul><li><a href="#format-control" title="Format control">Format control</a></li><li><a href="#functionality" title="Functionality">Functionality</a></li><li><a href="#crates" title="Crates">Crates</a></li></ul></li><li><a href="#compatibility" title="Compatibility">Compatibility</a></li></ul><h3><a href="#reexports">Crate Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li><li><a href="#derives" title="Derive Macros">Derive Macros</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>rkyv</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/rkyv/lib.rs.html#1-326">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>rkyv is a zero-copy deserialization framework for Rust.</p>
+<h3 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h3>
+<p>rkyv uses Rust’s powerful trait system to serialize data without reflection.
+Many zero-copy deserialization frameworks use external schemas and heavily
+restrict the available data types. By contrast, rkyv allows all serialized
+types to be defined in code and can serialize a wide variety of types that
+other frameworks cannot.</p>
+<p>rkyv scales to highly-capable as well as highly-restricted environments. Not
+only does rkyv support “no-std” builds for targets without a standard
+library implementation, it also supports “no-alloc” builds for targets where
+allocations cannot be made.</p>
+<p>rkyv supports limited in-place data mutation, and so can access and update
+data without ever deserializing back to native types. When rkyv’s in-place
+mutation is too limited, rkyv also provides ergonomic and performant
+deserialization back into native types.</p>
+<p>rkyv prioritizes performance, and is one of the fastest serialization
+frameworks available. All of rkyv’s features can be individually enabled and
+disabled, so you only pay for what you use. Additionally, all of rkyv’s
+zero-copy types are designed to have little to no overhead. In most cases,
+rkyv’s types will have exactly the same performance as native types.</p>
+<p>See the <a href="https://rkyv.org">rkyv book</a> for guide-level documentation and usage examples.</p>
+<h3 id="components"><a class="doc-anchor" href="#components">§</a>Components</h3>
+<p>rkyv has <a href="collections/swiss_table/map/struct.ArchivedHashMap.html" title="struct rkyv::collections::swiss_table::map::ArchivedHashMap">a hash map implementation</a> that is built for zero-copy
+deserialization, with the same lookup and iteration performance as the
+standard library hash maps. The hash map implementation is based on
+<a href="https://abseil.io/about/design/swisstables">Swiss Tables</a> and uses a target-independent version of FxHash to ensure
+that all targets compute the same hashes.</p>
+<p>It also has <a href="collections/btree_map/struct.ArchivedBTreeMap.html" title="struct rkyv::collections::btree_map::ArchivedBTreeMap">a B-tree implementation</a> that has the same performance
+characteristics as the standard library B-tree maps. Its compact
+representation and localized data storage is best-suited for very large
+amounts of data.</p>
+<p>rkyv supports <a href="rc/index.html" title="mod rkyv::rc">shared pointers</a> by default, and is able to serialize and
+deserialize them without duplicating the underlying data. Shared pointers
+which point to the same data when serialized will still point to the same
+data when deserialized. By default, rkyv only supports non-cyclic data
+structures.</p>
+<p>Alongside its <a href="fn.access_unchecked.html" title="fn rkyv::access_unchecked">unchecked API</a>, rkyv also provides optional <a href="fn.access.html" title="fn rkyv::access">validation</a> so
+you can ensure safety and data integrity at the cost of some overhead.
+Because checking serialized data can generally be done without allocations,
+the cost of checking and zero-copy access can be much lower than that of
+traditional deserialization.</p>
+<p>rkyv is trait-oriented from top to bottom, and is made to be extended with
+custom and specialized types. Serialization, deserialization, and
+validation traits all accept generic context types, making it easy to add
+new capabilities without degrading ergonomics.</p>
+<h3 id="features"><a class="doc-anchor" href="#features">§</a>Features</h3>
+<p>rkyv has several feature flags which can be used to modify its behavior. By
+default, rkyv enables the <code>std</code>, <code>alloc</code>, and <code>bytecheck</code> features.</p>
+<h4 id="format-control"><a class="doc-anchor" href="#format-control">§</a>Format control</h4>
+<p>These features control how rkyv formats its serialized data. Enabling and
+disabling these features may change rkyv’s serialized format, and as such
+can cause previously-serialized data to become unreadable. Enabling format
+control features that are not the default should be considered a breaking
+change to rkyv’s serialized format.</p>
+<p>Binaries should consider explicitly choosing format control options from the
+start, even though doing so is not required. This ensures that developers
+stay informed about the specific choices being made, and prevents any
+unexpected compatibility issues with libraries they depend on.</p>
+<p>Libraries should avoid enabling format control features unless they intend
+to only support rkyv when those specific format control features are
+enabled. In general, libraries should be able to support all format control
+options if they use rkyv’s exported types and aliases.</p>
+<h5 id="endianness"><a class="doc-anchor" href="#endianness">§</a>Endianness</h5>
+<p>If an endianness feature is not enabled, rkyv will use little-endian byte
+ordering by default.</p>
+<ul>
+<li><code>little_endian</code>: Forces data serialization to use little-endian byte
+ordering. This optimizes serialized data for little-endian architectures.</li>
+<li><code>big_endian</code>: Forces data serialization to use big-endian byte ordering.
+This optimizes serialized data for big-endian architectures.</li>
+</ul>
+<h5 id="alignment"><a class="doc-anchor" href="#alignment">§</a>Alignment</h5>
+<p>If an alignment feature is not enabled, rkyv will use aligned primitives by
+default.</p>
+<ul>
+<li><code>aligned</code>: Forces data serialization to use aligned primitives. This adds
+alignment requirements for accessing data and prevents rkyv from working
+with unaligned data.</li>
+<li><code>unaligned</code>: Forces data serialization to use unaligned primitives. This
+removes alignment requirements for accessing data and allows rkyv to work
+with unaligned data more easily.</li>
+</ul>
+<h5 id="pointer-width"><a class="doc-anchor" href="#pointer-width">§</a>Pointer width</h5>
+<p>If a pointer width feature is not enabled, rkyv will serialize <code>isize</code> and
+<code>usize</code> as 32-bit integers by default.</p>
+<ul>
+<li><code>pointer_width_16</code>: Serializes <code>isize</code> and <code>usize</code> as 16-bit integers.
+This is intended to be used only for small data sizes and may not handle
+large amounts of data.</li>
+<li><code>pointer_width_32</code>: Serializes <code>isize</code> and <code>usize</code> as 32-bit integers.
+This is a good choice for most data, and balances the storage overhead
+with support for large data sizes.</li>
+<li><code>pointer_width_64</code>: Serializes <code>isize</code> and <code>usize</code> as 64-bit integers.
+This is intended to be used only for extremely large data sizes and may
+cause unnecessary data bloat for smaller amounts of data.</li>
+</ul>
+<h4 id="functionality"><a class="doc-anchor" href="#functionality">§</a>Functionality</h4>
+<p>These features enable more built-in functionality and provide more powerful
+and ergonomic APIs. Enabling and disabling these features does not change
+rkyv’s serialized format.</p>
+<ul>
+<li><code>alloc</code>: Enables support for the <code>alloc</code> crate. Enabled by default.</li>
+<li><code>std</code>: Enables standard library support. Enabled by default.</li>
+<li><code>bytecheck</code>: Enables data validation through <code>bytecheck</code>. Enabled by
+default.</li>
+</ul>
+<h4 id="crates"><a class="doc-anchor" href="#crates">§</a>Crates</h4>
+<p>rkyv provides integrations for some common crates by default. In the future,
+crates should depend on rkyv and provide their own integration. Enabling and
+disabling these features does not change rkyv’s serialized format.</p>
+<ul>
+<li><a href="https://docs.rs/arrayvec/0.7"><code>arrayvec-0_7</code></a></li>
+<li><a href="https://docs.rs/bytes/1"><code>bytes-1</code></a></li>
+<li><a href="https://docs.rs/hashbrown/0.14"><code>hashbrown-0_14</code></a></li>
+<li><a href="https://docs.rs/hashbrown/0.15"><code>hashbrown-0_15</code></a></li>
+<li><a href="https://docs.rs/indexmap/2"><code>indexmap-2</code></a></li>
+<li><a href="https://docs.rs/smallvec/1"><code>smallvec-1</code></a></li>
+<li><a href="https://docs.rs/smol_str/0.2"><code>smol_str-0_2</code></a></li>
+<li><a href="https://docs.rs/smol_str/0.3"><code>smol_str-0_3</code></a></li>
+<li><a href="https://docs.rs/thin-vec/0.2"><code>thin-vec-0_2</code></a></li>
+<li><a href="https://docs.rs/tinyvec/1"><code>tinyvec-1</code></a></li>
+<li><a href="https://docs.rs/triomphe/0.1"><code>triomphe-0_1</code></a></li>
+<li><a href="https://docs.rs/uuid/1"><code>uuid-1</code></a></li>
+</ul>
+<h3 id="compatibility"><a class="doc-anchor" href="#compatibility">§</a>Compatibility</h3>
+<p>Serialized data can be accessed later as long as:</p>
+<ul>
+<li>The underlying schema has not changed</li>
+<li>The serialized format has not been changed by format control features</li>
+<li>The data was serialized by a semver-compatible version of rkyv</li>
+</ul>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.bytecheck"><code>pub use ::<a class="mod" href="../bytecheck/index.html" title="mod bytecheck">bytecheck</a>;</code></dt><dt id="reexport.munge"><code>pub use ::<a class="mod" href="../munge/index.html" title="mod munge">munge</a>;</code></dt><dt id="reexport.ptr_meta"><code>pub use ::<a class="mod" href="../ptr_meta/index.html" title="mod ptr_meta">ptr_meta</a>;</code></dt><dt id="reexport.rancor"><code>pub use ::<a class="mod" href="../rancor/index.html" title="mod rancor">rancor</a>;</code></dt><dt id="reexport.rend"><code>pub use ::<a class="mod" href="../rend/index.html" title="mod rend">rend</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="api/index.html" title="mod rkyv::api">api</a></dt><dd>APIs for producing and using archived data.</dd><dt><a class="mod" href="boxed/index.html" title="mod rkyv::boxed">boxed</a></dt><dd>An archived version of <code>Box</code>.</dd><dt><a class="mod" href="collections/index.html" title="mod rkyv::collections">collections</a></dt><dd>Archived versions of standard library containers.</dd><dt><a class="mod" href="de/index.html" title="mod rkyv::de">de</a></dt><dd>Deserialization traits, deserializers, and adapters.</dd><dt><a class="mod" href="ffi/index.html" title="mod rkyv::ffi">ffi</a></dt><dd>Archived versions of FFI types.</dd><dt><a class="mod" href="hash/index.html" title="mod rkyv::hash">hash</a></dt><dd>Hashing support for archived hash maps and sets.</dd><dt><a class="mod" href="net/index.html" title="mod rkyv::net">net</a></dt><dd>Archived versions of network types.</dd><dt><a class="mod" href="niche/index.html" title="mod rkyv::niche">niche</a></dt><dd>Manually niched type replacements.</dd><dt><a class="mod" href="ops/index.html" title="mod rkyv::ops">ops</a></dt><dd>Archived versions of <code>ops</code> types.</dd><dt><a class="mod" href="option/index.html" title="mod rkyv::option">option</a></dt><dd>An archived version of <code>Option</code>.</dd><dt><a class="mod" href="place/index.html" title="mod rkyv::place">place</a></dt><dd>An initialized, writeable location in memory.</dd><dt><a class="mod" href="primitive/index.html" title="mod rkyv::primitive">primitive</a></dt><dd>Definitions of archived primitives and type aliases based on enabled
+features.</dd><dt><a class="mod" href="rc/index.html" title="mod rkyv::rc">rc</a></dt><dd>Archived versions of shared pointers.</dd><dt><a class="mod" href="rel_ptr/index.html" title="mod rkyv::rel_ptr">rel_ptr</a></dt><dd>Relative pointer implementations and options.</dd><dt><a class="mod" href="result/index.html" title="mod rkyv::result">result</a></dt><dd>An archived version of <code>Result</code>.</dd><dt><a class="mod" href="seal/index.html" title="mod rkyv::seal">seal</a></dt><dd>Mutable references to values which may not be moved or de-initialized.</dd><dt><a class="mod" href="ser/index.html" title="mod rkyv::ser">ser</a></dt><dd>Serialization traits and adapters.</dd><dt><a class="mod" href="string/index.html" title="mod rkyv::string">string</a></dt><dd>Archived versions of string types.</dd><dt><a class="mod" href="time/index.html" title="mod rkyv::time">time</a></dt><dd>Archived versions of <code>time</code> types.</dd><dt><a class="mod" href="traits/index.html" title="mod rkyv::traits">traits</a></dt><dd>The core traits provided by rkyv.</dd><dt><a class="mod" href="tuple/index.html" title="mod rkyv::tuple">tuple</a></dt><dd>Archived versions of tuple types.</dd><dt><a class="mod" href="util/index.html" title="mod rkyv::util">util</a></dt><dd>Utilities for common operations.</dd><dt><a class="mod" href="validation/index.html" title="mod rkyv::validation">validation</a></dt><dd>Validation implementations and helper types.</dd><dt><a class="mod" href="vec/index.html" title="mod rkyv::vec">vec</a></dt><dd>An archived version of <code>Vec</code>.</dd><dt><a class="mod" href="with/index.html" title="mod rkyv::with">with</a></dt><dd>Wrapper type support and commonly used wrappers.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Place.html" title="struct rkyv::Place">Place</a></dt><dd>A place to write a <code>T</code> paired with its position in the output buffer.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.Archive.html" title="trait rkyv::Archive">Archive</a></dt><dd>A type that can be used without deserializing.</dd><dt><a class="trait" href="trait.ArchiveUnsized.html" title="trait rkyv::ArchiveUnsized">Archive<wbr>Unsized</a></dt><dd>A counterpart of <a href="trait.Archive.html" title="trait rkyv::Archive"><code>Archive</code></a> that’s suitable for unsized types.</dd><dt><a class="trait" href="trait.Deserialize.html" title="trait rkyv::Deserialize">Deserialize</a></dt><dd>Converts a type back from its archived form.</dd><dt><a class="trait" href="trait.DeserializeUnsized.html" title="trait rkyv::DeserializeUnsized">Deserialize<wbr>Unsized</a></dt><dd>A counterpart of <a href="trait.Deserialize.html" title="trait rkyv::Deserialize"><code>Deserialize</code></a> that’s suitable for unsized types.</dd><dt><a class="trait" href="trait.Portable.html" title="trait rkyv::Portable">Portable</a></dt><dd>A type with a stable, well-defined layout that is the same on all targets.</dd><dt><a class="trait" href="trait.Serialize.html" title="trait rkyv::Serialize">Serialize</a></dt><dd>Converts a type to its archived form.</dd><dt><a class="trait" href="trait.SerializeUnsized.html" title="trait rkyv::SerializeUnsized">Serialize<wbr>Unsized</a></dt><dd>A counterpart of <a href="trait.Serialize.html" title="trait rkyv::Serialize"><code>Serialize</code></a> that’s suitable for unsized types.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.access.html" title="fn rkyv::access">access</a></dt><dd>Access a byte slice.</dd><dt><a class="fn" href="fn.access_mut.html" title="fn rkyv::access_mut">access_<wbr>mut</a></dt><dd>Mutably access a byte slice.</dd><dt><a class="fn" href="fn.access_unchecked.html" title="fn rkyv::access_unchecked">access_<wbr>unchecked</a><sup title="unsafe function">⚠</sup></dt><dd>Access a byte slice.</dd><dt><a class="fn" href="fn.access_unchecked_mut.html" title="fn rkyv::access_unchecked_mut">access_<wbr>unchecked_<wbr>mut</a><sup title="unsafe function">⚠</sup></dt><dd>Mutably access a byte slice.</dd><dt><a class="fn" href="fn.deserialize.html" title="fn rkyv::deserialize">deserialize</a></dt><dd>Deserialize a value from the given archived value.</dd><dt><a class="fn" href="fn.from_bytes.html" title="fn rkyv::from_bytes">from_<wbr>bytes</a></dt><dd>Deserialize a value from the given bytes.</dd><dt><a class="fn" href="fn.from_bytes_unchecked.html" title="fn rkyv::from_bytes_unchecked">from_<wbr>bytes_<wbr>unchecked</a><sup title="unsafe function">⚠</sup></dt><dd>Deserialize a value from the given bytes.</dd><dt><a class="fn" href="fn.to_bytes.html" title="fn rkyv::to_bytes">to_<wbr>bytes</a></dt><dd>Serialize a value to bytes.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.Archived.html" title="type rkyv::Archived">Archived</a></dt><dd>Alias for the archived version of some <a href="trait.Archive.html" title="trait rkyv::Archive"><code>Archive</code></a> type.</dd><dt><a class="type" href="type.ArchivedMetadata.html" title="type rkyv::ArchivedMetadata">Archived<wbr>Metadata</a></dt><dd>Alias for the archived metadata for some <a href="trait.ArchiveUnsized.html" title="trait rkyv::ArchiveUnsized"><code>ArchiveUnsized</code></a> type.</dd><dt><a class="type" href="type.RawRelPtr.html" title="type rkyv::RawRelPtr">RawRel<wbr>Ptr</a></dt><dd>The default raw relative pointer.</dd><dt><a class="type" href="type.RelPtr.html" title="type rkyv::RelPtr">RelPtr</a></dt><dd>The default relative pointer.</dd><dt><a class="type" href="type.Resolver.html" title="type rkyv::Resolver">Resolver</a></dt><dd>Alias for the resolver for some <a href="trait.Archive.html" title="trait rkyv::Archive"><code>Archive</code></a> type.</dd></dl><h2 id="derives" class="section-header">Derive Macros<a href="#derives" class="anchor">§</a></h2><dl class="item-table"><dt><a class="derive" href="derive.Archive.html" title="derive rkyv::Archive">Archive</a></dt><dd>Derives <code>Archive</code> for the labeled type.</dd><dt><a class="derive" href="derive.Deserialize.html" title="derive rkyv::Deserialize">Deserialize</a></dt><dd>Derives <code>Deserialize</code> for the labeled type.</dd><dt><a class="derive" href="derive.Portable.html" title="derive rkyv::Portable">Portable</a></dt><dd>Derives <code>Portable</code> for the labeled type.</dd><dt><a class="derive" href="derive.Serialize.html" title="derive rkyv::Serialize">Serialize</a></dt><dd>Derives <code>Serialize</code> for the labeled type.</dd></dl></section></div></main></body></html>

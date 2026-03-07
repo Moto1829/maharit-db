@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"derive":["Archive","Deserialize","Portable","Serialize"],"struct":["CopyOptimization"],"trait":["Archive","ArchivePointee","ArchiveUnsized","Deserialize","DeserializeUnsized","LayoutRaw","NoUndef","Portable","Serialize","SerializeUnsized"]};

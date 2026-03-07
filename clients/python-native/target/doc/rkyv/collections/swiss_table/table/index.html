@@ -1,0 +1,29 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="An archived hash table implementation based on Google’s high-performance SwissTable hash map."><title>rkyv::collections::swiss_table::table - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="rkyv" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0 (254b59607 2026-01-19)" data-channel="1.93.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-a3946164.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-a410ff4d.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-263c88ec.css"></noscript><link rel="icon" href="
+    data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0
+    26.458 26.458&#39;%3E%3Cpath d=&#39;M0 0v26.458h26.458V0zm9.175 3.772l8.107 8.106
+    2.702-2.702 2.702 13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#39;/%3E
+    %3C/svg%3E
+"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module table</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><a class="logo-container" href="../../../../rkyv/index.html"><img src="
+    data:image/svg+xml,%3Csvg xmlns=&#34;http://www.w3.org/2000/svg&#34; width=&#34;100&#34;
+    height=&#34;100&#34; viewBox=&#34;0 0 26.458 26.458&#34;%3E%3Cpath d=&#34;M0
+    0v26.458h26.458V0zm9.175 3.772l8.107 8.106 2.702-2.702 2.702
+    13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#34;/%3E%3C/svg%3E
+" alt="logo"></a><h2><a href="../../../../rkyv/index.html">rkyv</a><span class="version">0.8.15</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module table</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In rkyv::<wbr>collections::<wbr>swiss_<wbr>table</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">rkyv</a>::<wbr><a href="../../index.html">collections</a>::<wbr><a href="../index.html">swiss_table</a></div><h1>Module <span>table</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/rkyv/collections/swiss_table/table.rs.html#1-712">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>An archived hash table implementation based on Google’s high-performance
+SwissTable hash map.</p>
+<p>Notable differences from other implementations:</p>
+<ul>
+<li>The number of control bytes is rounded up to a maximum group width (16)
+instead of the next power of two. This reduces the number of empty buckets
+on the wire. Since this collection is immutable after writing, we’ll never
+benefit from having more buckets than we need.</li>
+<li>Because the bucket count is not a power of two, the triangular probing
+sequence simply skips any indices larger than the actual size of the
+buckets array.</li>
+<li>Instead of the final control bytes always being marked EMPTY, the last
+control bytes repeat the first few. This helps reduce the number of
+lookups when probing at the end of the control bytes.</li>
+<li>Because the available SIMD group width may be less than the maximum group
+width, each probe reads N groups before striding where N is the maximum
+group width divided by the SIMD group width.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArchivedHashTable.html" title="struct rkyv::collections::swiss_table::table::ArchivedHashTable">Archived<wbr>Hash<wbr>Table</a></dt><dd>A low-level archived SwissTable hash table with explicit hashing.</dd><dt><a class="struct" href="struct.HashTableResolver.html" title="struct rkyv::collections::swiss_table::table::HashTableResolver">Hash<wbr>Table<wbr>Resolver</a></dt><dd>The resolver for <a href="struct.ArchivedHashTable.html" title="struct rkyv::collections::swiss_table::table::ArchivedHashTable"><code>ArchivedHashTable</code></a>.</dd><dt><a class="struct" href="struct.RawIter.html" title="struct rkyv::collections::swiss_table::table::RawIter">RawIter</a></dt><dd>An iterator over the entry pointers of an <a href="struct.ArchivedHashTable.html" title="struct rkyv::collections::swiss_table::table::ArchivedHashTable"><code>ArchivedHashTable</code></a>.</dd></dl></section></div></main></body></html>

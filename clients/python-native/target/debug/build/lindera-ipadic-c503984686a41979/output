@@ -1,0 +1,6 @@
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=Cargo.toml
+cargo:rerun-if-env-changed=LINDERA_DICTIONARIES_PATH
+cargo:rerun-if-env-changed=LINDERA_CACHE
+cargo:rerun-if-env-changed=DOCS_RS
+cargo::rustc-env=LINDERA_WORKDIR=/Users/suzukishimei/Git/maharit-db/clients/python-native/target/debug/build/lindera-ipadic-c503984686a41979/out

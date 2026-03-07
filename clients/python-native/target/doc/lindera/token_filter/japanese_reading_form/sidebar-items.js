@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JAPANESE_READING_FORM_TOKEN_FILTER_NAME"],"struct":["JapaneseReadingFormTokenFilter"],"type":["JapaneseReadingFormTokenFilterConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArchivedLexType","EdgeType","LexType","LexTypeResolver"],"fn":["is_kanji"],"struct":["ArchivedWordEntry","ArchivedWordId","Edge","Lattice","PathEntry","WordEntry","WordEntryResolver","WordId","WordIdResolver"]};

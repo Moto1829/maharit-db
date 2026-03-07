@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INLINE_CAPACITY","OUT_OF_LINE_CAPACITY"],"union":["ArchivedStringRepr"]};

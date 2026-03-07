@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DICTIONARY_NAME"],"fn":["get_version"],"mod":["embedded"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CharacterDefinitionBuilderOptionsError"],"struct":["CharacterDefinitionBuilder","CharacterDefinitionBuilderOptions"]};

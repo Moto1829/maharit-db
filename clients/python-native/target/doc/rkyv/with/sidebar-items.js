@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Acquire","AsBox","AsOwned","AsString","AsUnixTime","AsVec","AtomicLoad","DefaultNiche","Identity","Inline","InlineAsBox","Lock","Map","MapKV","MapNiche","Niche","NicheInto","Relaxed","SeqCst","Skip","Unsafe","Unshare","With"],"trait":["ArchiveWith","DeserializeWith","SerializeWith"]};

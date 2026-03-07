@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_version"],"mod":["character_filter","dictionary","error","mode","segmenter","token","token_filter","tokenizer"],"type":["LinderaResult"]};

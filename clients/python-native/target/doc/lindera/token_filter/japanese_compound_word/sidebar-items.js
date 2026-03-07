@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JAPANESE_COMPOUND_WORD_TOKEN_FILTER_NAME"],"struct":["JapaneseCompoundWordTokenFilter"],"type":["JapaneseCompoundWordTokenFilterConfig"]};

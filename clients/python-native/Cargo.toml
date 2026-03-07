@@ -1,0 +1,20 @@
+[package]
+name = "maharit-python-native"
+version = "0.1.0"
+edition = "2024"
+description = "Native Python extension for MaharitDB (PyO3)"
+
+[workspace]
+
+[lib]
+name = "maharit_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+maharit-core = { path = "../../crates/maharit-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

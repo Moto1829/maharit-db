@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ArchivedPrefixDictionary","DoubleArrayArchiver","Match","PrefixDictionary","PrefixDictionaryResolver","WordIdx"]};

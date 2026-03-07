@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JAPANESE_ITERATION_MARK_CHARACTER_FILTER_NAME"],"struct":["JapaneseIterationMarkCharacterFilter"],"type":["JapaneseIterationMarkCharacterFilterConfig"]};

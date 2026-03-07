@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["UNICODE_NORMALIZE_CHARACTER_FILTER_NAME"],"enum":["UnicodeNormalizeKind"],"struct":["UnicodeNormalizeCharacterFilter"],"type":["UnicodeNormalizeCharacterFilterConfig"]};

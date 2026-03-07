@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REMOVE_DIACRITICAL_TOKEN_FILTER_NAME"],"struct":["RemoveDiacriticalMarkTokenFilter"],"type":["RemoveDiacriticalMarkTokenFilterConfig"]};

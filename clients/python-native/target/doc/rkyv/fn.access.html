@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Access a byte slice."><title>access in rkyv - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="rkyv" data-themes="" data-resource-suffix="" data-rustdoc-version="1.93.0 (254b59607 2026-01-19)" data-channel="1.93.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-a3946164.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-a410ff4d.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="icon" href="
+    data:image/svg+xml,%3Csvg xmlns=&#39;http://www.w3.org/2000/svg&#39; viewBox=&#39;0 0
+    26.458 26.458&#39;%3E%3Cpath d=&#39;M0 0v26.458h26.458V0zm9.175 3.772l8.107 8.106
+    2.702-2.702 2.702 13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#39;/%3E
+    %3C/svg%3E
+"></head><body class="rustdoc fn"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">access</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><a class="logo-container" href="../rkyv/index.html"><img src="
+    data:image/svg+xml,%3Csvg xmlns=&#34;http://www.w3.org/2000/svg&#34; width=&#34;100&#34;
+    height=&#34;100&#34; viewBox=&#34;0 0 26.458 26.458&#34;%3E%3Cpath d=&#34;M0
+    0v26.458h26.458V0zm9.175 3.772l8.107 8.106 2.702-2.702 2.702
+    13.512-13.512-2.702 2.703-2.702-8.107-8.107z&#34;/%3E%3C/svg%3E
+" alt="logo"></a><h2><a href="../rkyv/index.html">rkyv</a><span class="version">0.8.15</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">access</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#example" title="Example">Example</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="index.html">In crate rkyv</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">rkyv</a></div><h1>Function <span class="fn">access</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/rkyv/api/high/checked.rs.html#110-116">Source</a> </span></div><pre class="rust item-decl"><code>pub fn access&lt;T, E&gt;(bytes: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.93.0/std/primitive.u8.html">u8</a>]) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.93.0/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.93.0/std/primitive.reference.html">&amp;T</a>, E&gt;<div class="where">where
+    T: <a class="trait" href="trait.Portable.html" title="trait rkyv::Portable">Portable</a> + for&lt;'a&gt; <a class="trait" href="../bytecheck/trait.CheckBytes.html" title="trait bytecheck::CheckBytes">CheckBytes</a>&lt;<a class="type" href="api/high/type.HighValidator.html" title="type rkyv::api::high::HighValidator">HighValidator</a>&lt;'a, E&gt;&gt;,
+    E: <a class="trait" href="../rancor/trait.Source.html" title="trait rancor::Source">Source</a>,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Access a byte slice.</p>
+<p>This is a safe alternative to <a href="fn.access_unchecked.html" title="fn rkyv::access_unchecked"><code>access_unchecked</code></a> and is part of the
+<a href="api/high/index.html" title="mod rkyv::api::high">high-level API</a>.</p>
+<h2 id="example"><a class="doc-anchor" href="#example">§</a>Example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>rkyv::{
+    access, bytecheck::CheckBytes, rancor::Error, to_bytes, Archive,
+    Archived, Serialize,
+};
+
+<span class="attr">#[derive(Archive, Serialize)]
+</span><span class="kw">struct </span>Example {
+    name: String,
+    value: i32,
+}
+
+<span class="kw">let </span>value = Example {
+    name: <span class="string">"pi"</span>.to_string(),
+    value: <span class="number">31415926</span>,
+};
+
+<span class="kw">let </span>bytes = to_bytes::&lt;Error&gt;(<span class="kw-2">&amp;</span>value).unwrap();
+<span class="kw">let </span>archived = access::&lt;ArchivedExample, Error&gt;(<span class="kw-2">&amp;</span>bytes).unwrap();
+
+<span class="macro">assert_eq!</span>(archived.name, <span class="string">"pi"</span>);
+<span class="macro">assert_eq!</span>(archived.value, <span class="number">31415926</span>);</code></pre></div></div></details></section></div></main></body></html>
