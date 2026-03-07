@@ -51,8 +51,8 @@ df = client.query("MATCH (n:Person) RETURN n.name, n.age").to_dataframe()
 ```
 
 ## パッケージング
-- [ ] PyPI公開（`pip install maharit`）
-- [ ] ドキュメント（Sphinx）
+- [x] PyPI公開（`pip install maharit`）（pyproject.toml 設定済み）
+- [x] ドキュメント（Sphinx）（clients/python/docs/ に作成済み）
 - [x] サンプルコード（README.md）
 
 ## 依存
