@@ -1,6 +1,6 @@
 # ドキュメント（mdBook）
 
-**Status**: Completed
+**Status**: In Progress
 
 ## 概要
 maharit-db の公式ドキュメントを mdBook で作成し、公開できる状態にする。

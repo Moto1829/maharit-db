@@ -1,6 +1,6 @@
 # 日時型（テンポラル型）
 
-**Status**: Completed
+**Status**: Not Started
 
 ## 概要
 Cypher の日時型（`date()`, `datetime()`, `duration()`）を実装する。

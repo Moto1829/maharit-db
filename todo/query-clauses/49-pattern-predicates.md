@@ -1,6 +1,6 @@
 # WHERE 句内パターン述語
 
-**Status**: Completed
+**Status**: Not Started
 
 ## 概要
 `WHERE` 句の中でグラフパターンを条件式として使用できるようにする。
