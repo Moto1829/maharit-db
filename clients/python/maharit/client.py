@@ -112,19 +112,38 @@ class Client:
                 print(row["n.name"])
     """
 
-    def __init__(self, host: str, port: int, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+    ) -> None:
         self._host = host
         self._port = port
         self._timeout = timeout
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
         self._sock: Optional[socket.socket] = None
 
     @classmethod
-    def connect(cls, address: str, timeout: float = 30.0) -> "Client":
+    def connect(
+        cls,
+        address: str,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+    ) -> "Client":
         """Connect to a MaharitDB server.
 
         Args:
             address: Server address in the form ``host:port``.
             timeout: Socket timeout in seconds (default 30).
+            max_retries: Number of automatic reconnection attempts on failure
+                (default 3). Set to 0 to disable auto-reconnect.
+            retry_delay: Base delay in seconds between retry attempts. Each
+                attempt waits ``retry_delay * attempt`` seconds (default 1.0).
 
         Returns:
             A connected :class:`Client` instance.
@@ -133,7 +152,7 @@ class Client:
         if not host:
             host = "localhost"
         port = int(port_str) if port_str else 7687
-        client = cls(host, port, timeout)
+        client = cls(host, port, timeout, max_retries, retry_delay)
         client._connect()
         return client
 
@@ -158,10 +177,18 @@ class Client:
     def _send(self, payload: dict) -> None:
         if self._sock is None:
             raise ConnectionError("Not connected")
-        try:
-            send_message(self._sock, payload)
-        except OSError as e:
-            raise ConnectionError(f"Send failed: {e}") from e
+        for attempt in range(self._max_retries + 1):
+            try:
+                send_message(self._sock, payload)
+                return
+            except OSError as e:
+                if attempt == self._max_retries:
+                    raise ConnectionError(f"Send failed after {attempt + 1} attempt(s): {e}") from e
+                time.sleep(self._retry_delay * (attempt + 1))
+                try:
+                    self._reconnect()
+                except Exception:
+                    pass
 
     def _recv(self) -> dict:
         if self._sock is None:
@@ -353,4 +380,4 @@ class Client:
 
     def __repr__(self) -> str:
         connected = self._sock is not None
-        return f"Client({self._host}:{self._port}, connected={connected})"
+        return f"Client({self._host}:{self._port}, connected={connected}, max_retries={self._max_retries})"

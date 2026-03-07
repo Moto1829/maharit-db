@@ -10,8 +10,8 @@ PythonからMaharitDBに接続するためのクライアントライブラリ�
 ### 接続管理
 - [x] 同期API
 - [x] 非同期API（asyncio対応）
-- [ ] コネクションプール
-- [ ] 自動再接続
+- [x] コネクションプール
+- [x] 自動再接続
 
 ### クエリ実行
 - [x] クエリの実行と結果取得
@@ -25,7 +25,7 @@ PythonからMaharitDBに接続するためのクライアントライブラリ�
 
 ### 型変換
 - [x] PropertyValue <-> Python型のマッピング（JSON経由）
-- [ ] Node/Edge のPython表現（専用クラス）
+- [x] Node/Edge のPython表現（専用クラス）
 
 ## 実装方法
 - [ ] PyO3によるRustバインディング

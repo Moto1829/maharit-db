@@ -41,6 +41,8 @@ def _client_with_sock(sock):
     client._host = "localhost"
     client._port = 7687
     client._timeout = 30.0
+    client._max_retries = 0
+    client._retry_delay = 0.0
     client._sock = sock
     return client
 
