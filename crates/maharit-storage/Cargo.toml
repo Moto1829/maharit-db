@@ -9,6 +9,7 @@ license.workspace = true
 maharit-core.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
+zstd.workspace = true
 tokio.workspace = true
 serde.workspace = true
 bincode.workspace = true

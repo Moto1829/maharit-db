@@ -191,11 +191,11 @@ fn run_server(args: &[String]) {
 }
 
 fn run_backup(args: &[String]) {
-    use maharit_storage::{Backup, BackupOptions, PersistentStorage};
+    use maharit_storage::{Backup, BackupOptions, CompressionType, PersistentStorage};
 
     let mut output_path = String::from("maharit_backup.db");
     let mut source_path: Option<String> = None;
-    let mut compressed = false;
+    let mut compression = CompressionType::None;
     let mut description = String::new();
     let mut list_metadata = false;
 
@@ -215,7 +215,10 @@ fn run_backup(args: &[String]) {
                 }
             }
             "--compress" | "-z" => {
-                compressed = true;
+                compression = CompressionType::Gzip;
+            }
+            "--compress-zstd" => {
+                compression = CompressionType::Zstd;
             }
             "--description" | "-d" => {
                 if i + 1 < args.len() {
@@ -247,12 +250,17 @@ fn run_backup(args: &[String]) {
         let path = source_path.unwrap_or(output_path);
         match Backup::metadata(&path) {
             Ok(meta) => {
+                let compression_label = match meta.compression {
+                    CompressionType::None => "none",
+                    CompressionType::Gzip => "gzip",
+                    CompressionType::Zstd => "zstd",
+                };
                 println!("Backup: {}", path);
                 println!("  Version:     {}", meta.version);
                 println!("  Created:     {}", format_timestamp(meta.timestamp));
                 println!("  Nodes:       {}", meta.node_count);
                 println!("  Edges:       {}", meta.edge_count);
-                println!("  Compressed:  {}", meta.compressed);
+                println!("  Compression: {}", compression_label);
                 if !meta.description.is_empty() {
                     println!("  Description: {}", meta.description);
                 }
@@ -280,22 +288,23 @@ fn run_backup(args: &[String]) {
         std::process::exit(1);
     };
 
-    let mut options = if compressed {
-        BackupOptions::compressed()
-    } else {
-        BackupOptions::default()
-    };
+    let mut options = BackupOptions { compression, description: String::new(), ..Default::default() };
     if !description.is_empty() {
         options = options.with_description(description);
     }
 
     match Backup::create(&graph, &output_path, &options) {
         Ok(meta) => {
+            let compression_label = match meta.compression {
+                CompressionType::None => "none",
+                CompressionType::Gzip => "gzip",
+                CompressionType::Zstd => "zstd",
+            };
             println!("Backup created successfully:");
-            println!("  Output:     {}", output_path);
-            println!("  Nodes:      {}", meta.node_count);
-            println!("  Edges:      {}", meta.edge_count);
-            println!("  Compressed: {}", meta.compressed);
+            println!("  Output:      {}", output_path);
+            println!("  Nodes:       {}", meta.node_count);
+            println!("  Edges:       {}", meta.edge_count);
+            println!("  Compression: {}", compression_label);
         }
         Err(e) => {
             eprintln!("Backup failed: {}", e);

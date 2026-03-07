@@ -17,6 +17,38 @@ const MAGIC: &[u8; 8] = b"MHRTBKUP";
 /// Backup format version
 const VERSION: u32 = 1;
 
+/// Compression algorithm for backup files.
+///
+/// Stored as a 1-byte tag in the file header for backward compatibility:
+/// - `0` = None (uncompressed)
+/// - `1` = Gzip (previously stored as `compressed = true`)
+/// - `2` = Zstd
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompressionType {
+    #[default]
+    None,
+    Gzip,
+    Zstd,
+}
+
+impl CompressionType {
+    fn to_byte(self) -> u8 {
+        match self {
+            CompressionType::None => 0,
+            CompressionType::Gzip => 1,
+            CompressionType::Zstd => 2,
+        }
+    }
+
+    fn from_byte(b: u8) -> Self {
+        match b {
+            1 => CompressionType::Gzip,
+            2 => CompressionType::Zstd,
+            _ => CompressionType::None,
+        }
+    }
+}
+
 /// Backup error types
 #[derive(Debug, Error)]
 pub enum BackupError {
@@ -44,17 +76,25 @@ pub type Result<T> = std::result::Result<T, BackupError>;
 /// Options for creating a backup
 #[derive(Debug, Clone, Default)]
 pub struct BackupOptions {
-    /// Whether to compress the backup with gzip
-    pub compressed: bool,
+    /// Compression algorithm to use (default: None)
+    pub compression: CompressionType,
     /// Optional description of the backup
     pub description: String,
 }
 
 impl BackupOptions {
-    /// Create new backup options with compression enabled
+    /// Create backup options with gzip compression enabled.
     pub fn compressed() -> Self {
         Self {
-            compressed: true,
+            compression: CompressionType::Gzip,
+            description: String::new(),
+        }
+    }
+
+    /// Create backup options with zstd compression enabled.
+    pub fn compressed_zstd() -> Self {
+        Self {
+            compression: CompressionType::Zstd,
             description: String::new(),
         }
     }
@@ -77,8 +117,8 @@ pub struct BackupMetadata {
     pub node_count: u64,
     /// Number of edges in the original graph
     pub edge_count: u64,
-    /// Whether the backup data is compressed
-    pub compressed: bool,
+    /// Compression algorithm used for this backup
+    pub compression: CompressionType,
     /// Optional description of the backup
     pub description: String,
 }
@@ -126,7 +166,7 @@ impl Backup {
             timestamp,
             node_count: graph.node_count() as u64,
             edge_count: graph.edge_count() as u64,
-            compressed: options.compressed,
+            compression: options.compression,
             description: options.description.clone(),
         };
 
@@ -136,21 +176,14 @@ impl Backup {
         writer.write_all(&metadata.timestamp.to_le_bytes())?;
         writer.write_all(&metadata.node_count.to_le_bytes())?;
         writer.write_all(&metadata.edge_count.to_le_bytes())?;
-        writer.write_all(&[if metadata.compressed { 1 } else { 0 }])?;
+        writer.write_all(&[metadata.compression.to_byte()])?;
         Self::write_string(&mut writer, &metadata.description)?;
 
         // Serialize graph data to a buffer
         let graph_data = Self::serialize_graph(graph)?;
 
-        // Write graph data (compressed or not)
-        if options.compressed {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&graph_data)?;
-            let compressed_data = encoder.finish()?;
-            writer.write_all(&compressed_data)?;
-        } else {
-            writer.write_all(&graph_data)?;
-        }
+        // Write graph data (compress if requested)
+        Self::write_compressed(&mut writer, &graph_data, options.compression)?;
 
         writer.flush()?;
         Ok(metadata)
@@ -195,7 +228,7 @@ impl Backup {
             timestamp,
             node_count,
             edge_count,
-            compressed: options.compressed,
+            compression: options.compression,
             description: options.description.clone(),
         };
 
@@ -208,17 +241,10 @@ impl Backup {
         writer.write_all(&metadata.timestamp.to_le_bytes())?;
         writer.write_all(&metadata.node_count.to_le_bytes())?;
         writer.write_all(&metadata.edge_count.to_le_bytes())?;
-        writer.write_all(&[if metadata.compressed { 1 } else { 0 }])?;
+        writer.write_all(&[metadata.compression.to_byte()])?;
         Self::write_string(&mut writer, &metadata.description)?;
 
-        if options.compressed {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&graph_data)?;
-            let compressed_data = encoder.finish()?;
-            writer.write_all(&compressed_data)?;
-        } else {
-            writer.write_all(&graph_data)?;
-        }
+        Self::write_compressed(&mut writer, &graph_data, options.compression)?;
 
         writer.flush()?;
         Ok(metadata)
@@ -258,23 +284,14 @@ impl Backup {
         let _node_count = Self::read_u64(&mut reader)?;
         let _edge_count = Self::read_u64(&mut reader)?;
 
-        let mut compressed_flag = [0u8; 1];
-        reader.read_exact(&mut compressed_flag)?;
-        let compressed = compressed_flag[0] != 0;
+        let mut compression_byte = [0u8; 1];
+        reader.read_exact(&mut compression_byte)?;
+        let compression = CompressionType::from_byte(compression_byte[0]);
 
         let _description = Self::read_string(&mut reader)?;
 
         // Read graph data (decompress if needed)
-        let graph_data = if compressed {
-            let mut decoder = GzDecoder::new(reader);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
-            decompressed
-        } else {
-            let mut data = Vec::new();
-            reader.read_to_end(&mut data)?;
-            data
-        };
+        let graph_data = Self::read_compressed(reader, compression)?;
 
         // Deserialize graph
         Self::deserialize_graph(&graph_data)
@@ -314,9 +331,9 @@ impl Backup {
         let node_count = Self::read_u64(&mut reader)?;
         let edge_count = Self::read_u64(&mut reader)?;
 
-        let mut compressed_flag = [0u8; 1];
-        reader.read_exact(&mut compressed_flag)?;
-        let compressed = compressed_flag[0] != 0;
+        let mut compression_byte = [0u8; 1];
+        reader.read_exact(&mut compression_byte)?;
+        let compression = CompressionType::from_byte(compression_byte[0]);
 
         let description = Self::read_string(&mut reader)?;
 
@@ -325,7 +342,7 @@ impl Backup {
             timestamp,
             node_count,
             edge_count,
-            compressed,
+            compression,
             description,
         })
     }
@@ -462,6 +479,53 @@ impl Backup {
     fn write_u64<W: Write>(writer: &mut W, value: u64) -> Result<()> {
         writer.write_all(&value.to_le_bytes())?;
         Ok(())
+    }
+
+    /// Compress `data` with the chosen algorithm and write to `writer`.
+    fn write_compressed<W: Write>(writer: &mut W, data: &[u8], compression: CompressionType) -> Result<()> {
+        match compression {
+            CompressionType::None => {
+                writer.write_all(data)?;
+            }
+            CompressionType::Gzip => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(data)?;
+                let compressed = encoder.finish()?;
+                writer.write_all(&compressed)?;
+            }
+            CompressionType::Zstd => {
+                let compressed = zstd::encode_all(data, 3)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                writer.write_all(&compressed)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read and decompress data from `reader` based on `compression`.
+    fn read_compressed<R: Read>(reader: R, compression: CompressionType) -> Result<Vec<u8>> {
+        match compression {
+            CompressionType::None => {
+                let mut data = Vec::new();
+                let mut r = reader;
+                r.read_to_end(&mut data)?;
+                Ok(data)
+            }
+            CompressionType::Gzip => {
+                let mut decoder = GzDecoder::new(reader);
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                Ok(decompressed)
+            }
+            CompressionType::Zstd => {
+                let mut r = reader;
+                let mut compressed = Vec::new();
+                r.read_to_end(&mut compressed)?;
+                let decompressed = zstd::decode_all(compressed.as_slice())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                Ok(decompressed)
+            }
+        }
     }
 
     fn write_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
@@ -743,7 +807,7 @@ impl Backup {
         writer.write_all(&timestamp.to_le_bytes())?;
 
         // Compress flag
-        writer.write_all(&[if options.compressed { 1 } else { 0 }])?;
+        writer.write_all(&[options.compression.to_byte()])?;
         Self::write_string(&mut writer, &options.description)?;
 
         // Build the payload into a buffer (so it can be optionally compressed)
@@ -784,14 +848,7 @@ impl Backup {
         }
 
         // Write payload (compressed or raw)
-        if options.compressed {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&payload)?;
-            let compressed = encoder.finish()?;
-            writer.write_all(&compressed)?;
-        } else {
-            writer.write_all(&payload)?;
-        }
+        Self::write_compressed(&mut writer, &payload, options.compression)?;
 
         writer.flush()?;
 
@@ -1162,7 +1219,7 @@ mod tests {
 
         assert_eq!(metadata.node_count, 0);
         assert_eq!(metadata.edge_count, 0);
-        assert!(!metadata.compressed);
+        assert_eq!(metadata.compression, CompressionType::None);
 
         let restored = Backup::restore(&path).unwrap();
         assert_eq!(restored.node_count(), 0);
@@ -1241,13 +1298,52 @@ mod tests {
 
         assert_eq!(metadata.node_count, 2);
         assert_eq!(metadata.edge_count, 1);
-        assert!(metadata.compressed);
+        assert_eq!(metadata.compression, CompressionType::Gzip);
 
         let restored = Backup::restore(&path).unwrap();
         assert_eq!(restored.node_count(), 2);
         assert_eq!(restored.edge_count(), 1);
 
         // Verify data integrity
+        let nodes: Vec<_> = restored.nodes().collect();
+        let alice_node = nodes
+            .iter()
+            .find(|n| n.properties.get("name") == Some(&PropertyValue::String("Alice".to_string())))
+            .unwrap();
+        assert!(alice_node.properties.get("bio").is_some());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_backup_restore_zstd() {
+        let mut graph = Graph::new();
+        let alice = graph.create_node("Person");
+        let bob = graph.create_node("Person");
+
+        if let Some(node) = graph.get_node_mut(alice) {
+            node.set_property("name", "Alice");
+            node.set_property("bio", "A very long biography that should compress well when using zstd compression because it has lots of repetitive text");
+        }
+        if let Some(node) = graph.get_node_mut(bob) {
+            node.set_property("name", "Bob");
+            node.set_property("bio", "A very long biography that should compress well when using zstd compression because it has lots of repetitive text");
+        }
+
+        graph.create_edge(alice, bob, "KNOWS").unwrap();
+
+        let path = tmp_path("test_zstd_compressed.backup");
+        let options = BackupOptions::compressed_zstd();
+        let metadata = Backup::create(&graph, &path, &options).unwrap();
+
+        assert_eq!(metadata.node_count, 2);
+        assert_eq!(metadata.edge_count, 1);
+        assert_eq!(metadata.compression, CompressionType::Zstd);
+
+        let restored = Backup::restore(&path).unwrap();
+        assert_eq!(restored.node_count(), 2);
+        assert_eq!(restored.edge_count(), 1);
+
         let nodes: Vec<_> = restored.nodes().collect();
         let alice_node = nodes
             .iter()
@@ -1276,7 +1372,7 @@ mod tests {
         assert_eq!(read_metadata.timestamp, created_metadata.timestamp);
         assert_eq!(read_metadata.node_count, 2);
         assert_eq!(read_metadata.edge_count, 0);
-        assert_eq!(read_metadata.compressed, false);
+        assert_eq!(read_metadata.compression, CompressionType::None);
         assert_eq!(
             read_metadata.description,
             "Test backup for metadata inspection"
@@ -1377,7 +1473,7 @@ mod tests {
 
         let metadata = Backup::create(&graph, &path, &options).unwrap();
         assert_eq!(metadata.description, "Production backup - Friday 5pm");
-        assert!(metadata.compressed);
+        assert_eq!(metadata.compression, CompressionType::Gzip);
 
         let read_metadata = Backup::metadata(&path).unwrap();
         assert_eq!(read_metadata.description, "Production backup - Friday 5pm");
@@ -1433,7 +1529,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(metadata.node_count, 1);
-        assert!(!metadata.compressed);
+        assert_eq!(metadata.compression, CompressionType::None);
 
         let restored = Backup::restore(&path).unwrap();
         assert_eq!(restored.node_count(), 1);
@@ -1456,7 +1552,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(metadata.node_count, 2);
-        assert!(metadata.compressed);
+        assert_eq!(metadata.compression, CompressionType::Gzip);
 
         let restored = Backup::restore(&path).unwrap();
         assert_eq!(restored.node_count(), 2);
@@ -1595,7 +1691,7 @@ mod tests {
         // All metadata should have version == VERSION
         for meta in collected.iter() {
             assert_eq!(meta.version, VERSION);
-            assert!(meta.compressed); // scheduler uses compressed() options
+            assert_ne!(meta.compression, CompressionType::None); // scheduler uses compressed() options
         }
 
         std::fs::remove_dir_all(&output_dir).ok();
