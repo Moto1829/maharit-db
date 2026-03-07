@@ -352,6 +352,7 @@ impl TcpServer {
     pub fn stats(&self) -> &ServerStats {
         &self.stats
     }
+
 }
 
 /// Handle a single client connection

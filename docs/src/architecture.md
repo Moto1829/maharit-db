@@ -12,7 +12,7 @@ MaharitDB は Rust のワークスペース構成を採用し、責任ごとに�
 | `maharit-server` | TCP サーバー、認証、メトリクス、レプリケーション |
 | `maharit-client` | 非同期/同期クライアント、コネクションプール |
 | `maharit-io` | CSV/JSON/GraphML インポート・エクスポート |
-| `maharit-viz` | DOT/SVG 可視化、WebSocket リアルタイム表示 |
+| `maharit-viz` | DOT/SVG 可視化 |
 
 ## 各クレートの詳細
 
@@ -107,7 +107,6 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 
 - **DOT 出力**: Graphviz の DOT 言語形式でエクスポート
 - **SVG エクスポート**: 力学モデルレイアウトによる SVG 生成
-- **WebSocket**: リアルタイムのグラフ更新をブラウザに配信
 
 ## データフロー
 

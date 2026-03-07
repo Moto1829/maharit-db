@@ -64,4 +64,3 @@
 # 可視化
 
 - [DOT / SVG エクスポート](./visualization/export.md)
-- [WebSocket リアルタイム表示](./visualization/websocket.md)
