@@ -1,9 +1,32 @@
 # Task 68: サーバーを ConcurrentGraph に移行する
 
-## 背景
+## 両者の役割
 
-現在のサーバーは `Arc<RwLock<Graph>>` を使っており、書き込み中は全クエリがブロックされる。
-`ConcurrentGraph`（DashMap ベース）に移行することで書き込み中でも読み取りを並行実行できるようになる。
+### Graph（graph.rs）
+- `Vec<Option<Node>>` による密な配列構造、削除 ID を free-list で再利用
+- ロック機構を持たない単一スレッド向けのデータ構造
+- 外部で `Arc<RwLock<Graph>>` に包むことでスレッドセーフにする
+- Executor・PersistentStorage・TransactionManager がすべて対応済み
+
+### ConcurrentGraph（concurrent_graph.rs）
+- `DashMap<NodeId, Node>` によるシャードロック構造
+- `&self`（不変参照）で書き込みができる内部可変性を持つ
+- 異なるノード/エッジへのアクセスが互いをブロックしない
+- ID は単調増加で再利用なし
+- Executor・PersistentStorage 等は**未対応**
+
+## 背景・目的
+
+現在のサーバーは本来 `ConcurrentGraph` を使うべきだが、
+Executor 等が `Graph` に依存しているため `Arc<RwLock<Graph>>` で代替している。
+
+`Arc<RwLock<Graph>>` の問題:
+- 書き込みクエリが来ると読み取りも含めた全クエリがブロックされる
+- グラフ全体に1つのロックがかかるため並行性が低い
+
+`ConcurrentGraph` に移行することで:
+- 書き込み中でも読み取りを並行実行できる
+- ノード/エッジ単位のシャードロックで書き込み競合も局所化される
 
 ## 段階的移行計画
 
