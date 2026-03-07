@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use maharit_core::{Graph, NodeId, PropertyValue};
+use maharit_core::{EdgeId, Graph, NodeId, PropertyValue};
 use thiserror::Error;
 
 /// Transaction ID type
@@ -72,6 +72,22 @@ enum UndoRecord {
     },
     SetProperty {
         node_id: NodeId,
+        key: String,
+        old_value: Option<PropertyValue>,
+    },
+    CreateEdge {
+        edge_id: EdgeId,
+    },
+    DeleteEdge {
+        #[allow(dead_code)]
+        edge_id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: String,
+        properties: Arc<HashMap<String, PropertyValue>>,
+    },
+    SetEdgeProperty {
+        edge_id: EdgeId,
         key: String,
         old_value: Option<PropertyValue>,
     },
@@ -254,6 +270,38 @@ impl TransactionManager {
                         }
                     }
                 }
+                UndoRecord::CreateEdge { edge_id } => {
+                    graph.delete_edge(*edge_id);
+                }
+                UndoRecord::DeleteEdge {
+                    edge_id: _,
+                    from,
+                    to,
+                    label,
+                    properties,
+                } => {
+                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone()) {
+                        if let Some(edge) = graph.get_edge_mut(new_id) {
+                            for (k, v) in properties.iter() {
+                                edge.set_property(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                UndoRecord::SetEdgeProperty {
+                    edge_id,
+                    key,
+                    old_value,
+                } => {
+                    if let Some(edge) = graph.get_edge_mut(*edge_id) {
+                        match old_value {
+                            Some(value) => edge.set_property(key.clone(), value.clone()),
+                            None => {
+                                edge.remove_property(key);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -368,6 +416,114 @@ impl TransactionManager {
             node.set_property(key, value);
         }
 
+        Ok(())
+    }
+
+    // ── External undo-log recording API ──────────────────────────────────────
+    // These methods allow the server layer (tcp_server) to record undo entries
+    // for operations performed via the Executor, which is unaware of transactions.
+
+    /// Record that a node was created (undo = delete it on rollback)
+    pub fn record_node_created(&self, tx_id: TxId, node_id: NodeId) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::CreateNode { node_id });
+        }
+        Ok(())
+    }
+
+    /// Record that a node was deleted (undo = restore it on rollback)
+    pub fn record_node_deleted(
+        &self,
+        tx_id: TxId,
+        node_id: NodeId,
+        labels: Vec<String>,
+        properties: Arc<HashMap<String, PropertyValue>>,
+    ) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::DeleteNode {
+                node_id,
+                labels,
+                properties,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record that a node property was changed (undo = restore old value on rollback)
+    pub fn record_property_changed(
+        &self,
+        tx_id: TxId,
+        node_id: NodeId,
+        key: String,
+        old_value: Option<PropertyValue>,
+    ) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::SetProperty {
+                node_id,
+                key,
+                old_value,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record that an edge was created (undo = delete it on rollback)
+    pub fn record_edge_created(&self, tx_id: TxId, edge_id: EdgeId) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::CreateEdge { edge_id });
+        }
+        Ok(())
+    }
+
+    /// Record that an edge was deleted (undo = restore it on rollback)
+    pub fn record_edge_deleted(
+        &self,
+        tx_id: TxId,
+        edge_id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: String,
+        properties: Arc<HashMap<String, PropertyValue>>,
+    ) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::DeleteEdge {
+                edge_id,
+                from,
+                to,
+                label,
+                properties,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record that an edge property was changed (undo = restore old value on rollback)
+    pub fn record_edge_property_changed(
+        &self,
+        tx_id: TxId,
+        edge_id: EdgeId,
+        key: String,
+        old_value: Option<PropertyValue>,
+    ) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state == TransactionState::Active {
+            tx.undo_log.push(UndoRecord::SetEdgeProperty {
+                edge_id,
+                key,
+                old_value,
+            });
+        }
         Ok(())
     }
 

@@ -225,19 +225,22 @@ def test_transaction_commit(client: MaharitClient):
 def test_transaction_rollback(client: MaharitClient):
     section("トランザクション ROLLBACK")
 
-    # NOTE: 現在の実装では tcp_server がクエリ実行時に tx_id を無視するため
-    # Executor がアンドゥログに書き込まず、ROLLBACK しても変更は取り消されない。
-    # そのため ROLLBACK コマンド自体が正常に返ることのみ確認する。
+    resp = run_query(client, "MATCH (n:TxTest) RETURN n")
+    before = len(resp.get("rows", []))
 
     resp = client.send({"type": "begin"})
     check("BEGIN", resp.get("type") == "transactionBegun", str(resp))
     tx_id = resp.get("txId")
 
-    run_query(client, "CREATE (t:TxTest {val: 'will_rollback'})")
+    client.send({"type": "query", "query": "CREATE (t:TxTest {val: 'will_rollback'})", "txId": tx_id})
 
     resp = client.send({"type": "rollback", "txId": tx_id})
-    check("ROLLBACK コマンドが成功する", resp.get("type") == "rolledBack", str(resp))
-    # ★ 既知の制限: ROLLBACK 後もノードは残る（tx_id がクエリ実行に未連携）
+    check("ROLLBACK", resp.get("type") == "rolledBack", str(resp))
+
+    resp = run_query(client, "MATCH (n:TxTest) RETURN n")
+    after = len(resp.get("rows", []))
+    check("ROLLBACK 後に件数が変わらない", after == before,
+          f"before={before}, after={after}")
 
 
 def test_stream_query(client: MaharitClient):
