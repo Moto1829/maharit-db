@@ -10,6 +10,7 @@ default = ["japanese"]
 japanese = ["dep:lindera"]
 
 [dependencies]
+dashmap.workspace = true
 thiserror.workspace = true
 lindera = { version = "2.2", features = ["embed-ipadic"], optional = true }
 rayon = "1.10"

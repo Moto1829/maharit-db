@@ -23,10 +23,10 @@ let response = execute_query(&graph, &query).await;  // 他の全接続をブロ
 
 ### 案A: DashMap の導入（未実装）
 
-- [ ] `maharit-core` の `nodes` / `edges` を `DashMap<NodeId, Node>` に変更
-  （または `Graph` 全体をシャード化した構造体でラップ）
-- [ ] 読み取り専用クエリは複数同時実行可能にする
-- [ ] 書き込みクエリは影響するシャードのみロック
+- [x] `maharit-core` の `nodes` / `edges` を `DashMap<NodeId, Node>` に変更
+  （`ConcurrentGraph` として `concurrent_graph.rs` に実装）
+- [x] 読み取り専用クエリは複数同時実行可能にする（DashMap の sharded read locks）
+- [x] 書き込みクエリは影響するシャードのみロック（DashMap の per-entry write guards）
 
 ### 案B: 読み取り専用エグゼキューター（実装済）
 

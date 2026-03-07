@@ -1,4 +1,5 @@
 pub mod algorithms;
+pub mod concurrent_graph;
 pub mod constraint;
 pub mod fulltext;
 mod graph;
@@ -16,6 +17,7 @@ pub use constraint::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType,
 };
 pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
+pub use concurrent_graph::ConcurrentGraph;
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
 pub use index::LabelIndex;
 pub use property::{temporal, PropertyValue};

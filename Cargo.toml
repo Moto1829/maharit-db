@@ -24,6 +24,7 @@ maharit-query = { path = "crates/maharit-query" }
 maharit-io = { path = "crates/maharit-io" }
 maharit-viz = { path = "crates/maharit-viz" }
 maharit-client = { path = "crates/maharit-client" }
+dashmap = "6"
 thiserror = "2"
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
