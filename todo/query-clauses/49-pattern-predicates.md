@@ -14,19 +14,19 @@ Neo4j Cypher では `WHERE (n)-->()` や `WHERE NOT (n)-[:KNOWS]->(m)` のよう
 
 ### AST 拡張
 
-- [ ] `Expression::PatternPredicate(PatternPredicateExpr)` を追加
-- [ ] `PatternPredicateExpr` 構造体: パターン + 変数バインディング（変数なしの匿名パターンも可）
+- [x] `Expression::PatternPredicate(PatternPredicateExpr)` を追加
+- [x] `PatternPredicateExpr` 構造体: パターン + 変数バインディング（変数なしの匿名パターンも可）
 
 ### パーサー拡張
 
-- [ ] `WHERE` 内でのパターン記法 `(n)-->()` を式としてパースできるようにする
-- [ ] `NOT` との組み合わせ: `WHERE NOT (n)-[:KNOWS]->(m)`
-- [ ] 既存の `exists()` サブクエリ構文との整合性を保つ
+- [x] `WHERE` 内でのパターン記法 `(n)-->()` を式としてパースできるようにする
+- [x] `NOT` との組み合わせ: `WHERE NOT (n)-[:KNOWS]->(m)`
+- [x] 既存の `exists()` サブクエリ構文との整合性を保つ
 
 ### エグゼキュータ拡張
 
-- [ ] パターン述語をバインディングに対して評価する（マッチすれば `true`）
-- [ ] 既存 `match_pattern()` を再利用してパターンを評価
+- [x] パターン述語をバインディングに対して評価する（マッチすれば `true`）
+- [x] 既存 `match_pattern()` を再利用してパターンを評価
 
 ## クエリ例
 

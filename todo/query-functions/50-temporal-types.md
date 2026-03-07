@@ -8,34 +8,34 @@ Cypher の日時型（`date()`, `datetime()`, `duration()`）を実装する。
 
 ### PropertyValue の拡張
 
-- [ ] `PropertyValue::Date(NaiveDate)` を追加
-- [ ] `PropertyValue::DateTime(DateTime<Utc>)` を追加
-- [ ] `PropertyValue::Duration(Duration)` を追加
+- [x] `PropertyValue::Date(NaiveDate)` を追加
+- [x] `PropertyValue::DateTime(DateTime<Utc>)` を追加
+- [x] `PropertyValue::Duration(Duration)` を追加
 
 ### 組み込み関数
 
-- [ ] `date()` - 現在日付、または `date("2024-01-15")` でパース
-- [ ] `date({year, month, day})` - マップから構築
-- [ ] `datetime()` - 現在日時（UTC）
-- [ ] `datetime("2024-01-15T12:00:00Z")` - ISO 8601 文字列からパース
-- [ ] `duration("P1Y2M3D")` - ISO 8601 期間文字列からパース
-- [ ] `duration({years, months, days, hours, minutes, seconds})` - マップから構築
+- [x] `date()` - 現在日付、または `date("2024-01-15")` でパース
+- [ ] `date({year, month, day})` - マップから構築（Map式未サポートのため保留）
+- [x] `datetime()` - 現在日時（UTC）
+- [x] `datetime("2024-01-15T12:00:00Z")` - ISO 8601 文字列からパース
+- [x] `duration("P1Y2M3D")` - ISO 8601 期間文字列からパース
+- [ ] `duration({years, months, days, hours, minutes, seconds})` - マップから構築（同上）
 
 ### 日時演算
 
-- [ ] 日付 + duration: `date() + duration("P1D")`
-- [ ] 日時の差: `datetime2 - datetime1 = duration`
-- [ ] 比較演算子: `<`, `>`, `<=`, `>=` が日時・期間に対応
+- [x] 日付 + duration: `date() + duration("P1D")`
+- [x] 日時の差: `datetime2 - datetime1 = duration`
+- [x] 比較演算子: `<`, `>`, `<=`, `>=` が日時・期間に対応
 
 ### アクセサ関数
 
-- [ ] `.year`, `.month`, `.day` プロパティアクセス
-- [ ] `.hour`, `.minute`, `.second`
-- [ ] `duration.days`, `duration.hours` 等
+- [x] `.year`, `.month`, `.day` プロパティアクセス
+- [x] `.hour`, `.minute`, `.second`
+- [x] `duration.days`, `duration.hours` 等
 
 ### 永続化対応
 
-- [ ] `PropertyValue::Date/DateTime/Duration` のシリアライズ・デシリアライズ
+- [x] `PropertyValue::Date/DateTime/Duration` のシリアライズ・デシリアライズ
 
 ## クエリ例
 

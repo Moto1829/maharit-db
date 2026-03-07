@@ -3053,14 +3053,20 @@ impl<'a> Executor<'a> {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
-                                if let Some(value) = node.get_property(prop) {
-                                    Ok(Value::from(value))
-                                } else {
-                                    Ok(Value::Null)
-                                }
+                                Ok(node.get_property(prop).map(Value::from).unwrap_or(Value::Null))
                             } else {
                                 Ok(Value::Null)
                             }
+                        }
+                        BindingValue::Edge(edge_id) => {
+                            if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
+                                Ok(edge.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                            } else {
+                                Ok(Value::Null)
+                            }
+                        }
+                        BindingValue::Scalar(scalar_val) => {
+                            Self::access_temporal_field(scalar_val, prop)
                         }
                         _ => Ok(Value::Null),
                     }
@@ -4413,6 +4419,54 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// テンポラル値（Date / DateTime / Duration）のフィールドアクセスを行う。
+    ///
+    /// `d.year`, `d.month`, `d.day`, `d.hour`, `d.minute`, `d.second`,
+    /// `dur.years`, `dur.months`, `dur.days`, `dur.hours`, `dur.minutes`, `dur.seconds`
+    /// に対応する。一致するフィールドがない場合は `Value::Null` を返す。
+    fn access_temporal_field(val: &Value, field: &str) -> Result<Value, ExecuteError> {
+        use maharit_core::temporal;
+        match val {
+            Value::Date(days) => {
+                let (y, m, d) = temporal::days_to_ymd(*days);
+                let v = match field {
+                    "year" => Value::Int(y as i64),
+                    "month" => Value::Int(m as i64),
+                    "day" => Value::Int(d as i64),
+                    _ => Value::Null,
+                };
+                Ok(v)
+            }
+            Value::DateTime(ms) => {
+                let (y, mo, d, h, mi, s, _frac) = temporal::millis_to_datetime(*ms);
+                let v = match field {
+                    "year" => Value::Int(y as i64),
+                    "month" => Value::Int(mo as i64),
+                    "day" => Value::Int(d as i64),
+                    "hour" => Value::Int(h as i64),
+                    "minute" => Value::Int(mi as i64),
+                    "second" => Value::Int(s as i64),
+                    _ => Value::Null,
+                };
+                Ok(v)
+            }
+            Value::Duration { months, days, millis } => {
+                let v = match field {
+                    "years" => Value::Int((*months / 12) as i64),
+                    "months" => Value::Int((*months % 12) as i64),
+                    "days" => Value::Int(*days as i64),
+                    "hours" => Value::Int(*millis / 3_600_000),
+                    "minutes" => Value::Int(*millis % 3_600_000 / 60_000),
+                    "seconds" => Value::Int(*millis % 60_000 / 1_000),
+                    "milliseconds" => Value::Int(*millis % 1_000),
+                    _ => Value::Null,
+                };
+                Ok(v)
+            }
+            _ => Ok(Value::Null),
+        }
+    }
+
     fn evaluate_expression(
         &self,
         expr: &Expression,
@@ -4439,19 +4493,29 @@ impl<'a> Executor<'a> {
                     .get(var)
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
 
-                let node_id = binding_value
-                    .as_node()
-                    .ok_or_else(|| ExecuteError::TypeError("expected node".to_string()))?;
-
-                let node = self
-                    .graph_ref()
-                    .get_node(node_id)
-                    .ok_or_else(|| ExecuteError::TypeError("node not found".to_string()))?;
-
-                Ok(node
-                    .get_property(prop)
-                    .map(Value::from)
-                    .unwrap_or(Value::Null))
+                match binding_value {
+                    BindingValue::Node(node_id) => {
+                        let node = self
+                            .graph_ref()
+                            .get_node(*node_id)
+                            .ok_or_else(|| ExecuteError::TypeError("node not found".to_string()))?;
+                        Ok(node.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                    }
+                    BindingValue::Edge(edge_id) => {
+                        let edge = self
+                            .graph_ref()
+                            .get_edge(*edge_id)
+                            .ok_or_else(|| ExecuteError::TypeError("edge not found".to_string()))?;
+                        Ok(edge.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                    }
+                    BindingValue::Scalar(scalar_val) => {
+                        Self::access_temporal_field(scalar_val, prop)
+                    }
+                    _ => Err(ExecuteError::TypeError(format!(
+                        "cannot access property '{}' on path value",
+                        prop
+                    ))),
+                }
             }
             Expression::BinaryOp(left, op, right) => {
                 let left_val = self.evaluate_expression(left, bindings)?;
@@ -10555,5 +10619,67 @@ mod tests {
             .set_property("date", PropertyValue::Date(days));
         let node = graph.get_node(nid).unwrap();
         assert_eq!(node.get_property("date"), Some(&PropertyValue::Date(days)));
+    }
+
+    #[test]
+    fn test_date_field_accessors() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) WITH date("2024-06-15") AS d RETURN d.year, d.month, d.day"#,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2024));
+        assert_eq!(result.rows[0].columns[1], Value::Int(6));
+        assert_eq!(result.rows[0].columns[2], Value::Int(15));
+    }
+
+    #[test]
+    fn test_datetime_field_accessors() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) WITH datetime("2024-06-15T10:30:45Z") AS dt RETURN dt.year, dt.hour, dt.minute, dt.second"#,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2024));
+        assert_eq!(result.rows[0].columns[1], Value::Int(10));
+        assert_eq!(result.rows[0].columns[2], Value::Int(30));
+        assert_eq!(result.rows[0].columns[3], Value::Int(45));
+    }
+
+    #[test]
+    fn test_duration_field_accessors() {
+        // P1Y2M3DT4H5M6S = 1 year, 2 months, 3 days, 4 hours, 5 minutes, 6 seconds
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:T) WITH duration("P1Y2M3DT4H5M6S") AS dur RETURN dur.years, dur.months, dur.days, dur.hours, dur.minutes, dur.seconds"#,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));  // years
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));  // months (within year)
+        assert_eq!(result.rows[0].columns[2], Value::Int(3));  // days
+        assert_eq!(result.rows[0].columns[3], Value::Int(4));  // hours
+        assert_eq!(result.rows[0].columns[4], Value::Int(5));  // minutes
+        assert_eq!(result.rows[0].columns[5], Value::Int(6));  // seconds
+    }
+
+    #[test]
+    fn test_date_field_in_where_clause() {
+        let mut graph = Graph::new();
+        let nid = graph.create_node_with_labels(vec!["Event".to_string()]);
+        let days = maharit_core::temporal::ymd_to_days(2024, 6, 15);
+        graph.get_node_mut(nid).unwrap().set_property("date", PropertyValue::Date(days));
+        // MATCH event, carry date through WITH, filter on year, return month
+        let result = execute(
+            &mut graph,
+            r#"MATCH (e:Event) WITH e.date AS d WHERE d.year = 2024 RETURN d.month"#,
+        ).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(6));
     }
 }
