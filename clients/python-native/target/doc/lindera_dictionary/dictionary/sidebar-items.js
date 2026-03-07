@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["character_definition","connection_cost_matrix","metadata","prefix_dictionary","schema","unknown_dictionary"],"static":["UNK"],"struct":["ArchivedUserDictionary","Dictionary","UserDictionary","UserDictionaryResolver"]};

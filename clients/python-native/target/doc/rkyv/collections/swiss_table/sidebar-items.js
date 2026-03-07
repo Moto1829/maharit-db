@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["index_map","index_set","map","set","table"]};

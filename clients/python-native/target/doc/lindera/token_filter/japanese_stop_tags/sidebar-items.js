@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["JAPANESE_STOP_TAGS_TOKEN_FILTER_NAME"],"struct":["JapaneseStopTagsTokenFilter"],"type":["JapaneseStopTagsTokenFilterConfig"]};

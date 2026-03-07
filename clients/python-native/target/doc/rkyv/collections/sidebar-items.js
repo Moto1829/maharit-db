@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["btree_map","btree_set","swiss_table","util"]};

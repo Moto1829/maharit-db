@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["STOP_WORDS_TOKEN_FILTER_NAME"],"struct":["StopWordsTokenFilter"],"type":["StopWordsTokenFilterConfig"]};

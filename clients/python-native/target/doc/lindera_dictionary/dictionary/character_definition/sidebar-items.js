@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["ArchivedCategoryData","ArchivedCategoryId","ArchivedCharacterDefinition","ArchivedLookupTable","CategoryData","CategoryDataResolver","CategoryId","CategoryIdResolver","CharacterDefinition","CharacterDefinitionResolver","LookupTable","LookupTableResolver"]};

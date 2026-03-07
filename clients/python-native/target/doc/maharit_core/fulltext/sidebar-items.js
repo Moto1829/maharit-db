@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["FulltextError"],"struct":["FulltextIndex","FulltextManager","SearchResult"]};

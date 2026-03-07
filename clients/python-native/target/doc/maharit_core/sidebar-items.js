@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["GraphError","PropertyValue"],"mod":["algorithms","concurrent_graph","constraint","fulltext","temporal","traversal"],"struct":["Edge","Graph","IndexDefinition","LabelIndex","Node","PropertyIndex","PropertyKey"],"type":["EdgeId","NodeId"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["KOREAN_KEEP_TAGS_TOKEN_FILTER_NAME"],"struct":["KoreanKeepTagsTokenFilter"],"type":["KoreanKeepTagsTokenFilterConfig"]};

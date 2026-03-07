@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["UserDictionaryBuilderOptionsError"],"fn":["build_user_dictionary"],"struct":["UserDictionaryBuilder","UserDictionaryBuilderOptions"]};

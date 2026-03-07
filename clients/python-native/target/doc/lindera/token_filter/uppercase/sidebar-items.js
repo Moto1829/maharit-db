@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["UPPERCASE_TOKEN_FILTER_NAME"],"struct":["UppercaseTokenFilter"],"type":["UppercaseTokenFilterConfig"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["char","constants","string","utils"]};

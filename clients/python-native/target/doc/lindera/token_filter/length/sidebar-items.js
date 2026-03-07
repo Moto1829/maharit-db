@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["LENGTH_TOKEN_FILTER_NAME"],"struct":["LengthTokenFilter"],"type":["LengthTokenFilterConfig"]};

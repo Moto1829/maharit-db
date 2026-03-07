@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ArchivedFieldType","FieldType","FieldTypeResolver"],"struct":["ArchivedFieldDefinition","ArchivedSchema","FieldDefinition","FieldDefinitionResolver","Schema","SchemaResolver"]};

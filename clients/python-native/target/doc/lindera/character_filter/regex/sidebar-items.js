@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["REGEX_CHARACTER_FILTER_NAME"],"struct":["RegexCharacterFilter"],"type":["RegexCharacterFilterConfig"]};

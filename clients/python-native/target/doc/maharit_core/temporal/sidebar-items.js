@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["add_duration_to_date","datetime_to_millis","days_to_ymd","duration_to_string","millis_to_datetime","parse_date","parse_datetime","parse_duration","ymd_to_days"]};

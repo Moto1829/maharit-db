@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["niched_option","niching","option_box","option_nonzero"]};

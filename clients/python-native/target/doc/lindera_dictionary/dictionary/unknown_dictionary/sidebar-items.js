@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["parse_unk"],"struct":["ArchivedUnknownDictionary","UnkWord","UnknownDictionary","UnknownDictionaryEntry","UnknownDictionaryResolver","WordIdx"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["MAPPING_TOKEN_FILTER_NAME"],"struct":["MappingTokenFilter"],"type":["MappingTokenFilterConfig"]};

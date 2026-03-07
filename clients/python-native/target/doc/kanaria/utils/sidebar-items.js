@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["AsciiUtils","CharsUtils","ConvertTarget","KanaUtils","WidthUtils"],"trait":["CharExtend"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["index"],"trait":["IndexedMutRandom","IndexedRandom","IteratorRandom","SliceRandom"]};

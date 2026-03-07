@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["AllocationStats","AllocationTracker","Arena","ArenaHandle","SubAllocator"],"trait":["Allocator"]};

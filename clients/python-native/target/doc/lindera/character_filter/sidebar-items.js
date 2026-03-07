@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["japanese_iteration_mark","mapping","regex","unicode_normalize"],"struct":["BoxCharacterFilter","CharacterFilterLoader","OffsetMapping","Transformation"],"trait":["CharacterFilter","CharacterFilterClone"]};

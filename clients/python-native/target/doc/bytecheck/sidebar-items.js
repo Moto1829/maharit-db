@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"derive":["CheckBytes"],"fn":["check_bytes","check_bytes_with_context"],"struct":["InvalidEnumDiscriminantError","NamedEnumVariantCheckContext","StructCheckContext","TupleStructCheckContext","UnnamedEnumVariantCheckContext"],"trait":["CheckBytes","Verify"]};

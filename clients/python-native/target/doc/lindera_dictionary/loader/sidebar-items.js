@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["character_definition","connection_cost_matrix","metadata","prefix_dictionary","unknown_dictionary","user_dictionary"],"struct":["FSDictionaryLoader"],"trait":["DictionaryLoader"]};

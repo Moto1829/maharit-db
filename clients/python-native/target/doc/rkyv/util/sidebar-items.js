@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["clear_arena","with_arena"],"struct":["Align","AlignedVec","InlineVec","SerVec"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["ArcFlavor","ArchivedRc","ArchivedRcWeak","RcFlavor","RcResolver","RcWeakResolver"],"trait":["Flavor"]};

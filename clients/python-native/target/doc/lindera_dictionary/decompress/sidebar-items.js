@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Algorithm","AlgorithmResolver","ArchivedAlgorithm"],"fn":["decompress"],"struct":["AlgorithmIter","ArchivedCompressedData","CompressedData","CompressedDataResolver"]};

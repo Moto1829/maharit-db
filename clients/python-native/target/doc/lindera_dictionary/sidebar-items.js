@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["get_version"],"macro":["decompress_data"],"mod":["builder","compress","decompress","dictionary","error","loader","macros","mode","nbest","util","viterbi"],"type":["LinderaResult"]};

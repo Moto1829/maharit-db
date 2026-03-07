@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["MAPPING_CHARACTER_FILTER_NAME"],"struct":["MappingCharacterFilter"],"type":["MappingCharacterFilterConfig"]};

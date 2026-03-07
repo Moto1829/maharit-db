@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["JAPANESE_NUMBER_TOKEN_FILTER_NAME"],"struct":["JapaneseNumberTokenFilter"],"type":["JapaneseNumberTokenFilterConfig"]};

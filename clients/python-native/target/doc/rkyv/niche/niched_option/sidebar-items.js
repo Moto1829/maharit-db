@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["NichedOption"],"type":["Iter"]};

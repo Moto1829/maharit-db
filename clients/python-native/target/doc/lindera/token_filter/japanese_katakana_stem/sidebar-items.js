@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["JAPANESE_KATAKANA_STEM_TOKEN_FILTER_NAME"],"struct":["JapaneseKatakanaStemTokenFilter"],"type":["JapaneseKatakanaStemTokenFilterConfig"]};

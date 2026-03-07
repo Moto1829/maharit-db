@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["ArchivedTuple1","ArchivedTuple10","ArchivedTuple11","ArchivedTuple12","ArchivedTuple13","ArchivedTuple2","ArchivedTuple3","ArchivedTuple4","ArchivedTuple5","ArchivedTuple6","ArchivedTuple7","ArchivedTuple8","ArchivedTuple9"]};

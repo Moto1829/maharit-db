@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["ArchivedHashMap","HashMapResolver","Iter","IterMut","Keys","Values","ValuesMut"]};

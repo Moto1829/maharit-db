@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["PoolingState"],"mod":["pooling"],"struct":["ErasedPtr","Pool","Unpool"],"trait":["FromMetadata","Pooling","PoolingExt","SharedPointer"],"union":["Metadata"]};
