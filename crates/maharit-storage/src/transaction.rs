@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use maharit_core::{EdgeId, Graph, NodeId, PropertyValue};
+use maharit_core::{ConcurrentGraph, EdgeId, Graph, NodeId, PropertyValue};
 use thiserror::Error;
 
 /// Transaction ID type
@@ -308,6 +308,68 @@ impl TransactionManager {
         // Release all locks
         self.release_all_locks(tx_id, &tx.held_locks);
 
+        tx.undo_log.clear();
+        tx.state = TransactionState::RolledBack;
+
+        Ok(())
+    }
+
+    /// Rollback a transaction against a `ConcurrentGraph`.
+    ///
+    /// Unlike [`rollback`] which requires `&mut Graph`, this method takes a
+    /// shared `&ConcurrentGraph` because DashMap provides interior mutability.
+    pub fn rollback_concurrent(&self, tx_id: TxId, graph: &ConcurrentGraph) -> Result<()> {
+        use std::sync::Arc as StdArc;
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+
+        if tx.state != TransactionState::Active {
+            return Err(TransactionError::AlreadyFinished(tx_id));
+        }
+
+        // Apply undo records in reverse order.
+        for record in tx.undo_log.iter().rev() {
+            match record {
+                UndoRecord::CreateNode { node_id } => {
+                    graph.delete_node(*node_id);
+                }
+                UndoRecord::DeleteNode { node_id: _, labels, properties } => {
+                    let new_id = graph.create_node_with_labels(labels.clone());
+                    for (key, value) in properties.iter() {
+                        graph.set_node_property(new_id, key, value.clone());
+                    }
+                }
+                UndoRecord::SetProperty { node_id, key, old_value } => match old_value {
+                    Some(value) => graph.set_node_property(*node_id, key, value.clone()),
+                    None => {
+                        graph.with_node_mut(*node_id, |n| {
+                            StdArc::make_mut(&mut n.properties).remove(key.as_str());
+                        });
+                    }
+                },
+                UndoRecord::CreateEdge { edge_id } => {
+                    graph.delete_edge(*edge_id);
+                }
+                UndoRecord::DeleteEdge { edge_id: _, from, to, label, properties } => {
+                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone()) {
+                        for (k, v) in properties.iter() {
+                            graph.set_edge_property(new_id, k, v.clone());
+                        }
+                    }
+                }
+                UndoRecord::SetEdgeProperty { edge_id, key, old_value } => match old_value {
+                    Some(value) => graph.set_edge_property(*edge_id, key, value.clone()),
+                    None => {
+                        graph.with_edge_mut(*edge_id, |e| {
+                            StdArc::make_mut(&mut e.properties).remove(key.as_str());
+                        });
+                    }
+                },
+            }
+        }
+
+        // Release all locks held by this transaction.
+        self.release_all_locks(tx_id, &tx.held_locks);
         tx.undo_log.clear();
         tx.state = TransactionState::RolledBack;
 
@@ -713,6 +775,7 @@ impl TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maharit_core::GraphBackend;
 
     #[test]
     fn test_begin_commit() {
@@ -831,6 +894,101 @@ mod tests {
         assert!(tm.commit(tx_id).is_ok());
         assert!(matches!(
             tm.commit(tx_id),
+            Err(TransactionError::AlreadyFinished(_))
+        ));
+    }
+
+    #[test]
+    fn test_rollback_concurrent_create_node() {
+        use maharit_core::ConcurrentGraph;
+
+        let tm = TransactionManager::new();
+        let graph = ConcurrentGraph::new();
+
+        let tx_id = tm.begin();
+        let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
+        tm.record_node_created(tx_id, node_id).unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+
+        tm.rollback_concurrent(tx_id, &graph).unwrap();
+
+        assert_eq!(graph.node_count(), 0);
+        assert!(graph.get_node(node_id).is_none());
+    }
+
+    #[test]
+    fn test_rollback_concurrent_delete_node() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use maharit_core::{ConcurrentGraph, PropertyValue};
+
+        let tm = TransactionManager::new();
+        let graph = ConcurrentGraph::new();
+
+        let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
+        graph.set_node_property(node_id, "name", PropertyValue::String("Alice".to_string()));
+
+        // Simulate deleting the node in a transaction
+        let tx_id = tm.begin();
+        let labels = vec!["Person".to_string()];
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+        tm.record_node_deleted(tx_id, node_id, labels, Arc::new(props)).unwrap();
+        graph.delete_node(node_id);
+
+        assert_eq!(graph.node_count(), 0);
+
+        // Rollback should restore the node (with a new ID since ConcurrentGraph doesn't reuse IDs)
+        tm.rollback_concurrent(tx_id, &graph).unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_rollback_concurrent_property_change() {
+        use maharit_core::{ConcurrentGraph, PropertyValue};
+
+        let tm = TransactionManager::new();
+        let graph = ConcurrentGraph::new();
+
+        let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
+        graph.set_node_property(node_id, "name", PropertyValue::String("Alice".to_string()));
+
+        // Modify in transaction
+        let tx_id = tm.begin();
+        let old = Some(PropertyValue::String("Alice".to_string()));
+        tm.record_property_changed(tx_id, node_id, "name".to_string(), old).unwrap();
+        graph.set_node_property(node_id, "name", PropertyValue::String("Bob".to_string()));
+
+        let n = graph.get_node(node_id).unwrap();
+        assert_eq!(
+            n.properties.get("name"),
+            Some(&PropertyValue::String("Bob".to_string()))
+        );
+
+        // Rollback
+        tm.rollback_concurrent(tx_id, &graph).unwrap();
+
+        let n = graph.get_node(node_id).unwrap();
+        assert_eq!(
+            n.properties.get("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_rollback_concurrent_already_finished() {
+        use maharit_core::ConcurrentGraph;
+
+        let tm = TransactionManager::new();
+        let graph = ConcurrentGraph::new();
+
+        let tx_id = tm.begin();
+        tm.commit(tx_id).unwrap();
+
+        assert!(matches!(
+            tm.rollback_concurrent(tx_id, &graph),
             Err(TransactionError::AlreadyFinished(_))
         ));
     }

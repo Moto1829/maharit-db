@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{ConcurrentGraph, EdgeId, GraphBackend, NodeId};
+use maharit_core::{ConcurrentGraph, EdgeId, GraphBackend, NodeId, PropertyValue};
 use maharit_query::{Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -500,9 +500,14 @@ async fn handle_connection(
                     message: format!("Commit failed: {}", e),
                 },
             },
-            Request::Rollback { tx_id: _ } => Response::Error {
-                message: "Rollback is not yet supported in concurrent graph mode".to_string(),
-            },
+            Request::Rollback { tx_id } => {
+                match tx_manager.rollback_concurrent(tx_id, &graph) {
+                    Ok(()) => Response::RolledBack { tx_id },
+                    Err(e) => Response::Error {
+                        message: format!("Rollback failed: {}", e),
+                    },
+                }
+            }
         };
 
         send_response(&mut socket, &response, config.write_timeout).await?;
@@ -690,18 +695,171 @@ async fn execute_streaming_query(
 
 // ── Transaction-aware query execution ────────────────────────────────────────
 
-/// Execute a write query within a transaction.
+/// Lightweight snapshot of ConcurrentGraph state captured before a write query.
 ///
-/// Undo tracking (ROLLBACK support) for ConcurrentGraph is deferred to Phase 4.
-/// This delegates to the standard execution path.
+/// `Arc`-cloned property maps act as copy-on-write snapshots: when the executor
+/// modifies a node's properties via `Arc::make_mut`, a new map is allocated,
+/// leaving the snapshot Arc pointing at the original unchanged data.
+struct ConcurrentSnapshot {
+    nodes: HashMap<NodeId, (Vec<String>, Arc<HashMap<String, PropertyValue>>)>,
+    edges: HashMap<EdgeId, (NodeId, NodeId, String, Arc<HashMap<String, PropertyValue>>)>,
+}
+
+fn take_concurrent_snapshot(graph: &ConcurrentGraph) -> ConcurrentSnapshot {
+    let nodes = graph
+        .nodes()
+        .map(|r| {
+            let n = r.value();
+            (n.id, (n.labels.clone(), Arc::clone(&n.properties)))
+        })
+        .collect();
+    let edges = graph
+        .edges()
+        .map(|r| {
+            let e = r.value();
+            (e.id, (e.from, e.to, e.label.clone(), Arc::clone(&e.properties)))
+        })
+        .collect();
+    ConcurrentSnapshot { nodes, edges }
+}
+
+/// Diff the graph against a pre-execution snapshot and record undo entries.
+fn record_undo_diff_concurrent(
+    graph: &ConcurrentGraph,
+    snapshot: &ConcurrentSnapshot,
+    tx_id: u64,
+    tx_manager: &TransactionManager,
+) {
+    let current_node_ids: HashSet<NodeId> = graph.node_ids().into_iter().collect();
+    let snap_node_ids: HashSet<NodeId> = snapshot.nodes.keys().copied().collect();
+
+    for &id in current_node_ids.difference(&snap_node_ids) {
+        let _ = tx_manager.record_node_created(tx_id, id);
+    }
+    for &id in snap_node_ids.difference(&current_node_ids) {
+        let (labels, properties) = snapshot.nodes[&id].clone();
+        let _ = tx_manager.record_node_deleted(tx_id, id, labels, properties);
+    }
+    for &id in snap_node_ids.intersection(&current_node_ids) {
+        let (_, old_props) = &snapshot.nodes[&id];
+        if let Some(node) = graph.get_node(id) {
+            for (key, old_val) in old_props.iter() {
+                if node.properties.get(key.as_str()) != Some(old_val) {
+                    let _ = tx_manager.record_property_changed(
+                        tx_id, id, key.clone(), Some(old_val.clone()),
+                    );
+                }
+            }
+            for key in node.properties.keys() {
+                if !old_props.contains_key(key.as_str()) {
+                    let _ = tx_manager.record_property_changed(tx_id, id, key.clone(), None);
+                }
+            }
+        }
+    }
+
+    let current_edge_ids: HashSet<EdgeId> = graph.edge_ids().into_iter().collect();
+    let snap_edge_ids: HashSet<EdgeId> = snapshot.edges.keys().copied().collect();
+
+    for &id in current_edge_ids.difference(&snap_edge_ids) {
+        let _ = tx_manager.record_edge_created(tx_id, id);
+    }
+    for &id in snap_edge_ids.difference(&current_edge_ids) {
+        let (from, to, label, properties) = snapshot.edges[&id].clone();
+        let _ = tx_manager.record_edge_deleted(tx_id, id, from, to, label, properties);
+    }
+    for &id in snap_edge_ids.intersection(&current_edge_ids) {
+        let (_, _, _, old_props) = &snapshot.edges[&id];
+        if let Some(edge) = graph.get_edge(id) {
+            for (key, old_val) in old_props.iter() {
+                if edge.properties.get(key.as_str()) != Some(old_val) {
+                    let _ = tx_manager.record_edge_property_changed(
+                        tx_id, id, key.clone(), Some(old_val.clone()),
+                    );
+                }
+            }
+            for key in edge.properties.keys() {
+                if !old_props.contains_key(key.as_str()) {
+                    let _ = tx_manager.record_edge_property_changed(tx_id, id, key.clone(), None);
+                }
+            }
+        }
+    }
+}
+
+/// Execute a write query within a transaction: snapshot → execute → record undo diff.
 async fn execute_query_with_tx(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
-    _tx_id: u64,
-    _tx_manager: &TransactionManager,
+    tx_id: u64,
+    tx_manager: &TransactionManager,
     replication: Option<&LeaderReplicationManager>,
 ) -> Response {
-    execute_query(graph, query, replication).await
+    let stmt = match Parser::new(query) {
+        Ok(mut p) => match p.parse() {
+            Ok(s) => s,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Parse error: {}", e),
+                }
+            }
+        },
+        Err(e) => {
+            return Response::Error {
+                message: format!("Lexer error: {}", e),
+            }
+        }
+    };
+
+    let is_write = !is_read_only(&stmt);
+
+    if !is_write {
+        return execute_query(graph, query, replication).await;
+    }
+
+    // Snapshot before execution for undo tracking and WAL diff.
+    let snapshot = take_concurrent_snapshot(graph);
+    let (node_ids_before, edge_ids_before) = if replication.is_some() {
+        (
+            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
+            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
+        )
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
+
+    // SAFETY: ConcurrentGraph has interior mutability via DashMap.
+    let exec_result = {
+        let mut executor = unsafe { Executor::new_concurrent(graph) };
+        executor.execute(stmt)
+    };
+
+    match exec_result {
+        Ok(result) => {
+            record_undo_diff_concurrent(graph, &snapshot, tx_id, tx_manager);
+
+            if let Some(repl) = replication {
+                emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+            }
+
+            let rows = result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    result
+                        .columns
+                        .iter()
+                        .zip(row.columns.iter())
+                        .map(|(col, val)| (col.clone(), val.to_string()))
+                        .collect()
+                })
+                .collect();
+            Response::Result { rows }
+        }
+        Err(e) => Response::Error {
+            message: format!("Execution error: {}", e),
+        },
+    }
 }
 
 /// Execute a query and return the response.

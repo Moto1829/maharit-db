@@ -58,4 +58,4 @@ Executor 等が `Graph` に依存しているため `Arc<RwLock<Graph>>` で代�
 - [x] Phase 1: Executor 対応（GraphBackend トレイト, `*mut dyn GraphBackend`, `new_concurrent()`）
 - [x] Phase 2: PersistentStorage 対応（`save_concurrent` / `load_concurrent`）
 - [x] Phase 3: TcpServer 切り替え（`Arc<ConcurrentGraph>`, ロックレスクエリ実行）
-- [ ] Phase 4: TransactionManager 対応（オプション）
+- [x] Phase 4: TransactionManager 対応（`rollback_concurrent`, `ConcurrentSnapshot`, undo diff）
