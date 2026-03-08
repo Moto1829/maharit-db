@@ -129,7 +129,7 @@ fn run_server(args: &[String]) {
 
     // Load graph from file or start with empty graph
     let graph = if std::path::Path::new(&data_path).exists() {
-        match PersistentStorage::load(&data_path) {
+        match PersistentStorage::load_concurrent(&data_path) {
             Ok(g) => {
                 println!("Loaded database from {}", data_path);
                 g
@@ -141,10 +141,10 @@ fn run_server(args: &[String]) {
         }
     } else {
         println!("Starting with empty database (will save to {})", data_path);
-        maharit_core::Graph::new()
+        maharit_core::ConcurrentGraph::new()
     };
 
-    let graph_arc = Arc::new(tokio::sync::RwLock::new(graph));
+    let graph_arc = Arc::new(graph);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
 
     match replication_role.as_deref() {
@@ -157,10 +157,7 @@ fn run_server(args: &[String]) {
                 leader_address: None,
                 ..Default::default()
             };
-            let leader = Arc::new(LeaderReplicationManager::with_graph(
-                repl_config,
-                Arc::clone(&graph_arc),
-            ));
+            let leader = Arc::new(LeaderReplicationManager::new(repl_config));
             let leader_clone = Arc::clone(&leader);
             let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
                 .with_replication(Arc::clone(&leader));
@@ -234,14 +231,13 @@ fn run_server(args: &[String]) {
 
 /// Spawn a background task that waits for SIGINT/SIGTERM, saves the database, then exits.
 fn spawn_shutdown_handler(
-    graph: std::sync::Arc<tokio::sync::RwLock<maharit_core::Graph>>,
+    graph: std::sync::Arc<maharit_core::ConcurrentGraph>,
     data_path: String,
 ) {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         println!("\nShutting down, saving database to {}...", data_path);
-        let g = graph.read().await;
-        match maharit_storage::PersistentStorage::save(&g, &data_path) {
+        match maharit_storage::PersistentStorage::save_concurrent(&graph, &data_path) {
             Ok(()) => println!("Database saved successfully."),
             Err(e) => eprintln!("Warning: Failed to save database: {}", e),
         }

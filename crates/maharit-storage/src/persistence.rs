@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use maharit_core::{Graph, IndexDefinition, PropertyIndex, PropertyValue};
+use maharit_core::{ConcurrentGraph, Graph, IndexDefinition, PropertyIndex, PropertyValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -143,6 +143,106 @@ impl PersistentStorage {
 
         writer.flush()?;
         Ok(())
+    }
+
+    /// ConcurrentGraph をファイルに保存
+    pub fn save_concurrent(graph: &ConcurrentGraph, path: impl AsRef<Path>) -> Result<()> {
+        let nodes: Vec<SNode> = graph
+            .nodes()
+            .map(|r| {
+                let n = r.value();
+                SNode {
+                    id: n.id,
+                    labels: n.labels.clone(),
+                    properties: n.properties.as_ref().clone(),
+                }
+            })
+            .collect();
+
+        let edges: Vec<SEdge> = graph
+            .edges()
+            .map(|r| {
+                let e = r.value();
+                SEdge {
+                    id: e.id,
+                    label: e.label.clone(),
+                    from: e.from,
+                    to: e.to,
+                    properties: e.properties.as_ref().clone(),
+                }
+            })
+            .collect();
+
+        let snapshot = SSnapshot { nodes, edges, indexes: vec![] };
+
+        let encoded = bincode::serialize(&snapshot)
+            .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
+
+        writer.write_all(MAGIC)?;
+        writer.write_all(&VERSION.to_le_bytes())?;
+
+        let payload_len = encoded.len() as u64;
+        writer.write_all(&payload_len.to_le_bytes())?;
+        writer.write_all(&encoded)?;
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// ファイルから ConcurrentGraph を読み込み
+    pub fn load_concurrent(path: impl AsRef<Path>) -> Result<ConcurrentGraph> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(PersistenceError::InvalidMagic);
+        }
+
+        let version = Self::read_u32(&mut reader)?;
+        if version != VERSION {
+            return Err(PersistenceError::UnsupportedVersion(version));
+        }
+
+        let mut len_bytes = [0u8; 8];
+        reader.read_exact(&mut len_bytes)?;
+        let payload_len = u64::from_le_bytes(len_bytes) as usize;
+
+        let mut encoded = vec![0u8; payload_len];
+        reader.read_exact(&mut encoded)?;
+
+        let snapshot: SSnapshot = bincode::deserialize(&encoded)
+            .map_err(|e| PersistenceError::CorruptedData(format!("bincode deserialize: {}", e)))?;
+
+        let graph = ConcurrentGraph::new();
+
+        let mut id_map: HashMap<u64, u64> = HashMap::new();
+        for snode in snapshot.nodes {
+            let new_id = graph.create_node_with_labels(snode.labels);
+            id_map.insert(snode.id, new_id);
+            for (k, v) in snode.properties {
+                graph.set_node_property(new_id, &k, v);
+            }
+        }
+
+        for sedge in snapshot.edges {
+            let from = *id_map.get(&sedge.from).ok_or_else(|| {
+                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.from))
+            })?;
+            let to = *id_map.get(&sedge.to).ok_or_else(|| {
+                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.to))
+            })?;
+            let edge_id = graph.create_edge(from, to, &sedge.label)?;
+            for (k, v) in sedge.properties {
+                graph.set_edge_property(edge_id, &k, v);
+            }
+        }
+
+        Ok(graph)
     }
 
     /// ファイルからグラフを読み込み（インデックスは無視）

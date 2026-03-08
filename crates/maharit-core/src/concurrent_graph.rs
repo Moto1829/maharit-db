@@ -203,6 +203,14 @@ impl ConcurrentGraph {
         self.edges.get(&id).map(|e| f(&e))
     }
 
+    /// Mutable access to an edge via a closure (holds a DashMap write guard).
+    pub fn with_edge_mut<F, R>(&self, id: EdgeId, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut Edge) -> R,
+    {
+        self.edges.get_mut(&id).map(|mut e| f(&mut e))
+    }
+
     /// Remove an edge by ID. Returns the removed edge.
     pub fn delete_edge(&self, id: EdgeId) -> Option<Edge> {
         let (_, edge) = self.edges.remove(&id)?;

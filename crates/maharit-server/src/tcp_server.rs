@@ -13,13 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{EdgeId, Graph, NodeId, PropertyValue};
+use maharit_core::{ConcurrentGraph, EdgeId, GraphBackend, NodeId};
 use maharit_query::{Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 use tokio::time::timeout;
 
 use crate::replication::{LeaderReplicationManager, WalEntryData};
@@ -221,7 +221,7 @@ impl ServerStats {
 /// TCP server for MaharitDB
 pub struct TcpServer {
     config: ServerConfig,
-    graph: Arc<RwLock<Graph>>,
+    graph: Arc<ConcurrentGraph>,
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
@@ -235,7 +235,7 @@ impl TcpServer {
     pub fn new(config: ServerConfig) -> Self {
         Self {
             config,
-            graph: Arc::new(RwLock::new(Graph::new())),
+            graph: Arc::new(ConcurrentGraph::new()),
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
@@ -244,10 +244,10 @@ impl TcpServer {
     }
 
     /// Create a server with an existing graph
-    pub fn with_graph(config: ServerConfig, graph: Graph) -> Self {
+    pub fn with_graph(config: ServerConfig, graph: ConcurrentGraph) -> Self {
         Self {
             config,
-            graph: Arc::new(RwLock::new(graph)),
+            graph: Arc::new(graph),
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
@@ -256,7 +256,7 @@ impl TcpServer {
     }
 
     /// Create a server with a shared graph Arc (for sharing with signal handlers)
-    pub fn with_graph_arc(config: ServerConfig, graph: Arc<RwLock<Graph>>) -> Self {
+    pub fn with_graph_arc(config: ServerConfig, graph: Arc<ConcurrentGraph>) -> Self {
         Self {
             config,
             graph,
@@ -268,7 +268,7 @@ impl TcpServer {
     }
 
     /// Return a clone of the graph Arc
-    pub fn graph_arc(&self) -> Arc<RwLock<Graph>> {
+    pub fn graph_arc(&self) -> Arc<ConcurrentGraph> {
         Arc::clone(&self.graph)
     }
 
@@ -376,7 +376,7 @@ impl TcpServer {
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut socket: TcpStream,
-    graph: Arc<RwLock<Graph>>,
+    graph: Arc<ConcurrentGraph>,
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
@@ -476,15 +476,12 @@ async fn handle_connection(
                 }
             }
             Request::Ping => Response::Pong,
-            Request::Stats => {
-                let g = graph.read().await;
-                Response::Stats {
-                    connections: stats.current_connections.load(Ordering::SeqCst),
-                    total_queries: stats.total_queries.load(Ordering::SeqCst),
-                    nodes: g.node_count(),
-                    edges: g.edge_count(),
-                }
-            }
+            Request::Stats => Response::Stats {
+                connections: stats.current_connections.load(Ordering::SeqCst),
+                total_queries: stats.total_queries.load(Ordering::SeqCst),
+                nodes: graph.node_count(),
+                edges: graph.edge_count(),
+            },
             Request::Disconnect => {
                 send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
                 break;
@@ -503,15 +500,9 @@ async fn handle_connection(
                     message: format!("Commit failed: {}", e),
                 },
             },
-            Request::Rollback { tx_id } => {
-                let mut g = graph.write().await;
-                match tx_manager.rollback(tx_id, &mut g) {
-                    Ok(()) => Response::RolledBack { tx_id },
-                    Err(e) => Response::Error {
-                        message: format!("Rollback failed: {}", e),
-                    },
-                }
-            }
+            Request::Rollback { tx_id: _ } => Response::Error {
+                message: "Rollback is not yet supported in concurrent graph mode".to_string(),
+            },
         };
 
         send_response(&mut socket, &response, config.write_timeout).await?;
@@ -586,7 +577,7 @@ async fn send_response(
 /// Execute a streaming query and send results in chunks
 async fn execute_streaming_query(
     socket: &mut TcpStream,
-    graph: &Arc<RwLock<Graph>>,
+    graph: &Arc<ConcurrentGraph>,
     stats: &Arc<ServerStats>,
     query: &str,
     chunk_size: usize,
@@ -612,62 +603,40 @@ async fn execute_streaming_query(
         }
     };
 
-    // Log read-only classification (used for monitoring).
     let is_write = !is_read_only(&stmt);
 
-    // Snapshot node/edge IDs before execution for WAL diff (only when needed).
+    // Snapshot node/edge IDs before execution for WAL diff (ConcurrentGraph: no lock needed).
     let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
-        let g = graph.read().await;
         (
-            g.nodes().map(|n| n.id).collect::<HashSet<NodeId>>(),
-            g.edges().map(|e| e.id).collect::<HashSet<u64>>(),
+            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
+            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
         )
     } else {
         (HashSet::new(), HashSet::new())
     };
 
-    // For read-only queries use a shared read lock so multiple reads can run
-    // concurrently.  Write queries still require an exclusive write lock.
-    // Executors are scoped within braces so the raw pointer is dropped before
-    // any `.await` point, keeping the future `Send`.
-    let result = if is_write {
-        let mut g = graph.write().await;
-        let exec_result = {
-            let mut executor = Executor::new(&mut g);
-            executor.execute(stmt)
-        }; // executor dropped here
-        let r = match exec_result {
-            Ok(r) => r,
-            Err(e) => {
-                let response = Response::Error {
-                    message: format!("Execution error: {}", e),
-                };
-                return send_response(socket, &response, write_timeout).await;
-            }
-        };
-        if let Some(repl) = replication {
-            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-        }
-        r
-    } else {
-        let g = graph.read().await;
-        // SAFETY: `is_read_only(&stmt)` returned true, so the executor will
-        // not call any mutation methods on the graph.  The read lock guarantees
-        // no concurrent writer can modify the graph while we execute.
-        let exec_result = {
-            let mut executor = unsafe { Executor::new_readonly(&g) };
-            executor.execute(stmt)
-        }; // executor (with *mut Graph) dropped before any .await
-        match exec_result {
-            Ok(r) => r,
-            Err(e) => {
-                let response = Response::Error {
-                    message: format!("Execution error: {}", e),
-                };
-                return send_response(socket, &response, write_timeout).await;
-            }
+    // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
+    // uses the raw pointer only during the synchronous execute() call below.
+    let exec_result = {
+        let mut executor = unsafe { Executor::new_concurrent(graph) };
+        executor.execute(stmt)
+    };
+
+    let result = match exec_result {
+        Ok(r) => r,
+        Err(e) => {
+            let response = Response::Error {
+                message: format!("Execution error: {}", e),
+            };
+            return send_response(socket, &response, write_timeout).await;
         }
     };
+
+    if is_write {
+        if let Some(repl) = replication {
+            emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+        }
+    }
 
     // Convert rows to HashMap format
     let all_rows: Vec<HashMap<String, String>> = result
@@ -721,207 +690,29 @@ async fn execute_streaming_query(
 
 // ── Transaction-aware query execution ────────────────────────────────────────
 
-/// Snapshot of graph state captured before a write query executes.
-struct GraphSnapshot {
-    nodes: HashMap<NodeId, (Vec<String>, Arc<HashMap<String, PropertyValue>>)>,
-    edges: HashMap<EdgeId, (NodeId, NodeId, String, Arc<HashMap<String, PropertyValue>>)>,
-}
-
-fn take_snapshot(graph: &Graph) -> GraphSnapshot {
-    let nodes = graph
-        .nodes()
-        .map(|n| (n.id, (n.labels.clone(), Arc::clone(&n.properties))))
-        .collect();
-    let edges = graph
-        .edges()
-        .map(|e| {
-            (
-                e.id,
-                (e.from, e.to, e.label.clone(), Arc::clone(&e.properties)),
-            )
-        })
-        .collect();
-    GraphSnapshot { nodes, edges }
-}
-
-/// Diff before/after snapshot and write undo records to the TransactionManager.
-fn record_undo_diff(
-    graph: &Graph,
-    snapshot: &GraphSnapshot,
-    tx_id: u64,
-    tx_manager: &TransactionManager,
-) {
-    let current_node_ids: HashSet<NodeId> = graph.nodes().map(|n| n.id).collect();
-    let snap_node_ids: HashSet<NodeId> = snapshot.nodes.keys().copied().collect();
-
-    // Nodes created by the query → undo = delete
-    for &id in current_node_ids.difference(&snap_node_ids) {
-        let _ = tx_manager.record_node_created(tx_id, id);
-    }
-
-    // Nodes deleted by the query → undo = restore
-    for &id in snap_node_ids.difference(&current_node_ids) {
-        let (labels, properties) = snapshot.nodes[&id].clone();
-        let _ = tx_manager.record_node_deleted(tx_id, id, labels, properties);
-    }
-
-    // Nodes that still exist: check for property changes
-    for &id in snap_node_ids.intersection(&current_node_ids) {
-        let (_, old_props) = &snapshot.nodes[&id];
-        if let Some(node) = graph.get_node(id) {
-            // Properties that existed and may have changed
-            for (key, old_val) in old_props.iter() {
-                let new_val = node.properties.get(key.as_str());
-                if new_val != Some(old_val) {
-                    let _ = tx_manager.record_property_changed(
-                        tx_id,
-                        id,
-                        key.clone(),
-                        Some(old_val.clone()),
-                    );
-                }
-            }
-            // Properties that were added
-            for key in node.properties.keys() {
-                if !old_props.contains_key(key.as_str()) {
-                    let _ = tx_manager.record_property_changed(tx_id, id, key.clone(), None);
-                }
-            }
-        }
-    }
-
-    let current_edge_ids: HashSet<EdgeId> = graph.edges().map(|e| e.id).collect();
-    let snap_edge_ids: HashSet<EdgeId> = snapshot.edges.keys().copied().collect();
-
-    // Edges created → undo = delete
-    for &id in current_edge_ids.difference(&snap_edge_ids) {
-        let _ = tx_manager.record_edge_created(tx_id, id);
-    }
-
-    // Edges deleted → undo = restore
-    for &id in snap_edge_ids.difference(&current_edge_ids) {
-        let (from, to, label, properties) = snapshot.edges[&id].clone();
-        let _ = tx_manager.record_edge_deleted(tx_id, id, from, to, label, properties);
-    }
-
-    // Edges that still exist: check property changes
-    for &id in snap_edge_ids.intersection(&current_edge_ids) {
-        let (_, _, _, old_props) = &snapshot.edges[&id];
-        if let Some(edge) = graph.get_edge(id) {
-            for (key, old_val) in old_props.iter() {
-                let new_val = edge.properties.get(key.as_str());
-                if new_val != Some(old_val) {
-                    let _ = tx_manager.record_edge_property_changed(
-                        tx_id,
-                        id,
-                        key.clone(),
-                        Some(old_val.clone()),
-                    );
-                }
-            }
-            for key in edge.properties.keys() {
-                if !old_props.contains_key(key.as_str()) {
-                    let _ =
-                        tx_manager.record_edge_property_changed(tx_id, id, key.clone(), None);
-                }
-            }
-        }
-    }
-}
-
-/// Execute a write query within a transaction: snapshot → execute → record undo diff.
+/// Execute a write query within a transaction.
+///
+/// Undo tracking (ROLLBACK support) for ConcurrentGraph is deferred to Phase 4.
+/// This delegates to the standard execution path.
 async fn execute_query_with_tx(
-    graph: &Arc<RwLock<Graph>>,
+    graph: &Arc<ConcurrentGraph>,
     query: &str,
-    tx_id: u64,
-    tx_manager: &TransactionManager,
+    _tx_id: u64,
+    _tx_manager: &TransactionManager,
     replication: Option<&LeaderReplicationManager>,
 ) -> Response {
-    let stmt = match Parser::new(query) {
-        Ok(mut p) => match p.parse() {
-            Ok(s) => s,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("Parse error: {}", e),
-                }
-            }
-        },
-        Err(e) => {
-            return Response::Error {
-                message: format!("Lexer error: {}", e),
-            }
-        }
-    };
-
-    let is_write = !is_read_only(&stmt);
-
-    if !is_write {
-        // Read queries need no undo tracking – delegate to the standard path.
-        return execute_query(graph, query, replication).await;
-    }
-
-    let (node_ids_before, edge_ids_before) = if replication.is_some() {
-        let g = graph.read().await;
-        (
-            g.nodes().map(|n| n.id).collect::<HashSet<NodeId>>(),
-            g.edges().map(|e| e.id).collect::<HashSet<u64>>(),
-        )
-    } else {
-        (HashSet::new(), HashSet::new())
-    };
-
-    let mut g = graph.write().await;
-
-    // Snapshot before execution
-    let snapshot = take_snapshot(&g);
-
-    let exec_result = {
-        let mut executor = Executor::new(&mut g);
-        executor.execute(stmt)
-    };
-
-    match exec_result {
-        Ok(result) => {
-            // Record undo diff so ROLLBACK can reverse these changes
-            record_undo_diff(&g, &snapshot, tx_id, tx_manager);
-
-            if let Some(repl) = replication {
-                emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-            }
-
-            let rows = result
-                .rows
-                .into_iter()
-                .map(|row| {
-                    result
-                        .columns
-                        .iter()
-                        .zip(row.columns.iter())
-                        .map(|(col, val)| (col.clone(), val.to_string()))
-                        .collect()
-                })
-                .collect();
-            Response::Result { rows }
-        }
-        Err(e) => Response::Error {
-            message: format!("Execution error: {}", e),
-        },
-    }
+    execute_query(graph, query, replication).await
 }
 
 /// Execute a query and return the response.
 ///
-/// The query is first parsed so that `is_read_only` can be evaluated before
-/// acquiring any lock. Both paths currently use an exclusive write lock because
-/// the `Executor` API requires `&mut Graph`. The lock-type split is in place so
-/// that a future refactoring of `Executor` to accept `&Graph` for read-only
-/// statements can adopt `graph.read()` without touching this call site.
+/// ConcurrentGraph has interior mutability via DashMap, so both read and write
+/// queries use `Executor::new_concurrent` without any async locking.
 async fn execute_query(
-    graph: &Arc<RwLock<Graph>>,
+    graph: &Arc<ConcurrentGraph>,
     query: &str,
     replication: Option<&LeaderReplicationManager>,
 ) -> Response {
-    // Parse the query first so we can inspect the AST before locking.
     let stmt = match Parser::new(query) {
         Ok(mut parser) => match parser.parse() {
             Ok(stmt) => stmt,
@@ -938,45 +729,30 @@ async fn execute_query(
         }
     };
 
-    // Detect write queries for WAL diff tracking.
     let is_write = !is_read_only(&stmt);
 
-    // Snapshot node/edge IDs before execution for WAL diff (only when needed).
+    // Snapshot node/edge IDs before execution for WAL diff (no lock needed).
     let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
-        let g = graph.read().await;
         (
-            g.nodes().map(|n| n.id).collect::<HashSet<NodeId>>(),
-            g.edges().map(|e| e.id).collect::<HashSet<u64>>(),
+            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
+            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
         )
     } else {
         (HashSet::new(), HashSet::new())
     };
 
-    // For read-only queries use a shared read lock so multiple reads can run
-    // concurrently.  Write queries still require an exclusive write lock.
-    // The executor is scoped so it is dropped before any `.await` point,
-    // keeping the spawned future `Send`.
-    let exec_result = if is_write {
-        let mut g = graph.write().await;
-        let result = {
-            let mut executor = Executor::new(&mut g);
-            executor.execute(stmt)
-        }; // executor dropped here — no raw pointer across the await below
-        if let (Ok(_), Some(repl)) = (&result, replication) {
-            emit_wal_diff(&g, &node_ids_before, &edge_ids_before, repl).await;
-        }
-        result
-    } else {
-        let g = graph.read().await;
-        // SAFETY: `is_read_only(&stmt)` returned true, so the executor will
-        // not call any mutation methods on the graph.  The read lock guarantees
-        // no concurrent writer can modify the graph while we execute.
-        let result = {
-            let mut executor = unsafe { Executor::new_readonly(&g) };
-            executor.execute(stmt)
-        }; // executor (containing *mut Graph) dropped before any .await
-        result
+    // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
+    // uses the raw pointer only during the synchronous execute() call.
+    let exec_result = {
+        let mut executor = unsafe { Executor::new_concurrent(graph) };
+        executor.execute(stmt)
     };
+
+    if is_write {
+        if let (Ok(_), Some(repl)) = (&exec_result, replication) {
+            emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+        }
+    }
 
     match exec_result {
         Ok(result) => {
@@ -1013,13 +789,13 @@ async fn execute_query(
 /// Property changes are not tracked automatically (a future improvement could
 /// compare property maps before and after).
 async fn emit_wal_diff(
-    graph: &Graph,
+    graph: &dyn GraphBackend,
     node_ids_before: &HashSet<NodeId>,
-    edge_ids_before: &HashSet<u64>,
+    edge_ids_before: &HashSet<EdgeId>,
     replication: &LeaderReplicationManager,
 ) {
     // Detect new and deleted nodes.
-    for node in graph.nodes() {
+    for node in graph.all_nodes() {
         if !node_ids_before.contains(&node.id) {
             replication
                 .append_wal_entry(WalEntryData::CreateNode {
@@ -1038,7 +814,7 @@ async fn emit_wal_diff(
     }
 
     // Detect new and deleted edges.
-    for edge in graph.edges() {
+    for edge in graph.all_edges() {
         if !edge_ids_before.contains(&edge.id) {
             replication
                 .append_wal_entry(WalEntryData::CreateEdge {
@@ -1304,9 +1080,9 @@ mod tests {
         use crate::replication::{LeaderReplicationManager, ReplicationConfig};
 
         let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
-        let mut graph = Graph::new();
+        let graph = ConcurrentGraph::new();
         let empty_nodes: HashSet<NodeId> = HashSet::new();
-        let empty_edges: HashSet<u64> = HashSet::new();
+        let empty_edges: HashSet<EdgeId> = HashSet::new();
 
         graph.create_node_with_labels(vec!["Person".to_string()]);
 
@@ -1321,16 +1097,15 @@ mod tests {
         use crate::replication::{LeaderReplicationManager, ReplicationConfig};
 
         let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
-        let mut graph = Graph::new();
+        let graph = ConcurrentGraph::new();
 
         // Simulate: node 0 existed before but no longer does.
         let before_nodes: HashSet<NodeId> = [0].iter().copied().collect();
-        let empty_edges: HashSet<u64> = HashSet::new();
+        let empty_edges: HashSet<EdgeId> = HashSet::new();
 
         emit_wal_diff(&graph, &before_nodes, &empty_edges, &repl).await;
 
         // One DeleteNode entry should have been emitted.
         assert_eq!(repl.get_stats().current_lsn, 1);
-        drop(graph);
     }
 }

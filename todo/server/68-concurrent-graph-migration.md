@@ -55,7 +55,7 @@ Executor 等が `Graph` に依存しているため `Arc<RwLock<Graph>>` で代�
 - 既存テストが壊れないことを各 Phase で確認する
 
 ## ステータス
-- [ ] Phase 1: Executor 対応
-- [ ] Phase 2: PersistentStorage 対応
-- [ ] Phase 3: TcpServer 切り替え
+- [x] Phase 1: Executor 対応（GraphBackend トレイト, `*mut dyn GraphBackend`, `new_concurrent()`）
+- [x] Phase 2: PersistentStorage 対応（`save_concurrent` / `load_concurrent`）
+- [x] Phase 3: TcpServer 切り替え（`Arc<ConcurrentGraph>`, ロックレスクエリ実行）
 - [ ] Phase 4: TransactionManager 対応（オプション）

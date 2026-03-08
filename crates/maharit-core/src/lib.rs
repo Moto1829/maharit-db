@@ -2,6 +2,7 @@ pub mod algorithms;
 pub mod concurrent_graph;
 pub mod constraint;
 pub mod fulltext;
+pub mod graph_backend;
 mod graph;
 mod index;
 mod property;
@@ -19,6 +20,7 @@ pub use constraint::{
 pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
 pub use concurrent_graph::ConcurrentGraph;
 pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
+pub use graph_backend::GraphBackend;
 pub use index::LabelIndex;
 pub use property::{temporal, PropertyValue};
 pub use property_index::{IndexDefinition, PropertyIndex, PropertyKey};

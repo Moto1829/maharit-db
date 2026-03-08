@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
+use crate::graph_backend::GraphBackend;
 use crate::{Edge, EdgeId, Graph, Node, NodeId, PropertyValue};
 
 /// トラバーサルの方向
@@ -255,7 +256,7 @@ impl Path {
 }
 
 /// 2ノード間の最短パス（ホップ数）を探索
-pub fn shortest_path(graph: &Graph, from: NodeId, to: NodeId) -> Option<Path> {
+pub fn shortest_path(graph: &dyn GraphBackend, from: NodeId, to: NodeId) -> Option<Path> {
     if from == to {
         return Some(Path::new(vec![from]));
     }
@@ -268,7 +269,7 @@ pub fn shortest_path(graph: &Graph, from: NodeId, to: NodeId) -> Option<Path> {
     visited.insert(from);
 
     while let Some(current) = queue.pop_front() {
-        for edge in graph.get_outgoing_edges(current) {
+        for edge in graph.outgoing_edges(current) {
             let neighbor = edge.to;
             if !visited.contains(&neighbor) {
                 visited.insert(neighbor);
@@ -298,7 +299,7 @@ pub fn shortest_path(graph: &Graph, from: NodeId, to: NodeId) -> Option<Path> {
 ///
 /// BFSで各ノードの全前任者(predecessors)を記録し、
 /// ゴールから再帰的に全パスを復元する。
-pub fn all_shortest_paths(graph: &Graph, from: NodeId, to: NodeId) -> Vec<Path> {
+pub fn all_shortest_paths(graph: &dyn GraphBackend, from: NodeId, to: NodeId) -> Vec<Path> {
     if from == to {
         return vec![Path::new(vec![from])];
     }
@@ -322,7 +323,7 @@ pub fn all_shortest_paths(graph: &Graph, from: NodeId, to: NodeId) -> Vec<Path> 
             continue;
         }
 
-        for edge in graph.get_outgoing_edges(current) {
+        for edge in graph.outgoing_edges(current) {
             let neighbor = edge.to;
             let new_dist = current_dist + 1;
 

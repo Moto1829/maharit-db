@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::graph::{Graph, Node, NodeId};
+use crate::graph::{Node, NodeId};
+use crate::graph_backend::GraphBackend;
 use crate::property::PropertyValue;
 
 /// 制約違反エラー
@@ -198,7 +199,7 @@ impl ConstraintManager {
     /// ノード作成時のバリデーション
     pub fn validate_node_create(
         &self,
-        graph: &Graph,
+        graph: &dyn GraphBackend,
         label: &str,
         properties: &HashMap<String, PropertyValue>,
         exclude_node_id: Option<NodeId>,
@@ -288,7 +289,7 @@ impl ConstraintManager {
     /// エッジ作成時のバリデーション
     pub fn validate_edge_create(
         &self,
-        graph: &Graph,
+        graph: &dyn GraphBackend,
         edge_label: &str,
         from_id: NodeId,
         to_id: NodeId,
@@ -334,7 +335,7 @@ impl ConstraintManager {
     /// プロパティ更新時のバリデーション
     pub fn validate_property_set(
         &self,
-        graph: &Graph,
+        graph: &dyn GraphBackend,
         node: &Node,
         property: &str,
         value: &PropertyValue,
@@ -424,13 +425,13 @@ impl ConstraintManager {
 
     fn check_unique_single(
         &self,
-        graph: &Graph,
+        graph: &dyn GraphBackend,
         constraint: &Constraint,
         value: &PropertyValue,
         exclude_node_id: Option<NodeId>,
     ) -> Result<(), ConstraintError> {
         let property = &constraint.properties[0];
-        for node in graph.nodes() {
+        for node in graph.all_nodes() {
             if !node.has_label(&constraint.label) {
                 continue;
             }
@@ -455,7 +456,7 @@ impl ConstraintManager {
 
     fn check_unique_composite(
         &self,
-        graph: &Graph,
+        graph: &dyn GraphBackend,
         constraint: &Constraint,
         properties: &HashMap<String, PropertyValue>,
         exclude_node_id: Option<NodeId>,
@@ -472,7 +473,7 @@ impl ConstraintManager {
         }
 
         // Check if any existing node has the same combination of values
-        for node in graph.nodes() {
+        for node in graph.all_nodes() {
             if !node.has_label(&constraint.label) {
                 continue;
             }
@@ -553,6 +554,7 @@ impl ConstraintManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Graph;
 
     fn setup_graph_with_alice() -> Graph {
         let mut graph = Graph::new();
