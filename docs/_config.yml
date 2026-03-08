@@ -46,6 +46,13 @@ callouts:
     title: 警告
     color: red
 
+# Disable Liquid processing for all pages (Cypher queries contain {{ }} syntax)
+defaults:
+  - scope:
+      path: ""
+    values:
+      render_with_liquid: false
+
 plugins:
   - jekyll-seo-tag
 
