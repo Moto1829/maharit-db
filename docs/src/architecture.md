@@ -157,3 +157,36 @@ maharit-viz
 - `label_index: HashMap<String, HashSet<NodeId>>`: ラベルによる逆引きインデックス
 
 永続化はバックグラウンドで WAL とスナップショットによって行われます。
+
+## 永続化モード
+
+MaharitDB は使用する層によって永続化の扱いが異なります。
+
+| 層 | モード | 説明 |
+|----|--------|------|
+| ライブラリ / API（`maharit-core`） | オンメモリ | `Graph::new()` はファイルを必要とせず、プロセス終了でデータは消える |
+| サーバー（`maharit-server`） | 常にファイル永続化 | 起動時に必ずデータファイルを使用する（SQLite と同様） |
+
+### ライブラリとして使う場合（オンメモリ）
+
+`maharit-core` を直接使う場合は `Graph::new()` がインメモリグラフを提供します。永続化は不要な用途（テスト、一時的なグラフ処理、組み込み利用）に適しています。
+
+```rust
+use maharit_core::Graph;
+
+let mut graph = Graph::new(); // ファイル不要・オンメモリ
+```
+
+### サーバーとして使う場合（常に永続化）
+
+`maharit-server` はファイルパスを指定して起動します。ファイルが存在すればロード、なければ新規作成します。
+
+```bash
+# ファイルパスを指定して起動（デフォルト: maharit.db）
+maharit server --data /var/lib/maharit/maharit.db
+
+# 環境変数でも指定可能
+MAHARIT_DATA=/var/lib/maharit/maharit.db maharit server
+```
+
+サーバーは SIGINT / SIGTERM 受信時に自動でデータを保存します。

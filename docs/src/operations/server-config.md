@@ -1,5 +1,15 @@
 # サーバー設定
 
+## 永続化について
+
+MaharitDB サーバーは **常にファイルベースの永続化** で動作します。SQLite と同様に、起動時にデータファイルのパスを指定します。
+
+- ファイルが存在する場合: 既存データをロードして起動
+- ファイルが存在しない場合: 新規作成して起動
+- SIGINT / SIGTERM 受信時: 自動でデータを保存してシャットダウン
+
+> **注意**: サーバーはオンメモリ専用モードを持ちません。オンメモリで使いたい場合は `maharit-core` の `Graph::new()` を直接利用してください。
+
 ## コマンドラインオプション
 
 MaharitDB サーバーは以下のコマンドラインオプションで設定できます。
@@ -17,7 +27,7 @@ maharit server [OPTIONS]
 | `--host` | `-H` | String | `127.0.0.1` | バインドするホストアドレス |
 | `--port` | `-p` | u16 | `7687` | リッスンするポート番号 |
 | `--max-connections` | `-c` | usize | `100` | 最大同時接続数 |
-| `--data-dir` | `-d` | Path | `./data` | データ保存ディレクトリ |
+| `--data` | | Path | `maharit.db` | データファイルのパス（環境変数: `MAHARIT_DATA`） |
 | `--log-level` | `-l` | String | `info` | ログレベル（trace/debug/info/warn/error） |
 | `--tls-cert` | | Path | なし | TLS 証明書ファイルのパス |
 | `--tls-key` | | Path | なし | TLS 秘密鍵ファイルのパス |
@@ -41,10 +51,10 @@ maharit server --host 0.0.0.0 --port 7687
 maharit server --host 0.0.0.0 --max-connections 500
 ```
 
-### データディレクトリの指定
+### データファイルの指定
 
 ```bash
-maharit server --data-dir /var/lib/maharit/data
+maharit server --data /var/lib/maharit/maharit.db
 ```
 
 ### ログレベルの設定
@@ -84,7 +94,7 @@ maharit server --metrics-port 9090
 | `MAHARIT_HOST` | `--host` |
 | `MAHARIT_PORT` | `--port` |
 | `MAHARIT_MAX_CONNECTIONS` | `--max-connections` |
-| `MAHARIT_DATA_DIR` | `--data-dir` |
+| `MAHARIT_DATA` | `--data` |
 | `MAHARIT_LOG_LEVEL` | `--log-level` |
 | `MAHARIT_TLS_CERT` | `--tls-cert` |
 | `MAHARIT_TLS_KEY` | `--tls-key` |
@@ -93,7 +103,7 @@ maharit server --metrics-port 9090
 ```bash
 export MAHARIT_HOST=0.0.0.0
 export MAHARIT_PORT=7687
-export MAHARIT_DATA_DIR=/var/lib/maharit
+export MAHARIT_DATA=/var/lib/maharit/maharit.db
 maharit server
 ```
 
@@ -130,7 +140,7 @@ Group=maharit
 ExecStart=/usr/local/bin/maharit server \
   --host 0.0.0.0 \
   --port 7687 \
-  --data-dir /var/lib/maharit \
+  --data /var/lib/maharit/maharit.db \
   --log-level info
 Restart=always
 RestartSec=5s
