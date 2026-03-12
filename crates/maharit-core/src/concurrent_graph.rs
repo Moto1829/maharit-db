@@ -131,22 +131,20 @@ impl ConcurrentGraph {
         // Remove all outgoing edges
         if let Some((_, out_ids)) = self.outgoing.remove(&id) {
             for eid in out_ids {
-                if let Some((_, edge)) = self.edges.remove(&eid) {
-                    if let Some(mut inc) = self.incoming.get_mut(&edge.to) {
+                if let Some((_, edge)) = self.edges.remove(&eid)
+                    && let Some(mut inc) = self.incoming.get_mut(&edge.to) {
                         inc.remove(&eid);
                     }
-                }
             }
         }
 
         // Remove all incoming edges
         if let Some((_, in_ids)) = self.incoming.remove(&id) {
             for eid in in_ids {
-                if let Some((_, edge)) = self.edges.remove(&eid) {
-                    if let Some(mut out) = self.outgoing.get_mut(&edge.from) {
+                if let Some((_, edge)) = self.edges.remove(&eid)
+                    && let Some(mut out) = self.outgoing.get_mut(&edge.from) {
                         out.remove(&eid);
                     }
-                }
             }
         }
 

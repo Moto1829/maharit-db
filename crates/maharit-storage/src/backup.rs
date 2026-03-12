@@ -495,7 +495,7 @@ impl Backup {
             }
             CompressionType::Zstd => {
                 let compressed = zstd::encode_all(data, 3)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 writer.write_all(&compressed)?;
             }
         }
@@ -522,7 +522,7 @@ impl Backup {
                 let mut compressed = Vec::new();
                 r.read_to_end(&mut compressed)?;
                 let decompressed = zstd::decode_all(compressed.as_slice())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 Ok(decompressed)
             }
         }

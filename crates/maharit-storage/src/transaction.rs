@@ -280,13 +280,12 @@ impl TransactionManager {
                     label,
                     properties,
                 } => {
-                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone()) {
-                        if let Some(edge) = graph.get_edge_mut(new_id) {
+                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone())
+                        && let Some(edge) = graph.get_edge_mut(new_id) {
                             for (k, v) in properties.iter() {
                                 edge.set_property(k.clone(), v.clone());
                             }
                         }
-                    }
                 }
                 UndoRecord::SetEdgeProperty {
                     edge_id,

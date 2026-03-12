@@ -637,11 +637,10 @@ async fn execute_streaming_query(
         }
     };
 
-    if is_write {
-        if let Some(repl) = replication {
+    if is_write
+        && let Some(repl) = replication {
             emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
         }
-    }
 
     // Convert rows to HashMap format
     let all_rows: Vec<HashMap<String, String>> = result
@@ -695,14 +694,17 @@ async fn execute_streaming_query(
 
 // ── Transaction-aware query execution ────────────────────────────────────────
 
+type NodeSnapshot = (Vec<String>, Arc<HashMap<String, PropertyValue>>);
+type EdgeSnapshot = (NodeId, NodeId, String, Arc<HashMap<String, PropertyValue>>);
+
 /// Lightweight snapshot of ConcurrentGraph state captured before a write query.
 ///
 /// `Arc`-cloned property maps act as copy-on-write snapshots: when the executor
 /// modifies a node's properties via `Arc::make_mut`, a new map is allocated,
 /// leaving the snapshot Arc pointing at the original unchanged data.
 struct ConcurrentSnapshot {
-    nodes: HashMap<NodeId, (Vec<String>, Arc<HashMap<String, PropertyValue>>)>,
-    edges: HashMap<EdgeId, (NodeId, NodeId, String, Arc<HashMap<String, PropertyValue>>)>,
+    nodes: HashMap<NodeId, NodeSnapshot>,
+    edges: HashMap<EdgeId, EdgeSnapshot>,
 }
 
 fn take_concurrent_snapshot(graph: &ConcurrentGraph) -> ConcurrentSnapshot {
@@ -906,11 +908,10 @@ async fn execute_query(
         executor.execute(stmt)
     };
 
-    if is_write {
-        if let (Ok(_), Some(repl)) = (&exec_result, replication) {
+    if is_write
+        && let (Ok(_), Some(repl)) = (&exec_result, replication) {
             emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
         }
-    }
 
     match exec_result {
         Ok(result) => {

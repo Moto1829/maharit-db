@@ -360,7 +360,7 @@ fn run_backup(args: &[String]) {
         std::process::exit(1);
     };
 
-    let mut options = BackupOptions { compression, description: String::new(), ..Default::default() };
+    let mut options = BackupOptions { compression, description: String::new() };
     if !description.is_empty() {
         options = options.with_description(description);
     }
