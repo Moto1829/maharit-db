@@ -18,6 +18,11 @@ theme:
     - search.highlight
     - content.code.copy
 
+extra:
+  analytics:
+    provider: google
+    property: G-452HXMLL62
+
 markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
