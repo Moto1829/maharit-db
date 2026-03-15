@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -23,23 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/setup-python@v5
         with:
-          ruby-version: '3.3'
-          bundler-cache: true
-          working-directory: docs
+          python-version: '3.x'
+
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material
 
       - uses: actions/configure-pages@v4
 
-      - name: Build Jekyll
-        run: bundle exec jekyll build
-        working-directory: docs
-        env:
-          JEKYLL_ENV: production
+      - name: Build MkDocs
+        run: mkdocs build --site-dir _site
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/_site
+          path: _site
 
   deploy:
     environment:
