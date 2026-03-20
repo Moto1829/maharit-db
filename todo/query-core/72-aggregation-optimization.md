@@ -37,5 +37,3 @@
 - `crates/maharit-query/src/executor.rs` — 集計処理
 - `crates/maharit-query/src/planner.rs` — クエリプラン
 
-## ステータス
-実装完了（planner の GROUP BY プランノードは未着手）。456 tests passing。
