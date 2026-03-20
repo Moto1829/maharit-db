@@ -55,16 +55,17 @@ Rows returned: 3
 
 | プランノード | 説明 |
 |------------|------|
-| `AllNodesScan` | すべてのノードをスキャン（最も遅い） |
-| `NodeLabelScan` | ラベルでノードをスキャン |
-| `NodeIndexSeek` | インデックスでノードを検索（最も速い） |
-| `NodeIndexRangeScan` | インデックスで範囲検索 |
-| `Expand` | エッジをたどって隣接ノードを展開 |
+| `NodeScan` | すべてのノードをスキャン（最も遅い） |
+| `NodeByLabelScan` | ラベルでノードをスキャン |
+| `NodeByLabelScan+Filter` | ラベルスキャン + フィルタのプッシュダウン |
+| `IndexSeek` | プロパティインデックスで等値検索（最も速い） |
+| `IndexRangeScan` | プロパティインデックスで範囲検索 |
+| `ExpandAll` | エッジをたどって隣接ノードを展開 |
 | `Filter` | フィルタ条件を適用 |
-| `Aggregate` | 集計を実行 |
+| `EagerAggregation` | 集計を実行 |
 | `Sort` | 結果をソート |
 | `Limit` | 結果数を制限 |
-| `Return` | 結果を返す |
+| `ProduceResults` | 結果を返す |
 
 ## クエリキャッシュ
 

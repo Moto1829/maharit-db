@@ -6,97 +6,100 @@ nav_order: 1
 
 # プロパティインデックス
 
-プロパティインデックスを作成することで、特定のプロパティに対するクエリを高速化できます。インデックスのないプロパティの検索は全ノードスキャンになります。
+プロパティインデックスを作成することで、特定のプロパティに対するクエリを O(n) 全スキャンから O(1) のインデックスルックアップに高速化できます。
 
 ## インデックスの作成
 
 ```cypher
 -- ラベルとプロパティにインデックスを作成
-CREATE INDEX FOR (n:Person) ON (n.name)
+CREATE INDEX ON :Person(name)
 
--- 複合インデックス（複数プロパティ）
-CREATE INDEX FOR (n:Person) ON (n.city, n.age)
-
--- インデックスに名前を付ける
-CREATE INDEX personNameIndex FOR (n:Person) ON (n.name)
+CREATE INDEX ON :User(email)
 ```
+
+構文: `CREATE INDEX ON :Label(property)`
+
+> **注意**: 既存ノードにインデックスを作成した場合、作成時点で対象ラベルを持つ全ノードが自動的にインデックス登録されます。インデックス作成後に追加されたノードも自動的にインデックスに登録されます。
 
 ## インデックスの確認
 
 ```cypher
--- すべてのインデックスを表示
 SHOW INDEXES
 ```
 
 出力例:
 
 ```
-+------------------+--------+-----------+------------+
-| name             | label  | property  | state      |
-+------------------+--------+-----------+------------+
-| personNameIndex  | Person | name      | ONLINE     |
-| index_person_age | Person | age       | ONLINE     |
-+------------------+--------+-----------+------------+
+label   property
+------  --------
+Person  name
+User    email
 ```
 
 ## インデックスの削除
 
 ```cypher
--- 名前でインデックスを削除
-DROP INDEX personNameIndex
-
--- ラベル・プロパティ指定で削除
-DROP INDEX FOR (n:Person) ON (n.name)
+DROP INDEX ON :Person(name)
 ```
+
+構文: `DROP INDEX ON :Label(property)`
 
 ## インデックスが使用される条件
 
-次のようなクエリ条件でインデックスが使用されます。
+インライン・プロパティ指定（`{prop: value}` 形式）でインデックスが自動的に使用されます。
 
 ```cypher
--- 等値比較（最もインデックスが効果的）
+-- インデックスが使用される（最もパフォーマンスが高い）
 MATCH (n:Person {name: "Alice"}) RETURN n
-MATCH (n:Person) WHERE n.name = "Alice" RETURN n
 
--- 範囲比較
+-- 範囲検索（IntまたはFloat型プロパティのインデックスで高速化）
 MATCH (n:Person) WHERE n.age > 30 RETURN n
 MATCH (n:Person) WHERE n.age >= 25 AND n.age <= 40 RETURN n
-
--- 前方一致
-MATCH (n:Person) WHERE n.name STARTS WITH "Al" RETURN n
 ```
-
-インデックスが使用されないケース:
-- `ENDS WITH`、`CONTAINS`（プロパティインデックスでは不可）
-- 計算式（`WHERE n.age * 2 > 60` のような場合）
 
 ## EXPLAIN でインデックス使用を確認
 
+インデックスが使用されているかどうかは `EXPLAIN` で確認できます。
+
 ```cypher
-EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n
+EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n.name
 ```
 
-出力にインデックススキャンが表示されることを確認します：
+インデックスが使用されている場合の出力例:
 
 ```
-NodeIndexSeek[n:Person(name)] → Filter → Return
+Operator                  Est. Rows     Cost Details
+------------------------------------------------------------------------
+IndexSeek                         1        2 :Person.name
+Return                            1        1
 ```
 
-インデックスが使われていない場合は `NodeLabelScan` や `AllNodesScan` が表示されます。
+インデックスが未作成の場合は `NodeByLabelScan` が表示されます:
+
+```
+Operator                  Est. Rows     Cost Details
+------------------------------------------------------------------------
+NodeByLabelScan                  10        2 :Person
+Return                           10        1
+```
+
+WHERE 句の条件でインデックスが適用される場合は `IndexRangeScan` が表示されます:
+
+```
+Operator                  Est. Rows     Cost Details
+------------------------------------------------------------------------
+IndexRangeScan                    2        1 :Person.age
+Return                            2        1
+```
 
 ## インデックス設計のベストプラクティス
 
 - **選択性が高いプロパティ**: 値の種類が多いプロパティ（名前、ID など）にインデックスを作成する
-- **頻繁に検索するプロパティ**: `WHERE` 句で頻繁に使用するプロパティを優先する
-- **複合インデックス**: 常にセットで検索するプロパティは複合インデックスにまとめる
-- **インデックス過多に注意**: インデックスが多すぎると書き込みパフォーマンスが低下する
+- **頻繁に検索するプロパティ**: `WHERE` 句またはインライン指定で頻繁に使用するプロパティを優先する
+- **インデックス過多に注意**: インデックスが多すぎるとノード作成・更新パフォーマンスが低下する
 
-## リレーションシップのインデックス
+## 現在の制限事項
 
-```cypher
--- エッジのプロパティにインデックスを作成
-CREATE INDEX FOR ()-[r:KNOWS]-() ON (r.since)
-
--- 削除
-DROP INDEX FOR ()-[r:KNOWS]-() ON (r.since)
-```
+- 1つのインデックスは 1 ラベル × 1 プロパティのみ（複合インデックスは未対応）
+- エッジ（リレーションシップ）のプロパティインデックスは未対応
+- インデックスはノード削除時に自動削除されるが、SET によるプロパティ更新時の自動更新は未対応
