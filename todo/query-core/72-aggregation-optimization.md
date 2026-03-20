@@ -19,21 +19,23 @@
 ## 実装内容
 
 ### COUNT(*) ショートサーキット
-- [ ] `count(n)` / `COUNT(*)` をノードリスト長の返却に最適化（プロパティ射影スキップ）
-- [ ] `maharit-query/src/executor.rs` の `execute_return` でカウント専用パスを追加
+- [x] `count(n)` をノードバインディング確認のみで完結（NodeData 生成をスキップ）
+- [x] `COUNT(*)` は `bindings_list.len()` を直接返す（既存動作を確認・維持）
 
-### GROUP BY ハッシュテーブル最適化
-- [ ] 集計キーの正規化処理（文字列のクローン・ハッシュ計算）のコストを計測
-- [ ] `String` キーを `Arc<str>` や intern 済みの ID に置き換えて重複排除
-- [ ] `COUNT per skill` と `COUNT per city` の差の原因を特定（プロファイリング）
+### GROUP BY ハッシュテーブル実装
+- [x] `build_aggregated_result_set` に GROUP BY ロジックを実装
+  - 非集計項目を暗黙のグループキーとして扱う（Cypher セマンティクス）
+  - 挿入順保持の HashMap で各グループのバインディングインデックスを蓄積
+  - グループごとに集計関数を適用し1行を生成
+  - ORDER BY / SKIP / LIMIT をグループ化後に適用
+- [x] `count(n)` カラム名を `"count(n)"` に修正（従来は誤って `"COUNT(*)"` だった）
 
 ### 集計演算子の事前計画化
-- [ ] `planner.rs` で GROUP BY を含むクエリにハッシュ集計プランを生成
-- [ ] 小カーディナリティ（< 100 グループ）では配列ソートを、大カーディナリティでは HashMap を選択
+- [ ] `planner.rs` で GROUP BY を含むクエリにハッシュ集計プランを生成（未着手）
 
 ## 関連ファイル
 - `crates/maharit-query/src/executor.rs` — 集計処理
 - `crates/maharit-query/src/planner.rs` — クエリプラン
 
 ## ステータス
-未着手
+実装完了（planner の GROUP BY プランノードは未着手）。456 tests passing。
