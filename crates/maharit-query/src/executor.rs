@@ -2961,7 +2961,10 @@ impl<'a> Executor<'a> {
             ReturnItem::All => "*".to_string(),
             ReturnItem::Expr(e) => Self::expression_to_display(e),
             ReturnItem::Aggregate(agg) => match agg {
-                AggregateFunction::Count(_) => "COUNT(*)".to_string(),
+                AggregateFunction::Count(inner) => match inner {
+                    None => "COUNT(*)".to_string(),
+                    Some(inner) => format!("count({})", self.return_item_to_column_name(inner)),
+                },
                 AggregateFunction::Sum(inner) => {
                     format!("SUM({})", self.return_item_to_column_name(inner))
                 }
@@ -4212,16 +4215,145 @@ impl<'a> Executor<'a> {
             .map(|item| self.return_item_to_column_name(item))
             .collect();
 
-        let mut row_values = Vec::new();
+        // Identify group key positions (non-aggregate items)
+        let group_key_indices: Vec<usize> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !matches!(item, ReturnItem::Aggregate(_)))
+            .map(|(i, _)| i)
+            .collect();
 
-        for item in &return_clause.items {
-            let value = self.evaluate_aggregate(item, bindings_list)?;
-            row_values.push(value);
+        if group_key_indices.is_empty() {
+            // Simple aggregation: no GROUP BY keys → single row
+            let mut row_values = Vec::new();
+            for item in &return_clause.items {
+                let value = self.evaluate_aggregate(item, bindings_list)?;
+                row_values.push(value);
+            }
+            return Ok(ResultSet::new(columns, vec![Row { columns: row_values }]));
         }
 
-        let rows = vec![Row {
-            columns: row_values,
-        }];
+        // GROUP BY: group binding indices by serialized key values
+        // Use insertion-order-preserving Vec + HashMap for deterministic output
+        let mut group_order: Vec<Vec<String>> = Vec::new();
+        let mut group_map: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+
+        for (idx, bindings) in bindings_list.iter().enumerate() {
+            let key: Vec<String> = group_key_indices
+                .iter()
+                .map(|&col_idx| {
+                    self.evaluate_return_item(&return_clause.items[col_idx], bindings)
+                        .map(|v| format!("{}", v))
+                        .unwrap_or_default()
+                })
+                .collect();
+
+            if !group_map.contains_key(&key) {
+                group_order.push(key.clone());
+            }
+            group_map.entry(key).or_default().push(idx);
+        }
+
+        // Build one result row per group
+        let mut rows = Vec::with_capacity(group_order.len());
+
+        for key_strs in &group_order {
+            let indices = &group_map[key_strs];
+
+            // Collect this group's bindings
+            let group_bindings: Vec<Bindings> = indices
+                .iter()
+                .map(|&i| bindings_list[i].clone())
+                .collect();
+
+            let mut row_values = vec![Value::Null; return_clause.items.len()];
+
+            // Fill group key columns using the first binding of the group
+            if let Some(&first_idx) = indices.first() {
+                for &col_idx in &group_key_indices {
+                    row_values[col_idx] = self.evaluate_return_item(
+                        &return_clause.items[col_idx],
+                        &bindings_list[first_idx],
+                    )?;
+                }
+            }
+
+            // Fill aggregate columns
+            for (col_idx, item) in return_clause.items.iter().enumerate() {
+                if matches!(item, ReturnItem::Aggregate(_)) {
+                    row_values[col_idx] = self.evaluate_aggregate(item, &group_bindings)?;
+                }
+            }
+
+            rows.push(Row { columns: row_values });
+        }
+
+        // Apply ORDER BY / SKIP / LIMIT on the grouped result
+        if let Some(ref order_by) = return_clause.order_by {
+            let resolved_skip = return_clause
+                .skip
+                .as_ref()
+                .map(|e| self.resolve_skip_limit(e))
+                .transpose()?;
+            let resolved_limit = return_clause
+                .limit
+                .as_ref()
+                .map(|e| self.resolve_skip_limit(e))
+                .transpose()?;
+
+            let needed = match (resolved_skip, resolved_limit) {
+                (Some(skip), Some(limit)) => Some((skip + limit) as usize),
+                (None, Some(limit)) => Some(limit as usize),
+                _ => None,
+            };
+
+            if let Some(n) = needed {
+                if n < rows.len() {
+                    rows = self.apply_order_by_topn(rows, order_by, &columns, n);
+                } else {
+                    self.apply_order_by(&mut rows, order_by, &columns);
+                }
+            } else {
+                self.apply_order_by(&mut rows, order_by, &columns);
+            }
+
+            if let Some(skip) = resolved_skip {
+                let skip = skip as usize;
+                if skip < rows.len() {
+                    rows = rows.into_iter().skip(skip).collect();
+                } else {
+                    rows.clear();
+                }
+            }
+            if let Some(limit) = resolved_limit {
+                rows.truncate(limit as usize);
+            }
+        } else {
+            let resolved_skip = return_clause
+                .skip
+                .as_ref()
+                .map(|e| self.resolve_skip_limit(e))
+                .transpose()?;
+            let resolved_limit = return_clause
+                .limit
+                .as_ref()
+                .map(|e| self.resolve_skip_limit(e))
+                .transpose()?;
+
+            if let Some(skip) = resolved_skip {
+                let skip = skip as usize;
+                if skip < rows.len() {
+                    rows = rows.into_iter().skip(skip).collect();
+                } else {
+                    rows.clear();
+                }
+            }
+            if let Some(limit) = resolved_limit {
+                rows.truncate(limit as usize);
+            }
+        }
+
         Ok(ResultSet::new(columns, rows))
     }
 
@@ -4235,20 +4367,30 @@ impl<'a> Executor<'a> {
                 AggregateFunction::Count(inner) => {
                     if inner.is_none() {
                         // COUNT(*)
-                        Ok(Value::Int(bindings_list.len() as i64))
-                    } else {
-                        // COUNT(expr) - count non-null values
-                        let inner = inner.as_ref().unwrap();
-                        let count = bindings_list
-                            .iter()
-                            .filter(|bindings| {
-                                self.evaluate_return_item(inner, bindings)
-                                    .map(|v| !matches!(v, Value::Null))
-                                    .unwrap_or(false)
-                            })
-                            .count();
-                        Ok(Value::Int(count as i64))
+                        return Ok(Value::Int(bindings_list.len() as i64));
                     }
+                    let inner = inner.as_ref().unwrap();
+                    // Fast path: bound Node/Edge variables are always non-null in MATCH results
+                    if let ReturnItem::Variable(var) = inner.as_ref() {
+                        let is_always_bound = bindings_list
+                            .first()
+                            .and_then(|b| b.get(var))
+                            .map(|bv| matches!(bv, BindingValue::Node(_) | BindingValue::Edge(_)))
+                            .unwrap_or(false);
+                        if is_always_bound {
+                            return Ok(Value::Int(bindings_list.len() as i64));
+                        }
+                    }
+                    // General path: count non-null values
+                    let count = bindings_list
+                        .iter()
+                        .filter(|bindings| {
+                            self.evaluate_return_item(inner, bindings)
+                                .map(|v| !matches!(v, Value::Null))
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    Ok(Value::Int(count as i64))
                 }
                 AggregateFunction::Sum(inner) => {
                     let mut sum = 0.0;
@@ -10973,5 +11115,59 @@ mod tests {
             &PropertyValue::String("Alice".to_string()),
         );
         assert_eq!(alices.len(), 1);
+    }
+
+    #[test]
+    fn test_count_node_optimization() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:Person {name: 'Alice'})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {name: 'Bob'})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {name: 'Carol'})").unwrap();
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN count(n)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_group_by_count() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:Person {city: 'Tokyo'})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {city: 'Tokyo'})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {city: 'Osaka'})").unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n.city, count(n)").unwrap();
+        assert_eq!(result.row_count(), 2); // Two distinct cities
+        assert_eq!(result.columns, vec!["n.city", "count(n)"]);
+    }
+
+    #[test]
+    fn test_group_by_avg() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:Person {dept: 'Eng', salary: 100})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {dept: 'Eng', salary: 200})").unwrap();
+        execute(&mut graph, "CREATE (n:Person {dept: 'Sales', salary: 150})").unwrap();
+
+        let result = execute(&mut graph, "MATCH (n:Person) RETURN n.dept, avg(n.salary)").unwrap();
+        assert_eq!(result.row_count(), 2);
+
+        // Find the Eng row and verify avg = 150.0
+        let eng_row = result
+            .rows
+            .iter()
+            .find(|r| r.columns[0] == Value::String("Eng".to_string()));
+        assert!(eng_row.is_some());
+        if let Some(row) = eng_row {
+            assert_eq!(row.columns[1], Value::Float(150.0));
+        }
+    }
+
+    #[test]
+    fn test_simple_count_star() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:A)").unwrap();
+        execute(&mut graph, "CREATE (n:A)").unwrap();
+        let result = execute(&mut graph, "MATCH (n:A) RETURN count(*)").unwrap();
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2));
     }
 }
