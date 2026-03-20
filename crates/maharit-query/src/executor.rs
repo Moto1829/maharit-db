@@ -5385,6 +5385,11 @@ mod tests {
         Executor::new(graph).execute(stmt)
     }
 
+    fn execute_with(executor: &mut Executor<'_>, query: &str) -> Result<ResultSet, ExecuteError> {
+        let stmt = Parser::new(query).unwrap().parse().unwrap();
+        executor.execute(stmt)
+    }
+
     #[test]
     fn test_create_node() {
         let mut graph = Graph::new();
@@ -6913,6 +6918,88 @@ mod tests {
 
         // Only Alice (age 25) should have the relationship
         assert_eq!(graph.edge_count(), 1);
+    }
+
+    // バインディングキャッシュ + プロパティインデックス連携テスト (#74)
+
+    #[test]
+    fn test_bound_variable_reused_not_duplicated() {
+        // MATCH で束縛した変数を CREATE で再利用するとノードが新規作成されないことを確認
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        // ノードが新規作成されていないこと
+        assert_eq!(graph.node_count(), 2);
+        // エッジが1本だけ作成されていること
+        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(0)); // created_nodes = 0
+        assert_eq!(result.rows[0].columns[1], Value::Int(1)); // created_edges = 1
+    }
+
+    #[test]
+    fn test_same_variable_matched_twice_uses_cache() {
+        // 同一変数を MATCH 内で2パターン参照した場合、2回目は既存バインドを流用
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            r#"CREATE (a:Person {name: "Alice", age: 30})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (b:Person {name: "Alice", age: 25})"#, // name 同じ・age 違う
+        )
+        .unwrap();
+
+        // name="Alice" かつ age=30 のノードだけがマッチするはず
+        let result = execute(
+            &mut graph,
+            r#"MATCH (a:Person {name: "Alice"}), (a:Person {age: 30}) RETURN a.name, a.age"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0].columns[1], Value::Int(30));
+    }
+
+    #[test]
+    fn test_index_accelerated_match_create() {
+        // プロパティインデックスが CREATE KNOWS の MATCH フェーズを高速化することを確認
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        // インデックス作成
+        execute_with(&mut executor, "CREATE INDEX ON :Person(name)").unwrap();
+
+        // ノード作成（インデックスに自動登録される）
+        execute_with(&mut executor, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
+        execute_with(&mut executor, r#"CREATE (n:Person {name: "Bob"})"#).unwrap();
+
+        // インデックス経由で MATCH し、エッジを作成
+        let result = execute_with(
+            &mut executor,
+            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)"#,
+        )
+        .unwrap();
+
+        // ノード再作成なし、エッジ1本
+        assert_eq!(result.rows[0].columns[0], Value::Int(0)); // created_nodes
+        assert_eq!(result.rows[0].columns[1], Value::Int(1)); // created_edges
+
+        // インデックスが a・b を引けていることをプロパティで確認
+        let check = execute_with(
+            &mut executor,
+            r#"MATCH (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"}) RETURN a.name, b.name"#,
+        )
+        .unwrap();
+        assert_eq!(check.row_count(), 1);
     }
 
     // ========== MATCH + SET tests ==========

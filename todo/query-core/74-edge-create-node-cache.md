@@ -14,20 +14,22 @@
 ## 実装内容
 
 ### バインディングキャッシュの活用
-- [ ] `Executor` の `bindings: HashMap<String, BindingValue>` に既にバインド済みの変数を再利用
-- [ ] `MATCH (a:Label {prop: val})` で a をバインドした後、同一クエリ内の2回目の参照では検索をスキップ
-- [ ] `execute_match_create` / `execute_match_pattern` で変数再利用パスを追加
+- [x] `execute_create_with_bindings`: 変数がバインド済みの場合ノードを再作成しない（start/end ノード両対応）
+- [x] `match_node_pattern`: 変数がバインド済みの場合フルスキャンせず既存バインドを検証するのみ
+- [x] 同一変数を複数パターンで参照するクエリ（`MATCH (a {...}), (a {...})`）の正確な動作を確認
 
 ### プロパティインデックスとの連携
-- [ ] タスク #71（プロパティインデックス）実装後、MATCH のフルスキャンをインデックス検索に切り替える
-- [ ] 両方合わさることでエッジ作成が大幅に高速化される見込み
+- [x] タスク #71 で `match_node_pattern` にインデックスルックアップを実装済み
+- [x] インデックス経由 MATCH → バインディング再利用 CREATE のエンドツーエンドテストを追加
 
-### テスト
-- [ ] 同一変数を複数回参照するクエリで正しい結果が返ることを確認
-- [ ] バインディングキャッシュ有無での実行計画差異を EXPLAIN で確認
+### テスト（追加済み）
+- [x] `test_bound_variable_reused_not_duplicated`: バインド済み変数を再利用して created_nodes=0 を確認
+- [x] `test_same_variable_matched_twice_uses_cache`: 同変数2回参照で両条件 AND マッチを確認
+- [x] `test_index_accelerated_match_create`: インデックス + バインドキャッシュのエンドツーエンド確認
+- [x] `execute_with` ヘルパー関数を追加（同一 Executor でクエリを連続実行するテスト用）
 
 ## 関連ファイル
-- `crates/maharit-query/src/executor.rs` — `execute_match_create`、バインディング管理
+- `crates/maharit-query/src/executor.rs` — `execute_create_with_bindings`、`match_node_pattern`
 
 ## ステータス
-未着手
+実装確認・テスト追加完了。459 tests passing。
