@@ -290,6 +290,42 @@ def bench_concurrent_reads(client: MaharitClient, repeat: int = 50) -> BenchResu
     return r
 
 
+def bench_unwind_batch_create(client: MaharitClient, n: int) -> BenchResult:
+    """UNWIND + CREATE で n 件を1クエリで一括作成する"""
+    section(f"UNWIND バッチ書き込み x {n:,}")
+
+    # バッチサイズごとに送信（サーバーのメッセージサイズ制限を考慮して 500件ずつ）
+    batch_size = 500
+    total_created = 0
+    start = time.perf_counter()
+
+    for batch_start in range(0, n, batch_size):
+        batch_end = min(batch_start + batch_size, n)
+        items = [
+            {"id": i, "name": NAMES[i % len(NAMES)] + str(i), "city": CITIES[i % len(CITIES)]}
+            for i in range(batch_start, batch_end)
+        ]
+        import json
+        items_json = json.dumps(items)
+        resp = client.query(
+            f"UNWIND {items_json} AS item "
+            f"CREATE (:UnwindBench {{id: item.id, name: item.name, city: item.city}})"
+        )
+        if resp.get("type") == "result":
+            total_created += batch_end - batch_start
+        if batch_end % max(1, (n // 20)) < batch_size:
+            progress(batch_end, n)
+
+    print()
+    elapsed = time.perf_counter() - start
+    r = BenchResult("UNWIND batch CREATE (map list)", total_created, elapsed)
+    r.print()
+
+    # クリーンアップ
+    client.query("MATCH (n:UnwindBench) DELETE n")
+    return r
+
+
 def cleanup(client: MaharitClient):
     section("クリーンアップ")
     resp = client.query("MATCH (n:BenchPerson) DETACH DELETE n")
@@ -406,6 +442,7 @@ def main():
 
         # ベンチマーク実行
         all_results.append(bench_create_nodes(client, args.nodes))
+        all_results.append(bench_unwind_batch_create(client, args.nodes))
         all_results.append(bench_create_edges(client, args.nodes, args.edge_ratio))
         all_results.append(bench_full_scan(client))
         all_results.extend(bench_filter_queries(client, args.nodes))

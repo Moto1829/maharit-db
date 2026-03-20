@@ -12,16 +12,19 @@ UNWIND を使った複数ノード/エッジの一括書き込みに対応し、
 ## 実装内容
 
 ### UNWIND + CREATE の対応確認・拡張
-- [ ] `UNWIND $nodes AS n CREATE (:Label {id: n.id, name: n.name})` 形式が動作するか検証
-- [ ] パラメータ `$nodes` に配列を渡したときの executor 処理を確認・修正
-- [ ] 1クエリで 1,000件以上のノードを一括作成できることを確認
+- [x] `UNWIND $nodes AS n CREATE (:Label {id: n.id, name: n.name})` 形式が動作するか検証
+- [x] パラメータ `$nodes` に配列を渡したときの executor 処理を確認・修正（`Value::Map` プロパティアクセスのバグを修正）
+- [x] 1クエリで 1,000件以上のノードを一括作成できることを確認
+
+### バグ修正
+- [x] `Expression::Property` 評価で `BindingValue::Scalar(Value::Map(...))` の場合、`access_temporal_field` に委譲していたため Null を返す問題を修正。Map のキーを直接参照するよう変更。
 
 ### TCP パイプライン対応（任意）
 - [ ] 複数クエリを1接続で連続送信したとき、サーバーが順次処理できるか検証
 - [ ] クライアント側でパイプライン送信するユーティリティを検討
 
 ### ベンチマーク追加
-- [ ] `scripts/benchmark.py` に UNWIND バッチ書き込みの計測項目を追加
+- [x] `scripts/benchmark.py` に UNWIND バッチ書き込みの計測項目を追加（`bench_unwind_batch_create`）
 
 ## 関連ファイル
 - `crates/maharit-query/src/executor.rs` — `execute_unwind`
@@ -29,4 +32,4 @@ UNWIND を使った複数ノード/エッジの一括書き込みに対応し、
 - `scripts/benchmark.py`
 
 ## ステータス
-未着手
+主要機能（UNWIND+CREATE バッチ書き込み、バグ修正、テスト追加、ベンチマーク追加）完了。463 tests passing。

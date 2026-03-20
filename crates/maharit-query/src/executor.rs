@@ -4823,7 +4823,11 @@ impl<'a> Executor<'a> {
                         Ok(edge.get_property(prop).map(Value::from).unwrap_or(Value::Null))
                     }
                     BindingValue::Scalar(scalar_val) => {
-                        Self::access_temporal_field(scalar_val, prop)
+                        if let Value::Map(map) = scalar_val {
+                            Ok(map.get(prop).cloned().unwrap_or(Value::Null))
+                        } else {
+                            Self::access_temporal_field(scalar_val, prop)
+                        }
                     }
                     _ => Err(ExecuteError::TypeError(format!(
                         "cannot access property '{}' on path value",
@@ -11256,5 +11260,145 @@ mod tests {
         let result = execute(&mut graph, "MATCH (n:A) RETURN count(*)").unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(2));
+    }
+
+    // ========== UNWIND + CREATE batch write tests (task #70) ==========
+
+    #[test]
+    fn test_unwind_create_from_map_params() {
+        // UNWIND $nodes AS n CREATE (:Person {id: n.id, name: n.name}) でノードを一括作成
+        let mut graph = Graph::new();
+        let stmt = Parser::new("UNWIND $nodes AS n CREATE (:Person {id: n.id, name: n.name})")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let nodes_list = Value::List(vec![
+            Value::Map({
+                let mut m = HashMap::new();
+                m.insert("id".to_string(), Value::Int(1));
+                m.insert("name".to_string(), Value::String("Alice".to_string()));
+                m
+            }),
+            Value::Map({
+                let mut m = HashMap::new();
+                m.insert("id".to_string(), Value::Int(2));
+                m.insert("name".to_string(), Value::String("Bob".to_string()));
+                m
+            }),
+            Value::Map({
+                let mut m = HashMap::new();
+                m.insert("id".to_string(), Value::Int(3));
+                m.insert("name".to_string(), Value::String("Carol".to_string()));
+                m
+            }),
+        ]);
+
+        let mut params = HashMap::new();
+        params.insert("nodes".to_string(), nodes_list);
+
+        Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(graph.node_count(), 3);
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:Person) RETURN n.id, n.name ORDER BY n.id",
+        )
+        .unwrap();
+        assert_eq!(result.row_count(), 3);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[0].columns[1], Value::String("Alice".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::Int(2));
+        assert_eq!(result.rows[2].columns[0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_unwind_create_bulk_1000_nodes() {
+        // 1000件のノードを UNWIND+CREATE で一括作成できることを確認
+        let mut graph = Graph::new();
+
+        let items: Vec<Value> = (1..=1000)
+            .map(|i| {
+                Value::Map({
+                    let mut m = HashMap::new();
+                    m.insert("id".to_string(), Value::Int(i));
+                    m
+                })
+            })
+            .collect();
+
+        let stmt = Parser::new("UNWIND $items AS item CREATE (:Bulk {id: item.id})")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("items".to_string(), Value::List(items));
+
+        Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(graph.node_count(), 1000);
+    }
+
+    #[test]
+    fn test_unwind_create_scalar_list() {
+        // スカラーリストの UNWIND+CREATE（n.prop アクセスなし）
+        let mut graph = Graph::new();
+        let stmt = Parser::new("UNWIND $vals AS v CREATE (:Tag {value: v})")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert(
+            "vals".to_string(),
+            Value::List(vec![
+                Value::String("alpha".to_string()),
+                Value::String("beta".to_string()),
+            ]),
+        );
+
+        Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(graph.node_count(), 2);
+    }
+
+    #[test]
+    fn test_unwind_map_property_access_null_for_missing_key() {
+        // マップに存在しないキーへのアクセスは Null を返す（エラーにならない）
+        let mut graph = Graph::new();
+        let stmt = Parser::new("UNWIND $nodes AS n CREATE (:X {a: n.a, b: n.b})")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert(
+            "nodes".to_string(),
+            Value::List(vec![Value::Map({
+                let mut m = HashMap::new();
+                m.insert("a".to_string(), Value::Int(1));
+                // "b" key is absent
+                m
+            })]),
+        );
+
+        Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+
+        assert_eq!(graph.node_count(), 1);
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.get_property("a"), Some(&PropertyValue::Int(1)));
+        // missing key evaluates to Null; Null properties may be stored as PropertyValue::Null
+        let b = node.get_property("b");
+        assert!(b.is_none() || b == Some(&PropertyValue::Null));
     }
 }
