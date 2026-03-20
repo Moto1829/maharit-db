@@ -148,6 +148,10 @@ impl Parser {
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
                     return self.parse_create_fulltext_index();
                 }
+                // Peek ahead to check for CREATE INDEX ON
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Index) {
+                    return self.parse_create_index();
+                }
                 // Peek ahead to check for CREATE USER
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::User) {
                     return self.parse_create_user();
@@ -162,6 +166,10 @@ impl Parser {
                 // Peek ahead to check for DROP FULLTEXT INDEX vs DROP CONSTRAINT
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
                     return self.parse_drop_fulltext_index();
+                }
+                // Peek ahead to check for DROP INDEX
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Index) {
+                    return self.parse_drop_index();
                 }
                 // Peek ahead to check for DROP USER
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::User) {
@@ -184,7 +192,7 @@ impl Parser {
             }
             Some(_) => {
                 return Err(self.unexpected_token(
-                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, SHOW, ALTER, CALL, EXPLAIN, or PROFILE",
+                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, DROP INDEX, SHOW, ALTER, CALL, EXPLAIN, or PROFILE",
                 ));
             }
             None => return Err(ParseError::UnexpectedEof),
@@ -1827,15 +1835,25 @@ impl Parser {
             return Ok(Statement::ShowUsers);
         }
 
-        // Expect CONSTRAINTS (as an identifier since it's not a keyword)
+        // SHOW INDEXES — INDEX is a keyword, so check it directly before falling
+        // back to the identifier path used for CONSTRAINTS/USERS.
+        if self.check(TokenKind::Index) {
+            self.advance();
+            return Ok(Statement::ShowIndexes);
+        }
+
+        // Expect CONSTRAINTS or USERS (as identifiers since they're not keywords)
         let ident = self.expect_ident()?;
         if ident.to_uppercase() == "CONSTRAINTS" {
             Ok(Statement::ShowConstraints)
         } else if ident.to_uppercase() == "USERS" {
             Ok(Statement::ShowUsers)
+        } else if ident.to_uppercase() == "INDEXES" {
+            // Fallback in case INDEXES is tokenised as an identifier
+            Ok(Statement::ShowIndexes)
         } else {
             Err(ParseError::UnexpectedToken {
-                expected: "CONSTRAINTS or USERS".to_string(),
+                expected: "CONSTRAINTS, INDEXES, or USERS".to_string(),
                 found: ident,
                 span: self.current_span(),
             })
@@ -1904,6 +1922,34 @@ impl Parser {
         Ok(Statement::DropFulltextIndex(DropFulltextIndexStatement {
             name,
         }))
+    }
+
+    // ========== Property Index ==========
+
+    /// CREATE INDEX ON :Label(property)
+    fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Create)?;
+        self.expect(TokenKind::Index)?;
+        self.expect(TokenKind::On)?;
+        self.expect(TokenKind::Colon)?;
+        let label = self.expect_ident()?;
+        self.expect(TokenKind::LParen)?;
+        let property = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Statement::CreateIndex(CreateIndexStatement { label, property }))
+    }
+
+    /// DROP INDEX ON :Label(property)
+    fn parse_drop_index(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Drop)?;
+        self.expect(TokenKind::Index)?;
+        self.expect(TokenKind::On)?;
+        self.expect(TokenKind::Colon)?;
+        let label = self.expect_ident()?;
+        self.expect(TokenKind::LParen)?;
+        let property = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Statement::DropIndex(DropIndexStatement { label, property }))
     }
 
     // ========== User Management ==========

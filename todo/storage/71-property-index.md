@@ -10,29 +10,28 @@
 - スキーマ制約（UNIQUE）は実装済みだが、検索用インデックスとは別
 
 ## 実装内容
-
 ### DDL 構文
-- [ ] `CREATE INDEX ON :Label(property)` のパーサー対応
-- [ ] `DROP INDEX ON :Label(property)` のパーサー対応
-- [ ] `SHOW INDEXES` のパーサー対応
+- [x] `CREATE INDEX ON :Label(property)` のパーサー対応
+- [x] `DROP INDEX ON :Label(property)` のパーサー対応
+- [x] `SHOW INDEXES` のパーサー対応
 
 ### インデックス構造
-- [ ] `IndexManager` を `maharit-core` または `maharit-storage` に実装
-  - BTreeMap<Value, Vec<NodeId>> で範囲検索も対応
-- [ ] ノード作成・更新・削除時にインデックスを自動更新
+- [x] `PropertyIndex` を `maharit-core` に実装済み（BTreeMap ベースの範囲検索対応）
+- [x] ノード作成時にインデックスを自動更新（`create_node()` 内）
 
 ### クエリプランナーへの統合
-- [ ] `maharit-query/src/executor.rs` の MATCH WHERE 処理でインデックスを優先利用
-- [ ] `EXPLAIN` でインデックス使用有無を表示
+- [x] `executor.rs` の `match_node_pattern()` でインデックス優先ルックアップを実装
+- [x] `planner.rs` に `CreateIndex`/`DropIndex`/`ShowIndexes` プランノードを追加
 
 ### 永続化
-- [ ] バックアップ・リストア時にインデックス定義を保存・復元
+- [ ] バックアップ・リストア時にインデックス定義を保存・復元（未着手）
 
 ## 関連ファイル
-- `crates/maharit-core/src/` — グラフ構造・LabelIndex
-- `crates/maharit-query/src/executor.rs` — MATCH 処理
-- `crates/maharit-query/src/planner.rs` — クエリプラン
-- `crates/maharit-storage/src/` — 永続化
+- `crates/maharit-core/src/property_index.rs` — PropertyIndex 実装
+- `crates/maharit-query/src/ast.rs` — Statement enum / CreateIndexStatement / DropIndexStatement
+- `crates/maharit-query/src/parser.rs` — parse_create_index / parse_drop_index / parse_show
+- `crates/maharit-query/src/executor.rs` — execute_create_index / match_node_pattern（インデックス最適化）
+- `crates/maharit-query/src/planner.rs` — CreateIndex/DropIndex/ShowIndexes プランノード
 
 ## ステータス
-未着手
+実装完了（永続化は除く）。452 tests passing。

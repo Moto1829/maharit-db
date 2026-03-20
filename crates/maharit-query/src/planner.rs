@@ -408,6 +408,15 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         Statement::ShowConstraints => {
             vec![PlanNode::new("ShowConstraints", 1, 1, "")]
         }
+        Statement::CreateIndex(_) => {
+            vec![PlanNode::new("CreateIndex", 1, 1, "")]
+        }
+        Statement::DropIndex(_) => {
+            vec![PlanNode::new("DropIndex", 1, 1, "")]
+        }
+        Statement::ShowIndexes => {
+            vec![PlanNode::new("ShowIndexes", 1, 1, "")]
+        }
         Statement::CreateFulltextIndex(_) => {
             vec![PlanNode::new("CreateFulltextIndex", 1, 1, "")]
         }
@@ -471,6 +480,15 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         }
         Statement::ShowConstraints => {
             vec![PlanNode::new("ShowConstraints", 1, 1, "")]
+        }
+        Statement::CreateIndex(_) => {
+            vec![PlanNode::new("CreateIndex", 1, 1, "")]
+        }
+        Statement::DropIndex(_) => {
+            vec![PlanNode::new("DropIndex", 1, 1, "")]
+        }
+        Statement::ShowIndexes => {
+            vec![PlanNode::new("ShowIndexes", 1, 1, "")]
         }
         Statement::CreateFulltextIndex(_) => {
             vec![PlanNode::new("CreateFulltextIndex", 1, 1, "")]

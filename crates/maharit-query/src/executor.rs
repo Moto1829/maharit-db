@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use maharit_core::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, ConcurrentGraph, Edge,
-    FulltextError, FulltextManager, Graph, GraphBackend, NodeId, PropertyType, PropertyValue,
-    traversal,
+    FulltextError, FulltextManager, Graph, GraphBackend, IndexDefinition, NodeId, PropertyIndex,
+    PropertyType, PropertyValue, traversal,
 };
 use rayon::prelude::*;
 use regex::Regex;
@@ -286,6 +286,7 @@ pub struct Executor<'a> {
     _marker: std::marker::PhantomData<&'a ()>,
     constraints: ConstraintManager,
     fulltext: FulltextManager,
+    property_index: PropertyIndex,
     params: HashMap<String, Value>,
 }
 
@@ -306,6 +307,7 @@ impl<'a> Executor<'a> {
             _marker: std::marker::PhantomData,
             constraints: ConstraintManager::new(),
             fulltext: FulltextManager::new(),
+            property_index: PropertyIndex::new(),
             params: HashMap::new(),
         }
     }
@@ -339,6 +341,7 @@ impl<'a> Executor<'a> {
             _marker: std::marker::PhantomData,
             constraints: ConstraintManager::new(),
             fulltext: FulltextManager::new(),
+            property_index: PropertyIndex::new(),
             params: HashMap::new(),
         }
     }
@@ -363,6 +366,7 @@ impl<'a> Executor<'a> {
             _marker: std::marker::PhantomData,
             constraints: ConstraintManager::new(),
             fulltext: FulltextManager::new(),
+            property_index: PropertyIndex::new(),
             params: HashMap::new(),
         }
     }
@@ -464,6 +468,16 @@ impl<'a> Executor<'a> {
         &mut self.fulltext
     }
 
+    /// プロパティインデックスへの参照を取得
+    pub fn property_index(&self) -> &PropertyIndex {
+        &self.property_index
+    }
+
+    /// プロパティインデックスへの可変参照を取得
+    pub fn property_index_mut(&mut self) -> &mut PropertyIndex {
+        &mut self.property_index
+    }
+
     /// 文を実行
     pub fn execute(&mut self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
         match stmt {
@@ -481,6 +495,9 @@ impl<'a> Executor<'a> {
             Statement::CreateConstraint(cc) => self.execute_create_constraint(cc),
             Statement::DropConstraint(dc) => self.execute_drop_constraint(dc),
             Statement::ShowConstraints => self.execute_show_constraints(),
+            Statement::CreateIndex(ci) => self.execute_create_index(ci),
+            Statement::DropIndex(di) => self.execute_drop_index(di),
+            Statement::ShowIndexes => self.execute_show_indexes(),
             Statement::CreateFulltextIndex(cfi) => self.execute_create_fulltext_index(cfi),
             Statement::DropFulltextIndex(dfi) => self.execute_drop_fulltext_index(dfi),
             Statement::CreateUser(cu) => Ok(ResultSet::new(
@@ -678,6 +695,13 @@ impl<'a> Executor<'a> {
 
         // Index in fulltext indexes (using primary label for now)
         self.fulltext.index_node(node_id, &primary_label, &props);
+
+        // Index properties for property indexes
+        for (key, prop_val) in &evaluated_props {
+            if self.property_index.has_index(&primary_label, key) {
+                self.property_index.index_property(node_id, key, prop_val);
+            }
+        }
 
         // Bind variable
         if let Some(var) = &pattern.variable {
@@ -1661,6 +1685,73 @@ impl<'a> Executor<'a> {
         ))
     }
 
+    // ========== PROPERTY INDEX ==========
+
+    fn execute_create_index(&mut self, ci: CreateIndexStatement) -> Result<ResultSet, ExecuteError> {
+        let def = IndexDefinition::new(ci.label.clone(), ci.property.clone());
+        self.property_index.create_index(def);
+
+        // Index existing nodes that match the label
+        let node_ids: Vec<NodeId> = self
+            .graph_ref()
+            .all_nodes()
+            .into_iter()
+            .filter(|n| n.has_label(&ci.label))
+            .map(|n| n.id)
+            .collect();
+
+        for node_id in node_ids {
+            if let Some(node) = self.graph_ref().get_node(node_id) {
+                if let Some(val) = node.get_property(&ci.property) {
+                    self.property_index.index_property(node_id, &ci.property, val);
+                }
+            }
+        }
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Index created on :{}({})",
+                    ci.label, ci.property
+                ))],
+            }],
+        ))
+    }
+
+    fn execute_drop_index(&mut self, di: DropIndexStatement) -> Result<ResultSet, ExecuteError> {
+        self.property_index.drop_index(&di.label, &di.property);
+
+        Ok(ResultSet::new(
+            vec!["result".to_string()],
+            vec![Row {
+                columns: vec![Value::String(format!(
+                    "Index dropped on :{}({})",
+                    di.label, di.property
+                ))],
+            }],
+        ))
+    }
+
+    fn execute_show_indexes(&self) -> Result<ResultSet, ExecuteError> {
+        let indexes = self.property_index.list_indexes();
+
+        let mut rows = Vec::new();
+        for def in indexes {
+            rows.push(Row {
+                columns: vec![
+                    Value::String(def.label.clone()),
+                    Value::String(def.property.clone()),
+                ],
+            });
+        }
+
+        Ok(ResultSet::new(
+            vec!["label".to_string(), "property".to_string()],
+            rows,
+        ))
+    }
+
     // ========== PROCEDURE CALLS ==========
 
     /// Execute a top-level procedure call: CALL proc.name(args) YIELD col1, col2 [RETURN ...]
@@ -2282,6 +2373,36 @@ impl<'a> Executor<'a> {
                         result.push(bindings);
                     }
                 }
+                continue;
+            }
+
+            // Try index-based lookup first: if the pattern has a label and at least one
+            // property that is indexed and has a literal value, use the index to avoid
+            // a full scan.
+            let mut used_index = false;
+            if let Some(label) = pattern.labels.first() {
+                'index_loop: for (prop_key, prop_expr) in &pattern.properties {
+                    if self.property_index.has_index(label, prop_key) {
+                        if let Expression::Literal(lit) = prop_expr {
+                            let prop_val = PropertyValue::from(lit.clone());
+                            let candidate_ids = self.property_index.find_by_property(prop_key, &prop_val);
+                            for node_id in candidate_ids {
+                                if self.node_matches_pattern(node_id, pattern, &bindings)? {
+                                    let mut new_bindings = bindings.clone();
+                                    if let Some(var) = &pattern.variable {
+                                        new_bindings.insert(var.clone(), BindingValue::Node(node_id));
+                                    }
+                                    result.push(new_bindings);
+                                }
+                            }
+                            used_index = true;
+                            break 'index_loop;
+                        }
+                    }
+                }
+            }
+
+            if used_index {
                 continue;
             }
 
@@ -10768,5 +10889,89 @@ mod tests {
         ).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(6));
+    }
+
+    // ========== PROPERTY INDEX TESTS ==========
+
+    #[test]
+    fn test_create_index_and_lookup() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        // Create index
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        // Create some nodes
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 30})").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Bob', age: 25})").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 35})").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        // Re-create index to pick up existing nodes
+        let stmt = Parser::new("DROP INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        // Query using indexed property
+        let stmt = Parser::new("MATCH (n:Person {name: 'Alice'}) RETURN n.name").unwrap().parse().unwrap();
+        let rs = executor.execute(stmt).unwrap();
+        assert_eq!(rs.row_count(), 2);
+    }
+
+    #[test]
+    fn test_show_indexes() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Employee(email)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        let stmt = Parser::new("SHOW INDEXES").unwrap().parse().unwrap();
+        let result = executor.execute(stmt).unwrap();
+        assert_eq!(result.row_count(), 2);
+    }
+
+    #[test]
+    fn test_drop_index() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("DROP INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        let stmt = Parser::new("SHOW INDEXES").unwrap().parse().unwrap();
+        let result = executor.execute(stmt).unwrap();
+        assert_eq!(result.row_count(), 0);
+    }
+
+    #[test]
+    fn test_index_auto_update_on_create() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        // Create index first
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        // Create nodes - they should be automatically indexed
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice'})").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Bob'})").unwrap().parse().unwrap();
+        executor.execute(stmt).unwrap();
+
+        // Verify index has the entries
+        let alices = executor.property_index().find_by_property(
+            "name",
+            &PropertyValue::String("Alice".to_string()),
+        );
+        assert_eq!(alices.len(), 1);
     }
 }

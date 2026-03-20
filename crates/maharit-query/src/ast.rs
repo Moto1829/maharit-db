@@ -37,6 +37,9 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         Statement::MatchForeach(_) => false,
         Statement::CreateConstraint(_) => false,
         Statement::DropConstraint(_) => false,
+        Statement::CreateIndex(_) => false,
+        Statement::DropIndex(_) => false,
+        Statement::ShowIndexes => true,
         Statement::CreateFulltextIndex(_) => false,
         Statement::DropFulltextIndex(_) => false,
         Statement::CreateUser(_) => false,
@@ -72,6 +75,12 @@ pub enum Statement {
     DropConstraint(DropConstraintStatement),
     /// SHOW CONSTRAINTS
     ShowConstraints,
+    /// CREATE INDEX ON :Label(property)
+    CreateIndex(CreateIndexStatement),
+    /// DROP INDEX ON :Label(property)
+    DropIndex(DropIndexStatement),
+    /// SHOW INDEXES
+    ShowIndexes,
     /// CREATE FULLTEXT INDEX
     CreateFulltextIndex(CreateFulltextIndexStatement),
     /// DROP FULLTEXT INDEX
@@ -827,6 +836,20 @@ pub enum PropertyTypeAst {
 pub struct DropConstraintStatement {
     /// 制約名
     pub name: String,
+}
+
+/// CREATE INDEX文
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexStatement {
+    pub label: String,
+    pub property: String,
+}
+
+/// DROP INDEX文
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndexStatement {
+    pub label: String,
+    pub property: String,
 }
 
 /// CREATE FULLTEXT INDEX文
