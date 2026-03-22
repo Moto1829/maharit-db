@@ -3,6 +3,7 @@ pub mod mvcc;
 mod persistence;
 mod transaction;
 mod wal;
+pub mod wal_group_commit;
 
 use maharit_core::Graph;
 
@@ -16,6 +17,7 @@ pub use transaction::{
     LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,
 };
 pub use wal::{LogRecord, Lsn, RecordPayload, RecordType, Wal, WalError};
+pub use wal_group_commit::{WalGroupCommitConfig, WalGroupCommitter};
 
 /// インメモリストレージエンジン
 pub struct InMemoryStorage {

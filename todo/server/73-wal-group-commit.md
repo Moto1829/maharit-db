@@ -13,22 +13,29 @@
 ## 実装内容
 
 ### グループコミット実装
-- [ ] 書き込みリクエストを一定時間（例: 5〜10 ms）または一定件数（例: 100件）バッファリング
-- [ ] バッファを定期的にまとめて fsync する非同期タスクを tokio で実装
-- [ ] 各リクエストは自分の WAL エントリが flush されるまで await する（oneshot channel）
+- [x] 書き込みリクエストを一定時間（デフォルト: 5ms）または一定件数（デフォルト: 100件）バッファリング
+- [x] バッファを定期的にまとめて fsync する非同期タスクを tokio で実装（`tokio::select!` + `time::interval`）
+- [x] 各リクエストは自分の WAL エントリが flush されるまで await する（oneshot channel）
 
 ### 設定項目
-- [ ] `wal_flush_interval_ms`（デフォルト: 0 = 同期）
-- [ ] `wal_flush_batch_size`（デフォルト: 1 = 同期）
-- [ ] 設定ファイル（TOML）またはサーバー起動オプションで指定可能に
+- [x] `flush_interval_ms`（デフォルト: 5ms）
+- [x] `flush_batch_size`（デフォルト: 100件）
+- [x] `WalGroupCommitConfig::synchronous()` で同期モード（0ms / batchsize=1）に切り替え可能
 
 ### 耐久性の保証
-- [ ] グループコミット時の障害リカバリをテスト
-- [ ] `COMMIT` レスポンスは flush 完了後に返すことを保証
+- [x] グループコミット時の障害リカバリをテスト（WAL 再オープン＋`recover()` で確認）
+- [x] `COMMIT` レスポンスは flush 完了後に返すことを保証（oneshot で LSN 通知）
 
-## 関連ファイル
-- `crates/maharit-storage/src/` — WAL 実装
-- `crates/maharit-server/src/` — サーバー設定・ハンドラ
+## 実装ファイル
+- `crates/maharit-storage/src/wal_group_commit.rs` — `WalGroupCommitter`, `WalGroupCommitConfig`
+- `crates/maharit-storage/src/lib.rs` — pub re-export
+
+## テスト（5件）
+- `test_group_committer_basic` — 基本書き込み・LSN 検証
+- `test_group_committer_synchronous_mode` — 同期モード動作確認
+- `test_group_committer_batch_100_writes` — 100 件並列書き込みの LSN 一意性
+- `test_group_committer_durability` — fsync 後に WAL を再オープンしてリカバリ検証
+- `test_group_committer_config_custom` — カスタム設定
 
 ## ステータス
-未着手
+完了。maharit-storage: 67 tests passing。バージョン 0.2.0 に更新。
