@@ -607,6 +607,28 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
         ));
     }
 
+    let pre_agg_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+
+    // GROUP BY 検出: 集計関数と非集計アイテムが混在 → HashAggregation
+    // 集計関数のみ → EagerAggregation
+    if has_implicit_group_by(&m.return_clause) {
+        let groups = group_by_keys(&m.return_clause);
+        let grouped_est = (pre_agg_est / 3).max(1); // 集計後の行数を推定
+        nodes.push(PlanNode::new(
+            "HashAggregation",
+            grouped_est,
+            grouped_est / 5 + pre_agg_est / 10 + 1,
+            &groups,
+        ));
+    } else if has_any_aggregate(&m.return_clause) {
+        nodes.push(PlanNode::new(
+            "EagerAggregation",
+            1,
+            pre_agg_est / 5 + 1,
+            "",
+        ));
+    }
+
     let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
     nodes.push(PlanNode::new(
         "Projection",
@@ -1103,6 +1125,28 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
         }
     }
 
+    let pre_agg_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
+
+    // GROUP BY 検出: 集計関数と非集計アイテムが混在 → HashAggregation
+    // 集計関数のみ → EagerAggregation
+    if has_implicit_group_by(&m.return_clause) {
+        let groups = group_by_keys(&m.return_clause);
+        let grouped_est = (pre_agg_est / 3).max(1);
+        nodes.push(PlanNode::new(
+            "HashAggregation",
+            grouped_est,
+            grouped_est / 5 + pre_agg_est / 10 + 1,
+            &groups,
+        ));
+    } else if has_any_aggregate(&m.return_clause) {
+        nodes.push(PlanNode::new(
+            "EagerAggregation",
+            1,
+            pre_agg_est / 5 + 1,
+            "",
+        ));
+    }
+
     let final_est = nodes.last().map(|n| n.estimated_rows).unwrap_or(1);
 
     // Column pruning: analyze RETURN clause to determine needed columns
@@ -1133,6 +1177,47 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
     }
 
     nodes
+}
+
+/// RETURN 句に集計関数と非集計アイテムが混在するかどうかを判定する。
+/// 混在する場合、GROUP BY が暗黙的に適用される（Cypher のセマンティクス）。
+fn has_implicit_group_by(return_clause: &ReturnClause) -> bool {
+    let mut has_aggregate = false;
+    let mut has_non_aggregate = false;
+    for item in &return_clause.items {
+        match item {
+            ReturnItem::Aggregate(_) => has_aggregate = true,
+            ReturnItem::Variable(_) | ReturnItem::Property(_, _) => has_non_aggregate = true,
+            ReturnItem::All | ReturnItem::Function(_) | ReturnItem::Expr(_) => {}
+        }
+    }
+    has_aggregate && has_non_aggregate
+}
+
+/// RETURN 句に集計関数が1つでも含まれているか判定する。
+fn has_any_aggregate(return_clause: &ReturnClause) -> bool {
+    return_clause
+        .items
+        .iter()
+        .any(|item| matches!(item, ReturnItem::Aggregate(_)))
+}
+
+/// GROUP BY キーのリストを文字列化する（プラン表示用）。
+fn group_by_keys(return_clause: &ReturnClause) -> String {
+    let keys: Vec<String> = return_clause
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ReturnItem::Variable(v) => Some(v.clone()),
+            ReturnItem::Property(v, p) => Some(format!("{}.{}", v, p)),
+            _ => None,
+        })
+        .collect();
+    if keys.is_empty() {
+        String::new()
+    } else {
+        format!("keys: {}", keys.join(", "))
+    }
 }
 
 /// Analyze the RETURN clause to determine which columns are needed.
@@ -1953,5 +2038,92 @@ mod tests {
 
         assert_eq!(hist.total_count(), 5);
         assert_eq!(hist.distinct_count, 1);
+    }
+
+    // ── GROUP BY / 集計プランノードのテスト ────────────────────────────────
+
+    #[test]
+    fn test_plan_count_star_eager_aggregation() {
+        // COUNT(*) のみ → EagerAggregation
+        let p = plan("MATCH (n:Person) RETURN count(*)");
+        let ops: Vec<&str> = p.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(
+            ops.contains(&"EagerAggregation"),
+            "COUNT(*) should produce EagerAggregation, got: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&"HashAggregation"),
+            "COUNT(*) alone should NOT produce HashAggregation"
+        );
+    }
+
+    #[test]
+    fn test_plan_group_by_hash_aggregation() {
+        // n.city + COUNT(*) の混在 → HashAggregation (implicit GROUP BY)
+        let p = plan("MATCH (n:Person) RETURN n.city, count(*)");
+        let ops: Vec<&str> = p.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(
+            ops.contains(&"HashAggregation"),
+            "GROUP BY query should produce HashAggregation, got: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&"EagerAggregation"),
+            "GROUP BY query should NOT produce EagerAggregation"
+        );
+    }
+
+    #[test]
+    fn test_plan_group_by_details_contain_keys() {
+        // HashAggregation の details にグループキーが含まれる
+        let p = plan("MATCH (n:Person) RETURN n.city, count(*)");
+        let hash_node = p
+            .nodes
+            .iter()
+            .find(|n| n.operator == "HashAggregation")
+            .expect("HashAggregation node should exist");
+        assert!(
+            hash_node.details.contains("n.city"),
+            "HashAggregation details should list group keys, got: {}",
+            hash_node.details
+        );
+    }
+
+    #[test]
+    fn test_plan_no_aggregation_for_plain_return() {
+        // 集計なしの RETURN → EagerAggregation も HashAggregation も不要
+        let p = plan("MATCH (n:Person) RETURN n.name");
+        let ops: Vec<&str> = p.nodes.iter().map(|n| n.operator.as_str()).collect();
+        assert!(
+            !ops.contains(&"EagerAggregation"),
+            "Plain RETURN should not produce EagerAggregation"
+        );
+        assert!(
+            !ops.contains(&"HashAggregation"),
+            "Plain RETURN should not produce HashAggregation"
+        );
+    }
+
+    #[test]
+    fn test_plan_hash_aggregation_ordering() {
+        // HashAggregation は Projection の前に来ること
+        let p = plan("MATCH (n:Person) RETURN n.city, count(*)");
+        let agg_pos = p
+            .nodes
+            .iter()
+            .position(|n| n.operator == "HashAggregation")
+            .unwrap();
+        let proj_pos = p
+            .nodes
+            .iter()
+            .position(|n| n.operator == "Projection")
+            .unwrap();
+        assert!(
+            agg_pos < proj_pos,
+            "HashAggregation ({}) should come before Projection ({})",
+            agg_pos,
+            proj_pos
+        );
     }
 }

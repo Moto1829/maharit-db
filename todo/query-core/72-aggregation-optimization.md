@@ -31,9 +31,18 @@
 - [x] `count(n)` カラム名を `"count(n)"` に修正（従来は誤って `"COUNT(*)"` だった）
 
 ### 集計演算子の事前計画化
-- [ ] `planner.rs` で GROUP BY を含むクエリにハッシュ集計プランを生成（未着手）
+- [x] `planner.rs` で GROUP BY を含むクエリにハッシュ集計プランを生成
+  - `has_implicit_group_by()`: 集計＋非集計の混在を検出
+  - `has_any_aggregate()`: 集計関数の有無を検出
+  - 混在 → `HashAggregation`（グループキーを details に記録）
+  - 集計のみ → `EagerAggregation`
+  - Projection の前に挿入、ORDER BY/LIMIT の後に来ないよう保証
+  - テスト 5件追加（EagerAggregation/HashAggregation/キー表示/順序）
 
 ## 関連ファイル
 - `crates/maharit-query/src/executor.rs` — 集計処理
 - `crates/maharit-query/src/planner.rs` — クエリプラン
+
+## ステータス
+完了。468 tests passing。
 
