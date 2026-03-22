@@ -10,7 +10,7 @@
 ## 実装内容
 
 ### フェーズ1: GitHub Actions リリースパイプライン
-- [ ] `.github/workflows/release.yml` を作成
+- [x] `.github/workflows/release.yml` を作成
   - `v*` タグ push 時にトリガー
   - ターゲット: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
   - `cross` または GitHub-hosted runners でクロスコンパイル
@@ -19,11 +19,15 @@
   - チェックサム（SHA256）ファイルも添付
 
 ### フェーズ2: インストールスクリプト
-- [ ] `install.sh`（Unix 向け）を作成
-  - OS/アーキテクチャを自動検出
-  - GitHub Releases から最新バイナリをダウンロード
-  - `/usr/local/bin/maharit` に配置
-- [ ] `install.ps1`（Windows 向け）を作成
+- [x] `install.sh`（Unix / macOS / Linux 向け）を作成
+  - OS/アーキテクチャを自動検出（x86_64/aarch64, Linux/macOS）
+  - GitHub Releases から最新バイナリをダウンロード（curl/wget 対応）
+  - SHA256 チェックサム検証（sha256sum/shasum 対応）
+  - `--version` / `--install-dir` / `--no-confirm` オプション対応
+- [x] `install.ps1`（Windows PowerShell 向け）を作成
+  - `irm ... | iex` パターンで利用可能
+  - SHA256 チェックサム検証（Get-FileHash）
+  - ユーザー PATH への自動追加
 
 ### フェーズ3: Homebrew
 - [ ] Homebrew formula を作成（`maharit-db` tap or homebrew-core）
