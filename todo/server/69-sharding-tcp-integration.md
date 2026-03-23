@@ -97,7 +97,7 @@ maharit server --port 7690 --coordinator \
 
 ## ステータス
 
-- [ ] Phase 1: ShardClient 実装（TCP クエリ転送・結果受信）
-- [ ] Phase 2: TcpServer シャードモード（`--shard` フラグ）
-- [ ] Phase 3: コーディネーターノード（`--coordinator` フラグ、TOML 設定）
-- [ ] Phase 4: クロスシャードクエリ対応
+- [x] Phase 1: ShardClient 実装（TCP クエリ転送・結果受信）
+- [x] Phase 2: TcpServer シャードモード（`--shard` フラグ）
+- [x] Phase 3: コーディネーターノード（`--coordinator` フラグ、TOML 設定）
+- [x] Phase 4: クロスシャードクエリ対応（全シャードへのブロードキャスト + dedup マージ）
