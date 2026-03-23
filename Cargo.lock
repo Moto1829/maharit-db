@@ -1203,7 +1203,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "maharit-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "rustls",
@@ -1217,10 +1217,11 @@ dependencies = [
 
 [[package]]
 name = "maharit-cluster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "maharit-core",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -1228,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "maharit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "lindera",
@@ -1239,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "maharit-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "maharit-core",
  "maharit-io",
@@ -1250,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "maharit-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "csv",
  "maharit-core",
@@ -1262,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "maharit-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "maharit-core",
  "rayon",
@@ -1273,10 +1274,11 @@ dependencies = [
 
 [[package]]
 name = "maharit-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "colored",
+ "maharit-cluster",
  "maharit-core",
  "maharit-query",
  "maharit-storage",
@@ -1296,10 +1298,11 @@ dependencies = [
 
 [[package]]
 name = "maharit-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "flate2",
+ "futures-util",
  "maharit-core",
  "serde",
  "thiserror 2.0.18",
@@ -1309,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "maharit-viz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "maharit-core",

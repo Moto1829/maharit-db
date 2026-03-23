@@ -13,6 +13,7 @@ path = "src/main.rs"
 maharit-core.workspace = true
 maharit-storage.workspace = true
 maharit-query.workspace = true
+maharit-cluster = { path = "../maharit-cluster" }
 rustyline.workspace = true
 colored.workspace = true
 tokio.workspace = true

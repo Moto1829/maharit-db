@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod coordinator;
 pub mod http_server;
 pub mod logging;
 pub mod metrics;
@@ -46,9 +47,11 @@ fn run_repl() {
 }
 
 fn run_server(args: &[String]) {
+    use crate::coordinator::{CoordinatorConfig, ShardCoordinatorServer};
     use crate::replication::{
         FollowerReplicationManager, LeaderReplicationManager, NodeRole, ReplicationConfig,
     };
+    use maharit_cluster::{ClusterConfig, ShardConfig};
     use maharit_storage::PersistentStorage;
     use std::sync::Arc;
 
@@ -61,6 +64,14 @@ fn run_server(args: &[String]) {
 
     // Persistence option
     let mut data_path: Option<String> = None;
+
+    // Sharding options
+    let mut shard_mode = false;
+    let mut shard_id: Option<u32> = None;
+    let mut coordinator_mode = false;
+    let mut coordinator_port: Option<String> = None;
+    let mut shard_addrs: Vec<String> = Vec::new();
+    let mut sharding_strategy = "hash".to_string();
 
     // Parse arguments
     let mut i = 0;
@@ -113,6 +124,49 @@ fn run_server(args: &[String]) {
                     i += 1;
                 }
             }
+            "--shard" => {
+                shard_mode = true;
+            }
+            "--shard-id" => {
+                if i + 1 < args.len() {
+                    if let Ok(id) = args[i + 1].parse::<u32>() {
+                        shard_id = Some(id);
+                    }
+                    i += 1;
+                }
+            }
+            "--coordinator" => {
+                coordinator_mode = true;
+            }
+            "--coordinator-port" => {
+                if i + 1 < args.len() {
+                    coordinator_port = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--shards" => {
+                if i + 1 < args.len() {
+                    // Comma-separated list of shard addresses
+                    shard_addrs = args[i + 1]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    i += 1;
+                }
+            }
+            "--strategy" => {
+                if i + 1 < args.len() {
+                    sharding_strategy = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--config" => {
+                // Config file path (future use; skip for now)
+                if i + 1 < args.len() {
+                    i += 1;
+                }
+            }
             "--help" => {
                 print_server_help();
                 return;
@@ -120,6 +174,57 @@ fn run_server(args: &[String]) {
             _ => {}
         }
         i += 1;
+    }
+
+    // ── Coordinator mode: no local graph needed ───────────────────────────────
+    if coordinator_mode {
+        let coord_bind = {
+            let host = config.bind_address.split(':').next().unwrap_or("127.0.0.1");
+            let port = coordinator_port.as_deref().unwrap_or("7690");
+            format!("{}:{}", host, port)
+        };
+
+        let shards: Vec<ShardConfig> = shard_addrs
+            .iter()
+            .enumerate()
+            .map(|(idx, addr)| ShardConfig {
+                id: idx as u32,
+                address: addr.clone(),
+            })
+            .collect();
+
+        if shards.is_empty() {
+            eprintln!("Error: --shards <ADDR,...> is required for coordinator mode");
+            std::process::exit(1);
+        }
+
+        let cluster_config = ClusterConfig {
+            enabled: true,
+            strategy: sharding_strategy,
+            shards,
+            replication_factor: 1,
+        };
+
+        let coord_config = CoordinatorConfig {
+            bind_address: coord_bind,
+            ..CoordinatorConfig::default()
+        };
+
+        let srv = Arc::new(ShardCoordinatorServer::new(coord_config, cluster_config));
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async move {
+            if let Err(e) = srv.start().await {
+                eprintln!("Coordinator error: {}", e);
+                std::process::exit(1);
+            }
+        });
+        return;
+    }
+
+    // ── Shard mode: log shard ID and proceed as normal TcpServer ─────────────
+    if shard_mode {
+        let id = shard_id.unwrap_or(0);
+        println!("Starting as shard node (shard-id={})", id);
     }
 
     // Resolve data path: --data > MAHARIT_DATA env var > default "maharit.db"
@@ -646,9 +751,19 @@ fn print_server_help() {
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
     println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
+    println!("    --shard                          Start as a shard node (normal TcpServer with shard-id logged)");
+    println!("    --shard-id <ID>                  Shard identifier for this node (used with --shard)");
+    println!("    --coordinator                    Start as a coordinator node (fans queries out to shards)");
+    println!("    --coordinator-port <PORT>        Port for the coordinator listener (default: 7690)");
+    println!("    --shards <ADDR,...>              Comma-separated list of shard addresses (coordinator mode)");
+    println!("    --strategy <STRATEGY>            Sharding strategy: hash|range|label (default: hash)");
+    println!("    --config <PATH>                  Path to a TOML cluster config file (reserved)");
     println!("    --help                           Print this help message");
     println!();
     println!("EXAMPLES:");
     println!("    maharit server --replication-role leader --replication-bind 0.0.0.0:7688");
     println!("    maharit server --replication-role follower --leader-addr 192.168.1.1:7688 --port 7690");
+    println!("    maharit server --shard --shard-id 0 --port 7687");
+    println!("    maharit server --shard --shard-id 1 --port 7688");
+    println!("    maharit server --coordinator --shards 127.0.0.1:7687,127.0.0.1:7688 --coordinator-port 7690");
 }

@@ -18,6 +18,7 @@
 pub mod coordinator;
 pub mod router;
 pub mod shard;
+pub mod shard_client;
 pub mod strategy;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
@@ -28,3 +29,4 @@ pub use shard::{
     RebalancePlan, ShardError, ShardId, ShardInfo, ShardMap, ShardMove, ShardStatus,
 };
 pub use strategy::{HashSharding, LabelSharding, RangeSharding, ShardingStrategy};
+pub use shard_client::ShardClient;
