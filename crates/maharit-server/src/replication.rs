@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use maharit_core::{Graph, PropertyValue};
+use maharit_core::{ConcurrentGraph, Graph, PropertyValue};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -547,7 +547,7 @@ pub struct FollowerReplicationManager {
     /// Timestamp of the most recent heartbeat (or connection time)
     last_heartbeat: Arc<RwLock<Instant>>,
     /// Local graph to which WAL entries are applied
-    graph: Arc<RwLock<Graph>>,
+    graph: Arc<ConcurrentGraph>,
     /// Set to `true` when a `PromoteToLeader` message is received.
     is_promoted: Arc<AtomicBool>,
 }
@@ -564,13 +564,13 @@ impl FollowerReplicationManager {
             // Not connected yet, so the leader is not alive.
             is_leader_alive: Arc::new(AtomicBool::new(false)),
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
-            graph: Arc::new(RwLock::new(Graph::new())),
+            graph: Arc::new(ConcurrentGraph::new()),
             is_promoted: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Create a follower manager that applies WAL entries to an existing shared graph.
-    pub fn with_graph(config: ReplicationConfig, graph: Arc<RwLock<Graph>>) -> Self {
+    pub fn with_concurrent_graph(config: ReplicationConfig, graph: Arc<ConcurrentGraph>) -> Self {
         Self {
             config,
             current_lsn: Arc::new(AtomicU64::new(0)),
@@ -587,7 +587,7 @@ impl FollowerReplicationManager {
     }
 
     /// Return a reference to the shared graph held by this follower.
-    pub fn graph(&self) -> Arc<RwLock<Graph>> {
+    pub fn graph(&self) -> Arc<ConcurrentGraph> {
         Arc::clone(&self.graph)
     }
 
@@ -676,22 +676,23 @@ impl FollowerReplicationManager {
 }
 
 /// Apply a single WAL entry to the local graph (best-effort; errors are logged).
-async fn apply_wal_entry(graph: &Arc<RwLock<Graph>>, entry: &WalEntryData) {
-    let mut g = graph.write().await;
+///
+/// Uses `ConcurrentGraph` directly — no async lock needed.
+fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
     match entry {
         WalEntryData::CreateNode { node_id, labels } => {
-            g.create_node_with_id_and_labels(*node_id, labels.clone());
+            graph.create_node_with_id_and_labels(*node_id, labels.clone());
         }
         WalEntryData::DeleteNode { node_id } => {
-            g.delete_node(*node_id);
+            graph.delete_node(*node_id);
         }
         WalEntryData::CreateEdge { from, to, label, .. } => {
-            if let Err(e) = g.create_edge(*from, *to, label) {
+            if let Err(e) = graph.create_edge(*from, *to, label) {
                 eprintln!("WAL apply: create_edge failed: {}", e);
             }
         }
         WalEntryData::DeleteEdge { edge_id } => {
-            g.delete_edge(*edge_id);
+            graph.delete_edge(*edge_id);
         }
         WalEntryData::SetProperty {
             target_id,
@@ -717,11 +718,9 @@ async fn apply_wal_entry(graph: &Arc<RwLock<Graph>>, entry: &WalEntryData) {
                 .unwrap_or_else(|_| PropertyValue::String(value.clone()));
 
             if *is_node {
-                if let Some(node) = g.get_node_mut(*target_id) {
-                    node.set_property(key, prop_val);
-                }
-            } else if let Some(edge) = g.get_edge_mut(*target_id) {
-                edge.set_property(key, prop_val);
+                graph.set_node_property(*target_id, key, prop_val);
+            } else {
+                graph.set_edge_property(*target_id, key, prop_val);
             }
         }
     }
@@ -734,7 +733,7 @@ async fn run_follower_receive_loop(
     current_lsn: Arc<AtomicU64>,
     is_leader_alive: Arc<AtomicBool>,
     last_heartbeat: Arc<RwLock<Instant>>,
-    graph: Arc<RwLock<Graph>>,
+    graph: Arc<ConcurrentGraph>,
     is_promoted: Arc<AtomicBool>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = stream.split();
@@ -796,7 +795,7 @@ async fn run_follower_receive_loop(
 
             ReplicationMessage::WalEntry { lsn, entry } => {
                 // Apply the WAL entry to the local graph (best-effort).
-                apply_wal_entry(&graph, &entry).await;
+                apply_wal_entry(&graph, &entry);
                 current_lsn.store(lsn, Ordering::SeqCst);
                 *last_heartbeat.write().await = Instant::now();
 
@@ -814,7 +813,7 @@ async fn run_follower_receive_loop(
                 match serde_json::from_slice::<Vec<WalEntryData>>(&data) {
                     Ok(entries) => {
                         for entry in &entries {
-                            apply_wal_entry(&graph, entry).await;
+                            apply_wal_entry(&graph, entry);
                         }
                         // Advance LSN to the current leader LSN so future WAL entries
                         // are applied correctly (snapshot is the baseline).
@@ -1060,9 +1059,10 @@ mod tests {
     }
 
     // 10. Verify apply_wal_entry creates nodes, edges, and sets properties
-    #[tokio::test]
-    async fn test_apply_wal_entry_create_node_multilabel() {
-        let graph = Arc::new(RwLock::new(Graph::new()));
+    #[test]
+    fn test_apply_wal_entry_create_node_multilabel() {
+        use maharit_core::ConcurrentGraph;
+        let graph = Arc::new(ConcurrentGraph::new());
 
         apply_wal_entry(
             &graph,
@@ -1070,19 +1070,18 @@ mod tests {
                 node_id: 0,
                 labels: vec!["Person".to_string(), "Employee".to_string()],
             },
-        )
-        .await;
+        );
 
-        let g = graph.read().await;
-        assert_eq!(g.node_count(), 1);
-        let node = g.get_node(0).unwrap();
-        assert!(node.has_label("Person"));
-        assert!(node.has_label("Employee"));
+        assert_eq!(graph.node_count(), 1);
+        let labels = graph.with_node(0, |n| n.labels.clone()).unwrap();
+        assert!(labels.contains(&"Person".to_string()));
+        assert!(labels.contains(&"Employee".to_string()));
     }
 
-    #[tokio::test]
-    async fn test_apply_wal_entry_set_property() {
-        let graph = Arc::new(RwLock::new(Graph::new()));
+    #[test]
+    fn test_apply_wal_entry_set_property() {
+        use maharit_core::ConcurrentGraph;
+        let graph = Arc::new(ConcurrentGraph::new());
 
         apply_wal_entry(
             &graph,
@@ -1090,8 +1089,7 @@ mod tests {
                 node_id: 0,
                 labels: vec!["Person".to_string()],
             },
-        )
-        .await;
+        );
 
         apply_wal_entry(
             &graph,
@@ -1101,20 +1099,19 @@ mod tests {
                 key: "name".to_string(),
                 value: "\"Alice\"".to_string(),
             },
-        )
-        .await;
+        );
 
-        let g = graph.read().await;
-        let node = g.get_node(0).unwrap();
+        let prop = graph.with_node(0, |n| n.properties.get("name").cloned());
         assert_eq!(
-            node.get_property("name"),
-            Some(&PropertyValue::String("Alice".to_string()))
+            prop.flatten(),
+            Some(PropertyValue::String("Alice".to_string()))
         );
     }
 
-    #[tokio::test]
-    async fn test_apply_wal_entry_delete_node() {
-        let graph = Arc::new(RwLock::new(Graph::new()));
+    #[test]
+    fn test_apply_wal_entry_delete_node() {
+        use maharit_core::ConcurrentGraph;
+        let graph = Arc::new(ConcurrentGraph::new());
 
         apply_wal_entry(
             &graph,
@@ -1122,25 +1119,25 @@ mod tests {
                 node_id: 0,
                 labels: vec!["N".to_string()],
             },
-        )
-        .await;
+        );
 
-        apply_wal_entry(&graph, &WalEntryData::DeleteNode { node_id: 0 }).await;
+        apply_wal_entry(&graph, &WalEntryData::DeleteNode { node_id: 0 });
 
-        let g = graph.read().await;
-        assert_eq!(g.node_count(), 0);
+        assert_eq!(graph.node_count(), 0);
     }
 
-    #[tokio::test]
-    async fn test_follower_manager_with_graph() {
-        let shared_graph = Arc::new(RwLock::new(Graph::new()));
+    #[test]
+    fn test_follower_manager_with_graph() {
+        use maharit_core::ConcurrentGraph;
+        let shared_graph = Arc::new(ConcurrentGraph::new());
         let config = ReplicationConfig {
             role: NodeRole::Follower,
             node_id: "follower-1".to_string(),
             leader_address: Some("127.0.0.1:7699".to_string()),
             ..ReplicationConfig::default()
         };
-        let manager = FollowerReplicationManager::with_graph(config, Arc::clone(&shared_graph));
+        let manager =
+            FollowerReplicationManager::with_concurrent_graph(config, Arc::clone(&shared_graph));
         assert!(Arc::ptr_eq(&manager.graph(), &shared_graph));
     }
 

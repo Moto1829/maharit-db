@@ -101,6 +101,36 @@ impl ConcurrentGraph {
         id
     }
 
+    /// Create a node with a specific ID and multiple labels (for WAL replay).
+    ///
+    /// If the given `id` is greater than or equal to the current counter, the
+    /// counter is advanced to `id + 1` so that subsequently created nodes do
+    /// not collide with this one.
+    pub fn create_node_with_id_and_labels(&self, id: NodeId, labels: Vec<String>) -> NodeId {
+        // Advance next_node_id to at least id + 1 using a CAS loop.
+        let mut current = self.next_node_id.load(Ordering::SeqCst);
+        while current <= id {
+            match self.next_node_id.compare_exchange(
+                current,
+                id + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
+        let node = Node {
+            id,
+            labels,
+            properties: Arc::new(std::collections::HashMap::new()),
+        };
+        self.nodes.insert(id, node);
+        self.outgoing.entry(id).or_default();
+        self.incoming.entry(id).or_default();
+        id
+    }
+
     /// Return `true` if a node with this ID exists.
     pub fn contains_node(&self, id: NodeId) -> bool {
         self.nodes.contains_key(&id)

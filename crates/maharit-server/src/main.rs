@@ -270,6 +270,7 @@ fn run_server(args: &[String]) {
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_http_server();
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
                         eprintln!("Replication leader error: {}", e);
@@ -297,13 +298,19 @@ fn run_server(args: &[String]) {
                 leader_address: Some(la),
                 ..Default::default()
             };
-            let follower = Arc::new(FollowerReplicationManager::new(repl_config));
+            // graph_arc を follower と TcpServer で共有することで、
+            // WAL エントリがレプリケートされたデータをクエリから見えるようにする。
+            let follower = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+                repl_config,
+                Arc::clone(&graph_arc),
+            ));
             let follower_clone = Arc::clone(&follower);
             let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_http_server();
                 tokio::spawn(async move {
                     if let Err(e) = follower_clone.start().await {
                         eprintln!("Replication follower error: {}", e);
@@ -325,6 +332,7 @@ fn run_server(args: &[String]) {
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_http_server();
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
                     std::process::exit(1);
@@ -332,6 +340,25 @@ fn run_server(args: &[String]) {
             });
         }
     }
+}
+
+/// Spawn the HTTP monitoring server (metrics + health) on port 9090 in the background.
+fn spawn_http_server() {
+    use crate::http_server::{HealthState, HttpConfig, HttpServer};
+    use crate::metrics::Metrics;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let metrics = Arc::new(Metrics::new());
+    let health = Arc::new(HealthState::default());
+    let config = HttpConfig::default(); // binds to 0.0.0.0:9090
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server = HttpServer::new(config, metrics, health);
+    tokio::spawn(async move {
+        if let Err(e) = server.start(shutdown).await {
+            eprintln!("HTTP server error: {}", e);
+        }
+    });
 }
 
 /// Spawn a background task that waits for SIGINT/SIGTERM, saves the database, then exits.
