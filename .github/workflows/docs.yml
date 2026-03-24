@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -23,18 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: peaceiris/actions-mdbook@v2
+      - uses: actions/setup-python@v5
         with:
-          mdbook-version: latest
+          python-version: '3.x'
 
-      - uses: actions/configure-pages@v5
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material
 
-      - name: Build mdBook
-        run: mdbook build docs/
+      - uses: actions/configure-pages@v4
+
+      - name: Build MkDocs
+        run: mkdocs build --site-dir _site
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ./docs/book
+          path: _site
 
   deploy:
     environment:
