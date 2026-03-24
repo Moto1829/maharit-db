@@ -8,6 +8,7 @@ docs_dir: docs
 
 theme:
   name: material
+  custom_dir: overrides
   language: ja
   features:
     - navigation.tabs
@@ -18,10 +19,6 @@ theme:
     - search.highlight
     - content.code.copy
 
-extra:
-  analytics:
-    provider: google
-    property: G-452HXMLL62
 
 markdown_extensions:
   - pymdownx.highlight:
