@@ -947,6 +947,18 @@ async fn execute_query(
 ///
 /// Property changes are not tracked automatically (a future improvement could
 /// compare property maps before and after).
+/// Serialize a `PropertyValue` to a JSON string for WAL transport.
+fn property_value_to_wal_string(val: &PropertyValue) -> String {
+    match val {
+        PropertyValue::Null => "null".to_string(),
+        PropertyValue::Bool(b) => b.to_string(),
+        PropertyValue::Int(n) => n.to_string(),
+        PropertyValue::Float(n) => n.to_string(),
+        PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        other => serde_json::to_string(&other.to_string()).unwrap_or_default(),
+    }
+}
+
 async fn emit_wal_diff(
     graph: &dyn GraphBackend,
     node_ids_before: &HashSet<NodeId>,
@@ -962,6 +974,18 @@ async fn emit_wal_diff(
                     labels: node.labels.clone(),
                 })
                 .await;
+            // Replicate properties of the new node.
+            for (key, val) in node.properties.iter() {
+                let value = property_value_to_wal_string(val);
+                replication
+                    .append_wal_entry(WalEntryData::SetProperty {
+                        target_id: node.id,
+                        is_node: true,
+                        key: key.clone(),
+                        value,
+                    })
+                    .await;
+            }
         }
     }
     for &old_id in node_ids_before {
@@ -983,6 +1007,18 @@ async fn emit_wal_diff(
                     label: edge.label.clone(),
                 })
                 .await;
+            // Replicate properties of the new edge.
+            for (key, val) in edge.properties.iter() {
+                let value = property_value_to_wal_string(val);
+                replication
+                    .append_wal_entry(WalEntryData::SetProperty {
+                        target_id: edge.id,
+                        is_node: false,
+                        key: key.clone(),
+                        value,
+                    })
+                    .await;
+            }
         }
     }
     for &old_id in edge_ids_before {

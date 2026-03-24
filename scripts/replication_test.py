@@ -182,7 +182,8 @@ def test_follower_read_consistency(followers: list, names: list):
 
         resp = follower.query("MATCH (n:ReplTest) RETURN n.name ORDER BY n.name")
         rows = resp.get("rows", [])
-        actual_names = sorted(r.get("n.name", "") for r in rows)
+        # サーバーは文字列を "\"Alice\"" 形式で返す（REPL 表示用クォート）ので strip する
+        actual_names = sorted(r.get("n.name", "").strip('"') for r in rows)
         expected_names = sorted(names)
 
         check(f"フォロワー{i}: 全ノード名が一致",
