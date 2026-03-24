@@ -1,0 +1,87 @@
+services:
+  leader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: maharit-leader
+    command:
+      - /app/maharit
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "7687"
+      - --data
+      - /data/maharit.db
+      - --replication-role
+      - leader
+      - --replication-bind
+      - "0.0.0.0:7688"
+    volumes:
+      - leader-data:/data
+    ports:
+      - "7687:7687"   # クライアント接続用
+      - "7688:7688"   # レプリケーション用
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  follower1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: maharit-follower1
+    command:
+      - /app/maharit
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "7687"
+      - --data
+      - /data/maharit.db
+      - --replication-role
+      - follower
+      - --leader-addr
+      - "leader:7688"
+    volumes:
+      - follower1-data:/data
+    ports:
+      - "7689:7687"   # クライアント接続用（ホスト 7689 → コンテナ 7687）
+    depends_on:
+      leader:
+        condition: service_healthy
+
+  follower2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: maharit-follower2
+    command:
+      - /app/maharit
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "7687"
+      - --data
+      - /data/maharit.db
+      - --replication-role
+      - follower
+      - --leader-addr
+      - "leader:7688"
+    volumes:
+      - follower2-data:/data
+    ports:
+      - "7690:7687"   # クライアント接続用（ホスト 7690 → コンテナ 7687）
+    depends_on:
+      leader:
+        condition: service_healthy
+
+volumes:
+  leader-data:
+  follower1-data:
+  follower2-data:
