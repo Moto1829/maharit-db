@@ -217,8 +217,7 @@ impl WalGroupCommitter {
                 // WalError は Clone でないため、エラーメッセージを文字列化して配布する
                 let msg = e.to_string();
                 for (_, tx) in pending.drain(..) {
-                    let _ = tx.send(Err(WalError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    let _ = tx.send(Err(WalError::Io(std::io::Error::other(
                         msg.clone(),
                     ))));
                 }

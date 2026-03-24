@@ -27,6 +27,7 @@ enum CoordRequest {
     Query {
         query: String,
         #[serde(rename = "txId")]
+        #[allow(dead_code)]
         tx_id: Option<u64>,
     },
     #[serde(rename = "ping")]

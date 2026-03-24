@@ -1701,10 +1701,10 @@ impl<'a> Executor<'a> {
             .collect();
 
         for node_id in node_ids {
-            if let Some(node) = self.graph_ref().get_node(node_id) {
-                if let Some(val) = node.get_property(&ci.property) {
-                    self.property_index.index_property(node_id, &ci.property, val);
-                }
+            if let Some(node) = self.graph_ref().get_node(node_id)
+                && let Some(val) = node.get_property(&ci.property)
+            {
+                self.property_index.index_property(node_id, &ci.property, val);
             }
         }
 
@@ -2382,22 +2382,22 @@ impl<'a> Executor<'a> {
             let mut used_index = false;
             if let Some(label) = pattern.labels.first() {
                 'index_loop: for (prop_key, prop_expr) in &pattern.properties {
-                    if self.property_index.has_index(label, prop_key) {
-                        if let Expression::Literal(lit) = prop_expr {
-                            let prop_val = PropertyValue::from(lit.clone());
-                            let candidate_ids = self.property_index.find_by_property(prop_key, &prop_val);
-                            for node_id in candidate_ids {
-                                if self.node_matches_pattern(node_id, pattern, &bindings)? {
-                                    let mut new_bindings = bindings.clone();
-                                    if let Some(var) = &pattern.variable {
-                                        new_bindings.insert(var.clone(), BindingValue::Node(node_id));
-                                    }
-                                    result.push(new_bindings);
+                    if self.property_index.has_index(label, prop_key)
+                        && let Expression::Literal(lit) = prop_expr
+                    {
+                        let prop_val = PropertyValue::from(lit.clone());
+                        let candidate_ids = self.property_index.find_by_property(prop_key, &prop_val);
+                        for node_id in candidate_ids {
+                            if self.node_matches_pattern(node_id, pattern, &bindings)? {
+                                let mut new_bindings = bindings.clone();
+                                if let Some(var) = &pattern.variable {
+                                    new_bindings.insert(var.clone(), BindingValue::Node(node_id));
                                 }
+                                result.push(new_bindings);
                             }
-                            used_index = true;
-                            break 'index_loop;
                         }
+                        used_index = true;
+                        break 'index_loop;
                     }
                 }
             }
