@@ -758,4 +758,140 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    // ── save_concurrent / load_concurrent ラウンドトリップ ───────────────────
+
+    #[test]
+    fn test_concurrent_roundtrip_nodes_and_properties() {
+        use maharit_core::ConcurrentGraph;
+
+        let graph = ConcurrentGraph::new();
+        let id = graph.create_node_with_labels(vec!["Person".to_string()]);
+        graph.set_node_property(id, "name", PropertyValue::String("Alice".to_string()));
+        graph.set_node_property(id, "age", PropertyValue::Int(30));
+        graph.set_node_property(id, "active", PropertyValue::Bool(true));
+        graph.set_node_property(id, "score", PropertyValue::Float(9.5));
+
+        let path = "/tmp/maharit_test_concurrent_props.db";
+        PersistentStorage::save_concurrent(&graph, path).unwrap();
+
+        let loaded = PersistentStorage::load_concurrent(path).unwrap();
+        assert_eq!(loaded.node_count(), 1);
+
+        let name = loaded.with_node(id, |n| n.properties.get("name").cloned()).unwrap();
+        let age  = loaded.with_node(id, |n| n.properties.get("age").cloned()).unwrap();
+        let active = loaded.with_node(id, |n| n.properties.get("active").cloned()).unwrap();
+        let score  = loaded.with_node(id, |n| n.properties.get("score").cloned()).unwrap();
+
+        assert_eq!(name, Some(PropertyValue::String("Alice".to_string())));
+        assert_eq!(age,  Some(PropertyValue::Int(30)));
+        assert_eq!(active, Some(PropertyValue::Bool(true)));
+        if let Some(PropertyValue::Float(f)) = score {
+            assert!((f - 9.5).abs() < 1e-6);
+        } else {
+            panic!("expected Float, got {:?}", score);
+        }
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_roundtrip_edges() {
+        use maharit_core::ConcurrentGraph;
+
+        let graph = ConcurrentGraph::new();
+        let a = graph.create_node_with_labels(vec!["Src".to_string()]);
+        let b = graph.create_node_with_labels(vec!["Dst".to_string()]);
+        graph.create_edge(a, b, "LINK").unwrap();
+
+        let path = "/tmp/maharit_test_concurrent_edges.db";
+        PersistentStorage::save_concurrent(&graph, path).unwrap();
+
+        let loaded = PersistentStorage::load_concurrent(path).unwrap();
+        assert_eq!(loaded.node_count(), 2);
+        assert_eq!(loaded.edge_count(), 1);
+
+        // load_concurrent は DashMap の非決定的な順序でノードIDをリマップするため
+        // 元のIDではなく、ラベルとエッジラベルで検証する
+        let edge = loaded.edges().next().unwrap();
+        let edge = edge.value();
+        assert_eq!(edge.label, "LINK");
+        let src_labels = loaded.with_node(edge.from, |n| n.labels.clone()).unwrap();
+        let dst_labels = loaded.with_node(edge.to, |n| n.labels.clone()).unwrap();
+        assert!(src_labels.contains(&"Src".to_string()) || dst_labels.contains(&"Src".to_string()),
+            "エッジの端点に Src ラベルが存在すること");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_roundtrip_labels() {
+        use maharit_core::ConcurrentGraph;
+
+        let graph = ConcurrentGraph::new();
+        let id = graph.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
+
+        let path = "/tmp/maharit_test_concurrent_labels.db";
+        PersistentStorage::save_concurrent(&graph, path).unwrap();
+
+        let loaded = PersistentStorage::load_concurrent(path).unwrap();
+        let labels = loaded.with_node(id, |n| n.labels.clone()).unwrap();
+        assert!(labels.contains(&"Person".to_string()));
+        assert!(labels.contains(&"Employee".to_string()));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_roundtrip_large_dataset() {
+        use maharit_core::ConcurrentGraph;
+
+        let graph = ConcurrentGraph::new();
+
+        // 100件のノードを作成
+        let mut ids = Vec::new();
+        for i in 0..100u64 {
+            let id = graph.create_node_with_labels(vec!["Item".to_string()]);
+            graph.set_node_property(id, "idx", PropertyValue::Int(i as i64));
+            graph.set_node_property(id, "name", PropertyValue::String(format!("item-{}", i)));
+            ids.push(id);
+        }
+
+        // 50件のエッジを作成
+        for i in 0..50usize {
+            graph.create_edge(ids[i], ids[i + 1], "NEXT").ok();
+        }
+
+        let path = "/tmp/maharit_test_concurrent_large.db";
+        PersistentStorage::save_concurrent(&graph, path).unwrap();
+
+        let loaded = PersistentStorage::load_concurrent(path).unwrap();
+        assert_eq!(loaded.node_count(), 100, "全ノードが復元されること");
+        assert_eq!(loaded.edge_count(), 50, "全エッジが復元されること");
+
+        // load_concurrent はノードIDをリマップするため、
+        // プロパティ値でノードを探して検証する
+        let found_42 = loaded.nodes().any(|r| {
+            let n = r.value();
+            n.properties.get("idx") == Some(&PropertyValue::Int(42))
+        });
+        assert!(found_42, "idx=42 のノードが復元されていること");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_roundtrip_empty_graph() {
+        use maharit_core::ConcurrentGraph;
+
+        let graph = ConcurrentGraph::new();
+        let path = "/tmp/maharit_test_concurrent_empty.db";
+        PersistentStorage::save_concurrent(&graph, path).unwrap();
+
+        let loaded = PersistentStorage::load_concurrent(path).unwrap();
+        assert_eq!(loaded.node_count(), 0);
+        assert_eq!(loaded.edge_count(), 0);
+
+        std::fs::remove_file(path).ok();
+    }
 }

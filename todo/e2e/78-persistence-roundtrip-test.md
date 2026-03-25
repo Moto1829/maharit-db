@@ -48,7 +48,7 @@ python3 scripts/persistence_test.py
 
 ## 完了条件
 
-- [ ] `scripts/persistence_test.py` が実装されていること
-- [ ] シャットダウン → 再起動後にノード・エッジが復元されることを検証
-- [ ] 正常終了（SIGTERM）と強制終了（SIGKILL）の両方をテスト
+- [x] `scripts/persistence_test.py` が実装されていること
+- [x] シャットダウン → 再起動後にノード・エッジが復元されることを検証
+- [x] 正常終了（SIGTERM）と強制終了（SIGKILL）の両方をテスト
 - [ ] CI パイプライン（Task 77）に組み込まれていること
