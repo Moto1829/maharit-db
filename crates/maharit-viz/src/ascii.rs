@@ -160,25 +160,24 @@ impl AsciiRenderer {
         queue.push_back((root, 0));
         visited.insert(root);
 
-        let mut current_depth = 0;
+        let mut current_depth = usize::MAX;
 
         while let Some((node_id, depth)) = queue.pop_front() {
             if depth > max_depth {
                 continue;
             }
 
-            // 新しいレイヤーの開始
-            if depth > current_depth {
-                writeln!(output).unwrap();
+            // 新しいレイヤーに入ったときのみヘッダーを表示
+            if depth != current_depth {
+                if current_depth != usize::MAX {
+                    writeln!(output).unwrap();
+                }
+                if depth == 0 {
+                    writeln!(output, "Layer 0 (root):").unwrap();
+                } else {
+                    writeln!(output, "Layer {}:", depth).unwrap();
+                }
                 current_depth = depth;
-            }
-
-            if depth == 0 {
-                writeln!(output, "Layer 0 (root):").unwrap();
-            } else if depth > current_depth - 1
-                || (depth == current_depth && current_depth != depth)
-            {
-                writeln!(output, "Layer {}:", depth).unwrap();
             }
 
             // ノードを表示
