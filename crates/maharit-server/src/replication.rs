@@ -288,7 +288,14 @@ impl LeaderReplicationManager {
     /// the listener is bound.
     pub async fn start(&self) -> Result<(), ReplicationError> {
         let listener = TcpListener::bind(&self.config.replication_bind_address).await?;
+        self.start_with_listener(listener).await
+    }
 
+    /// Start the replication listener with an existing `TcpListener`.
+    ///
+    /// Useful for tests: bind to port 0 externally, retrieve the actual address
+    /// via `listener.local_addr()`, then pass the listener here.
+    pub async fn start_with_listener(&self, listener: TcpListener) -> Result<(), ReplicationError> {
         let config = self.config.clone();
         let lsn = Arc::clone(&self.lsn);
         let followers = Arc::clone(&self.followers);
@@ -1233,5 +1240,312 @@ mod tests {
         let manager = LeaderReplicationManager::with_graph(config, graph);
         assert!(manager.graph.is_some());
         assert_eq!(manager.lsn.load(Ordering::SeqCst), 0);
+    }
+
+    // ── Replication integration tests ────────────────────────────────────────
+    //
+    // These tests spin up in-process leader and follower nodes connected over
+    // loopback TCP, then verify that data written to the leader is propagated
+    // to the follower and queryable via its TcpServer.
+
+    use crate::tcp_server::{Request, Response, ServerConfig, TcpServer};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Send one request and await one response over a raw TCP stream.
+    async fn repl_send_recv(stream: &mut tokio::net::TcpStream, req: &Request) -> Response {
+        let json = serde_json::to_vec(req).unwrap();
+        let len = json.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&json).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let body_len = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Start a `TcpServer` on a random port and return the bound address.
+    async fn start_query_server(graph: Arc<ConcurrentGraph>, repl: Option<Arc<LeaderReplicationManager>>) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut server = TcpServer::with_graph_arc(
+            ServerConfig {
+                bind_address: addr.to_string(),
+                read_timeout: Duration::from_secs(5),
+                write_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+            graph,
+        );
+        if let Some(r) = repl {
+            server = server.with_replication(r);
+        }
+
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
+    }
+
+    /// Start a `LeaderReplicationManager` on a random port and return
+    /// `(manager, replication_addr)`.
+    async fn start_leader_replication() -> (Arc<LeaderReplicationManager>, std::net::SocketAddr) {
+        let repl_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let repl_addr = repl_listener.local_addr().unwrap();
+
+        let config = ReplicationConfig {
+            role: NodeRole::Leader,
+            node_id: "leader".to_string(),
+            replication_bind_address: repl_addr.to_string(),
+            leader_address: None,
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+        };
+        let manager = Arc::new(LeaderReplicationManager::new(config));
+        manager.start_with_listener(repl_listener).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        (manager, repl_addr)
+    }
+
+    /// Start a follower replication manager connecting to `leader_addr`.
+    /// Returns `(manager, follower_graph)`.
+    async fn start_follower_replication(
+        leader_addr: std::net::SocketAddr,
+    ) -> (Arc<FollowerReplicationManager>, Arc<ConcurrentGraph>) {
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+        let config = ReplicationConfig {
+            role: NodeRole::Follower,
+            node_id: "follower".to_string(),
+            replication_bind_address: "127.0.0.1:0".to_string(),
+            leader_address: Some(leader_addr.to_string()),
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+        };
+        let manager = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            config,
+            Arc::clone(&follower_graph),
+        ));
+        manager.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (manager, follower_graph)
+    }
+
+    #[tokio::test]
+    async fn replication_integration_follower_receives_created_node() {
+        let (leader_repl, repl_addr) = start_leader_replication().await;
+        let (_, follower_graph) = start_follower_replication(repl_addr).await;
+
+        // Leader: start query server with replication wired in
+        let leader_graph = Arc::new(ConcurrentGraph::new());
+        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+
+        // Follower: start query server against the follower's graph
+        let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
+
+        // Write to leader
+        let mut lconn = tokio::net::TcpStream::connect(leader_addr).await.unwrap();
+        repl_send_recv(
+            &mut lconn,
+            &Request::Query {
+                query: "CREATE (n:Test {name: 'Alice'}) RETURN n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        // Wait for WAL propagation
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Read from follower
+        let mut fconn = tokio::net::TcpStream::connect(follower_addr).await.unwrap();
+        let resp = repl_send_recv(
+            &mut fconn,
+            &Request::Query {
+                query: "MATCH (n:Test) RETURN n.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty(), "follower should have the node created on leader");
+                assert_eq!(rows[0].get("n.name").map(String::as_str), Some("\"Alice\""));
+            }
+            other => panic!("expected Result from follower, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_integration_follower_receives_node_properties() {
+        let (leader_repl, repl_addr) = start_leader_replication().await;
+        let (_, follower_graph) = start_follower_replication(repl_addr).await;
+
+        let leader_graph = Arc::new(ConcurrentGraph::new());
+        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
+
+        // Write node with string + integer + bool properties
+        let mut lconn = tokio::net::TcpStream::connect(leader_addr).await.unwrap();
+        repl_send_recv(
+            &mut lconn,
+            &Request::Query {
+                query: "CREATE (n:Prop {s: 'hello', i: 99, b: true}) RETURN n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut fconn = tokio::net::TcpStream::connect(follower_addr).await.unwrap();
+
+        // String property
+        let resp = repl_send_recv(
+            &mut fconn,
+            &Request::Query { query: "MATCH (n:Prop) RETURN n.s".to_string(), tx_id: None },
+        ).await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty());
+                assert_eq!(rows[0].get("n.s").map(String::as_str), Some("\"hello\""));
+            }
+            other => panic!("string property: {:?}", other),
+        }
+
+        // Integer property
+        let resp = repl_send_recv(
+            &mut fconn,
+            &Request::Query { query: "MATCH (n:Prop) RETURN n.i".to_string(), tx_id: None },
+        ).await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty());
+                assert_eq!(rows[0].get("n.i").map(String::as_str), Some("99"));
+            }
+            other => panic!("integer property: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_integration_follower_receives_edge() {
+        let (leader_repl, repl_addr) = start_leader_replication().await;
+        let (_, follower_graph) = start_follower_replication(repl_addr).await;
+
+        let leader_graph = Arc::new(ConcurrentGraph::new());
+        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
+
+        // Create two nodes and an edge on the leader
+        let mut lconn = tokio::net::TcpStream::connect(leader_addr).await.unwrap();
+        for q in [
+            "CREATE (n:Src {name: 'src'})",
+            "CREATE (n:Dst {name: 'dst'})",
+            "MATCH (a:Src {name: 'src'}), (b:Dst {name: 'dst'}) CREATE (a)-[:LINK]->(b)",
+        ] {
+            repl_send_recv(&mut lconn, &Request::Query { query: q.to_string(), tx_id: None }).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Traverse on follower
+        let mut fconn = tokio::net::TcpStream::connect(follower_addr).await.unwrap();
+        let resp = repl_send_recv(
+            &mut fconn,
+            &Request::Query {
+                query: "MATCH (a:Src)-[:LINK]->(b:Dst) RETURN b.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty(), "follower should see the edge traversal");
+                assert_eq!(rows[0].get("b.name").map(String::as_str), Some("\"dst\""));
+            }
+            other => panic!("expected Result for edge traversal, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_integration_follower_receives_deletion() {
+        let (leader_repl, repl_addr) = start_leader_replication().await;
+        let (_, follower_graph) = start_follower_replication(repl_addr).await;
+
+        let leader_graph = Arc::new(ConcurrentGraph::new());
+        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
+
+        let mut lconn = tokio::net::TcpStream::connect(leader_addr).await.unwrap();
+
+        // Create then delete
+        repl_send_recv(
+            &mut lconn,
+            &Request::Query {
+                query: "CREATE (n:Del {name: 'gone'}) RETURN n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        repl_send_recv(
+            &mut lconn,
+            &Request::Query {
+                query: "MATCH (n:Del {name: 'gone'}) DETACH DELETE n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Follower should return 0 rows
+        let mut fconn = tokio::net::TcpStream::connect(follower_addr).await.unwrap();
+        let resp = repl_send_recv(
+            &mut fconn,
+            &Request::Query {
+                query: "MATCH (n:Del) RETURN n.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(rows.is_empty(), "deleted node should not appear on follower");
+            }
+            other => panic!("expected Result, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_integration_follower_and_server_share_same_graph() {
+        let leader_addr_str = "127.0.0.1:0";
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+
+        let config = ReplicationConfig {
+            role: NodeRole::Follower,
+            node_id: "f".to_string(),
+            replication_bind_address: leader_addr_str.to_string(),
+            leader_address: Some("127.0.0.1:1".to_string()), // dummy; not starting
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+        };
+        let follower_repl = FollowerReplicationManager::with_concurrent_graph(
+            config,
+            Arc::clone(&follower_graph),
+        );
+
+        // The follower replication manager's graph and the TcpServer's graph must be the same Arc
+        assert!(
+            Arc::ptr_eq(&follower_repl.graph(), &follower_graph),
+            "FollowerReplicationManager and TcpServer must share the same graph Arc"
+        );
     }
 }

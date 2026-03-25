@@ -78,8 +78,8 @@ async fn test_follower_receives_created_node() {
 
 ## 完了条件
 
-- [ ] フォロワーへのクエリでリーダー書き込みデータが取得できることを検証
-- [ ] プロパティ（文字列・数値）の伝播を検証
-- [ ] エッジの伝播を検証
-- [ ] 削除の伝播を検証
-- [ ] `cargo test -p maharit-server replication` が通ること
+- [x] フォロワーへのクエリでリーダー書き込みデータが取得できることを検証
+- [x] プロパティ（文字列・数値）の伝播を検証
+- [x] エッジの伝播を検証
+- [x] 削除の伝播を検証
+- [x] `cargo test -p maharit-server replication` が通ること
