@@ -53,6 +53,6 @@ async fn start_test_server() -> (TcpServer, String) {
 
 ## 完了条件
 
-- [ ] `cargo test -p maharit-server integration` が通ること
-- [ ] 実際のソケット通信を経由したクエリ実行テストが3件以上あること
-- [ ] プロパティの保存・取得が検証されていること
+- [x] `cargo test -p maharit-server integration` が通ること
+- [x] 実際のソケット通信を経由したクエリ実行テストが3件以上あること（7件実装）
+- [x] プロパティの保存・取得が検証されていること

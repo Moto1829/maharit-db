@@ -53,7 +53,7 @@ impl Default for ServerConfig {
 pub const DEFAULT_CHUNK_SIZE: usize = 100;
 
 /// Request message from client
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
     /// Execute a query
@@ -117,7 +117,7 @@ fn default_chunk_size() -> usize {
 }
 
 /// Response message to client
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
     /// Query result
@@ -289,6 +289,14 @@ impl TcpServer {
         tracing::info!(address = %self.config.bind_address, "Server listening");
         println!("Server listening on {}", self.config.bind_address);
 
+        self.start_with_listener(listener).await
+    }
+
+    /// Start the server with an existing listener.
+    ///
+    /// Useful for testing: bind to port 0 externally, retrieve the actual
+    /// address via `listener.local_addr()`, then pass the listener here.
+    pub async fn start_with_listener(&self, listener: TcpListener) -> std::io::Result<()> {
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -1302,5 +1310,270 @@ mod tests {
 
         // One DeleteNode entry should have been emitted.
         assert_eq!(repl.get_stats().current_lsn, 1);
+    }
+
+    // ── Integration tests (actual TCP socket communication) ──────────────────
+
+    /// Send a request and receive a response over a raw TCP stream.
+    async fn send_recv(stream: &mut TcpStream, req: &Request) -> Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let json = serde_json::to_vec(req).unwrap();
+        let len = json.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&json).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let body_len = u32::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Bind to port 0, spawn the server, return the bound address.
+    async fn start_test_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            read_timeout: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+
+        // Give the server task a moment to enter the accept loop.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
+    }
+
+    #[tokio::test]
+    async fn integration_ping_returns_pong() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let resp = send_recv(&mut stream, &Request::Ping).await;
+        assert!(matches!(resp, Response::Pong), "expected Pong, got {:?}", resp);
+    }
+
+    #[tokio::test]
+    async fn integration_create_and_match_node() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // CREATE
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "CREATE failed: {:?}", resp);
+
+        // MATCH
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:Person {name: 'Alice'}) RETURN n.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty(), "expected at least one row");
+                // String values are returned as JSON-quoted strings (e.g. `"Alice"`)
+                assert_eq!(rows[0].get("n.name").map(String::as_str), Some("\"Alice\""));
+            }
+            other => panic!("expected Result, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_property_types() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // CREATE node with string, integer, float, boolean properties
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (n:Item {s: 'hello', i: 42, f: 3.14, b: true}) RETURN n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "CREATE failed: {:?}", resp);
+
+        // MATCH each property individually
+        // String values are JSON-quoted; numeric/bool values are plain
+        for (col, expected) in [
+            ("n.s", "\"hello\""),
+            ("n.i", "42"),
+            ("n.b", "true"),
+        ] {
+            let resp = send_recv(
+                &mut stream,
+                &Request::Query {
+                    query: format!("MATCH (n:Item) RETURN {}", col),
+                    tx_id: None,
+                },
+            )
+            .await;
+            match resp {
+                Response::Result { rows } => {
+                    assert!(!rows.is_empty(), "no rows for {}", col);
+                    assert_eq!(
+                        rows[0].get(col).map(String::as_str),
+                        Some(expected),
+                        "mismatch for {}",
+                        col
+                    );
+                }
+                other => panic!("expected Result for {}, got {:?}", col, other),
+            }
+        }
+
+        // Float property — just check it parses as a number
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:Item) RETURN n.f".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                let val: f64 = rows[0]["n.f"].parse().expect("n.f should be a float");
+                assert!((val - 3.14).abs() < 0.01);
+            }
+            other => panic!("expected Result for n.f, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_edge_traversal() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Create two nodes and an edge between them
+        for q in [
+            "CREATE (n:A {name: 'src'})",
+            "CREATE (n:B {name: 'dst'})",
+            "MATCH (a:A {name: 'src'}), (b:B {name: 'dst'}) CREATE (a)-[:LINK]->(b)",
+        ] {
+            let resp = send_recv(
+                &mut stream,
+                &Request::Query { query: q.to_string(), tx_id: None },
+            )
+            .await;
+            assert!(
+                matches!(resp, Response::Result { .. }),
+                "setup query failed for '{}': {:?}", q, resp
+            );
+        }
+
+        // Traverse: MATCH (a)-[:LINK]->(b) RETURN b.name
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (a:A)-[:LINK]->(b:B) RETURN b.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty(), "traversal returned no rows");
+                assert_eq!(rows[0].get("b.name").map(String::as_str), Some("\"dst\""));
+            }
+            other => panic!("expected Result, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_syntax_error_returns_error_response() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "THIS IS NOT VALID CYPHER !!!".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "expected Error response, got {:?}", resp
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_immediate_disconnect_does_not_crash_server() {
+        let addr = start_test_server().await;
+
+        // Connect and drop immediately without sending anything
+        let _stream = TcpStream::connect(addr).await.unwrap();
+        drop(_stream);
+
+        // Give the server time to handle the disconnect
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Server should still be alive — verify with a fresh ping
+        let mut stream2 = TcpStream::connect(addr).await.unwrap();
+        let resp = send_recv(&mut stream2, &Request::Ping).await;
+        assert!(matches!(resp, Response::Pong));
+    }
+
+    #[tokio::test]
+    async fn integration_delete_node() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Create
+        send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (n:TmpNode {name: 'delete_me'})".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        // Delete
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:TmpNode {name: 'delete_me'}) DETACH DELETE n".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "DELETE failed: {:?}", resp);
+
+        // Verify gone
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:TmpNode {name: 'delete_me'}) RETURN n.name".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => assert!(rows.is_empty(), "node should be deleted"),
+            other => panic!("expected Result, got {:?}", other),
+        }
     }
 }
