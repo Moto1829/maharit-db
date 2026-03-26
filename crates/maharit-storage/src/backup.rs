@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use maharit_core::{Graph, PropertyValue};
+use maharit_core::{Graph, IndexDefinition, PropertyIndex, PropertyValue};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -180,7 +180,7 @@ impl Backup {
         Self::write_string(&mut writer, &metadata.description)?;
 
         // Serialize graph data to a buffer
-        let graph_data = Self::serialize_graph(graph)?;
+        let graph_data = Self::serialize_graph(graph, &[])?;
 
         // Write graph data (compress if requested)
         Self::write_compressed(&mut writer, &graph_data, options.compression)?;
@@ -214,7 +214,7 @@ impl Backup {
         // Acquire read lock and serialise the graph data while holding it
         let (graph_data, node_count, edge_count) = {
             let g = graph.read().await;
-            let data = Self::serialize_graph(&g)?;
+            let data = Self::serialize_graph(&g, &[])?;
             (data, g.node_count() as u64, g.edge_count() as u64)
         };
 
@@ -295,6 +295,134 @@ impl Backup {
 
         // Deserialize graph
         Self::deserialize_graph(&graph_data)
+    }
+
+    /// Create a backup of a graph along with its property index definitions.
+    ///
+    /// The index definitions are appended to the serialized graph data so that
+    /// [`restore_with_index`] can reconstruct a fully populated `PropertyIndex`.
+    /// The actual indexed data (which nodes map to which values) is rebuilt
+    /// during restore by iterating the nodes in the restored graph.
+    ///
+    /// # Arguments
+    /// * `graph`          - The graph to back up
+    /// * `property_index` - The property index whose definitions should be saved
+    /// * `path`           - Destination file path
+    /// * `options`        - Compression / description options
+    ///
+    /// # Returns
+    /// The metadata of the created backup
+    pub fn create_with_index(
+        graph: &Graph,
+        property_index: &PropertyIndex,
+        path: impl AsRef<Path>,
+        options: &BackupOptions,
+    ) -> Result<BackupMetadata> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before UNIX epoch")
+            .as_secs();
+
+        let metadata = BackupMetadata {
+            version: VERSION,
+            timestamp,
+            node_count: graph.node_count() as u64,
+            edge_count: graph.edge_count() as u64,
+            compression: options.compression,
+            description: options.description.clone(),
+        };
+
+        // Write header
+        writer.write_all(MAGIC)?;
+        writer.write_all(&metadata.version.to_le_bytes())?;
+        writer.write_all(&metadata.timestamp.to_le_bytes())?;
+        writer.write_all(&metadata.node_count.to_le_bytes())?;
+        writer.write_all(&metadata.edge_count.to_le_bytes())?;
+        writer.write_all(&[metadata.compression.to_byte()])?;
+        Self::write_string(&mut writer, &metadata.description)?;
+
+        // Collect index definitions and serialize graph + indexes together
+        let index_defs: Vec<IndexDefinition> = property_index
+            .list_indexes()
+            .into_iter()
+            .cloned()
+            .collect();
+        let graph_data = Self::serialize_graph(graph, &index_defs)?;
+
+        Self::write_compressed(&mut writer, &graph_data, options.compression)?;
+
+        writer.flush()?;
+        Ok(metadata)
+    }
+
+    /// Restore a graph and its property index from a backup file.
+    ///
+    /// The index definitions embedded in the backup are used to recreate the
+    /// `PropertyIndex`.  Each definition is registered via
+    /// `PropertyIndex::create_index` and then all matching node properties are
+    /// re-indexed by iterating the restored graph.
+    ///
+    /// Backups created with [`create`] (which contain no index section) are
+    /// handled gracefully: an empty `PropertyIndex` is returned.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the backup file
+    ///
+    /// # Returns
+    /// A tuple of `(Graph, PropertyIndex)`
+    pub fn restore_with_index(path: impl AsRef<Path>) -> Result<(Graph, PropertyIndex)> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        // Verify magic
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(BackupError::InvalidMagic);
+        }
+
+        // Read and validate header
+        let version = Self::read_u32(&mut reader)?;
+        if version != VERSION {
+            return Err(BackupError::UnsupportedVersion(version));
+        }
+
+        let _timestamp = Self::read_u64(&mut reader)?;
+        let _node_count = Self::read_u64(&mut reader)?;
+        let _edge_count = Self::read_u64(&mut reader)?;
+
+        let mut compression_byte = [0u8; 1];
+        reader.read_exact(&mut compression_byte)?;
+        let compression = CompressionType::from_byte(compression_byte[0]);
+
+        let _description = Self::read_string(&mut reader)?;
+
+        // Decompress graph section
+        let graph_data = Self::read_compressed(reader, compression)?;
+
+        // Deserialize graph and index definitions
+        let (graph, index_defs) = Self::deserialize_graph_internal(&graph_data)?;
+
+        // Rebuild PropertyIndex: register definitions, then re-index node data
+        let mut property_index = PropertyIndex::new();
+        for def in &index_defs {
+            property_index.create_index(def.clone());
+        }
+
+        for def in &index_defs {
+            for node in graph.nodes() {
+                if node.labels.contains(&def.label) {
+                    if let Some(val) = node.get_property(&def.property) {
+                        property_index.index_property(node.id, &def.property, val);
+                    }
+                }
+            }
+        }
+
+        Ok((graph, property_index))
     }
 
     /// Read metadata from a backup file without loading the graph data.
@@ -387,7 +515,7 @@ impl Backup {
 
     // ========== Graph serialization ==========
 
-    fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
+    fn serialize_graph(graph: &Graph, indexes: &[IndexDefinition]) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
         // Write node count and edge count
@@ -413,10 +541,23 @@ impl Backup {
             Self::write_properties(&mut buffer, &edge.properties)?;
         }
 
+        // Write index definitions
+        let index_count = indexes.len() as u32;
+        buffer.write_all(&index_count.to_le_bytes())?;
+        for def in indexes {
+            Self::write_string(&mut buffer, &def.label)?;
+            Self::write_string(&mut buffer, &def.property)?;
+            buffer.write_all(&[if def.unique { 1u8 } else { 0u8 }])?;
+        }
+
         Ok(buffer)
     }
 
     fn deserialize_graph(data: &[u8]) -> Result<Graph> {
+        Ok(Self::deserialize_graph_internal(data)?.0)
+    }
+
+    fn deserialize_graph_internal(data: &[u8]) -> Result<(Graph, Vec<IndexDefinition>)> {
         let mut reader = std::io::Cursor::new(data);
 
         // Read node count and edge count
@@ -471,7 +612,29 @@ impl Backup {
             }
         }
 
-        Ok(graph)
+        // Try to read index definitions (may be absent in old format)
+        let indexes = match Self::read_u32_or_eof(&mut reader) {
+            Ok(index_count) => {
+                let mut defs = Vec::with_capacity(index_count as usize);
+                for _ in 0..index_count {
+                    let label = Self::read_string(&mut reader)?;
+                    let property = Self::read_string(&mut reader)?;
+                    let mut unique_buf = [0u8; 1];
+                    reader.read_exact(&mut unique_buf)?;
+                    let unique = unique_buf[0] != 0;
+                    let mut def = IndexDefinition::new(label, property);
+                    def.unique = unique;
+                    defs.push(def);
+                }
+                defs
+            }
+            Err(BackupError::Io(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                vec![]
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok((graph, indexes))
     }
 
     // ========== Writer helpers ==========
@@ -593,6 +756,15 @@ impl Backup {
     // ========== Reader helpers ==========
 
     fn read_u32<R: Read>(reader: &mut R) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    /// Like `read_u32` but returns `Err(BackupError::Io(UnexpectedEof))` if
+    /// the reader is already at EOF (no bytes available), allowing callers to
+    /// distinguish "no more data" from a mid-field truncation.
+    fn read_u32_or_eof<R: Read>(reader: &mut R) -> Result<u32> {
         let mut buf = [0u8; 4];
         reader.read_exact(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
@@ -1986,5 +2158,79 @@ mod tests {
 
         std::fs::remove_file(&base_backup_path).ok();
         std::fs::remove_file(&wal_path).ok();
+    }
+
+    #[test]
+    fn test_backup_restore_with_index_definitions() {
+        use maharit_core::{IndexDefinition, PropertyIndex};
+
+        // Create a graph with nodes
+        let mut graph = Graph::new();
+        let n1 = graph.create_node_with_labels(vec!["Person".to_string()]);
+        graph
+            .get_node_mut(n1)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Alice".to_string()));
+        let n2 = graph.create_node_with_labels(vec!["Person".to_string()]);
+        graph
+            .get_node_mut(n2)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Bob".to_string()));
+
+        // Create a PropertyIndex with one definition
+        let mut index = PropertyIndex::new();
+        index.create_index(IndexDefinition::new("Person", "name"));
+        // Index existing nodes
+        for node_id in [n1, n2] {
+            let val = graph
+                .get_node(node_id)
+                .unwrap()
+                .get_property("name")
+                .unwrap()
+                .clone();
+            index.index_property(node_id, "name", &val);
+        }
+
+        let path = tmp_path("test_backup_with_index.db");
+
+        // Backup with index
+        Backup::create_with_index(&graph, &index, &path, &BackupOptions::default()).unwrap();
+
+        // Restore with index
+        let (restored_graph, restored_index) = Backup::restore_with_index(&path).unwrap();
+        assert_eq!(restored_graph.node_count(), 2);
+
+        // Index definitions should be restored
+        let defs = restored_index.list_indexes();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].label, "Person");
+        assert_eq!(defs[0].property, "name");
+
+        // Index data should be queryable
+        let alice_nodes = restored_index
+            .find_by_property("name", &PropertyValue::String("Alice".to_string()));
+        assert!(!alice_nodes.is_empty());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_restore_old_format_without_index_section() {
+
+        // Restore without index should work (returns empty index)
+        let mut graph = Graph::new();
+        graph.create_node_with_labels(vec!["Node".to_string()]);
+
+        let path = tmp_path("test_backup_no_index.db");
+
+        // create() does not include index section
+        Backup::create(&graph, &path, &BackupOptions::default()).unwrap();
+
+        // restore_with_index should still work, returning empty PropertyIndex
+        let (restored_graph, restored_index) = Backup::restore_with_index(&path).unwrap();
+        assert_eq!(restored_graph.node_count(), 1);
+        assert_eq!(restored_index.list_indexes().len(), 0);
+
+        std::fs::remove_file(&path).ok();
     }
 }
