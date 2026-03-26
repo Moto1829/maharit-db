@@ -24,7 +24,7 @@
 - [x] `planner.rs` に `CreateIndex`/`DropIndex`/`ShowIndexes` プランノードを追加
 
 ### 永続化
-- [ ] バックアップ・リストア時にインデックス定義を保存・復元（未着手）
+- [x] バックアップ・リストア時にインデックス定義を保存・復元（`Backup::create_with_index` / `restore_with_index` を追加）
 
 ## 関連ファイル
 - `crates/maharit-core/src/property_index.rs` — PropertyIndex 実装
@@ -34,4 +34,4 @@
 - `crates/maharit-query/src/planner.rs` — CreateIndex/DropIndex/ShowIndexes プランノード
 
 ## ステータス
-実装完了（永続化は除く）。452 tests passing。
+全実装完了。74 tests passing（maharit-storage）。
