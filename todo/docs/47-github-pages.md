@@ -19,11 +19,8 @@ mdBook ソース内の Cypher クエリ（`{{name: ...}}`）が Liquid 構文エ
 **採用方針**: `actions/upload-pages-artifact` + `actions/deploy-pages`（GitHub 推奨の現行方式）
 - gh-pages ブランチ不要
 - mdBook ビルド結果のみをデプロイ
-- Jekyll が介在しない
 
-- [ ] `.github/workflows/docs.yml` を `actions/deploy-pages` 方式に更新
-  ```yaml
-  permissions:
+
     contents: read
     pages: write
     id-token: write
@@ -48,8 +45,8 @@ mdBook ソース内の Cypher クエリ（`{{name: ...}}`）が Liquid 構文エ
   ```
 
 ### GitHub リポジトリ設定
-- [ ] Settings > Pages > Source を **「GitHub Actions」** に変更（「Deploy from a branch」から変更）
-- [ ] 公開 URL の確認（`https://moto1829.github.io/maharit-db/`）
+- [x] Settings > Pages > Source を **「GitHub Actions」** に変更（「Deploy from a branch」から変更）
+- [x] 公開 URL の確認（`https://moto1829.github.io/maharit-db/`）
 
 ### オプション対応
 - [x] `book.toml` に `git-repository-url` を実際のリポジトリ URL で設定
