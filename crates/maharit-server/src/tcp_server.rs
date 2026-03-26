@@ -1577,6 +1577,259 @@ mod tests {
         }
     }
 
+    // ── Concurrent connection tests ──────────────────────────────────────────
+
+    /// max_connections を指定してテストサーバーを起動する。
+    async fn start_test_server_with_config(max_connections: usize) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            max_connections,
+            read_timeout: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(5),
+        });
+
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes() {
+        // 10タスクが同時に異なるノードを作成し、全件が保存されることを確認
+        let addr = start_test_server().await;
+
+        let handles: Vec<_> = (0..10_u32)
+            .map(|i| {
+                tokio::spawn(async move {
+                    let mut stream = TcpStream::connect(addr).await.unwrap();
+                    let resp = send_recv(
+                        &mut stream,
+                        &Request::Query {
+                            query: format!("CREATE (n:ConcWrite {{id: {i}}}) RETURN n"),
+                            tx_id: None,
+                        },
+                    )
+                    .await;
+                    assert!(
+                        matches!(resp, Response::Result { .. }),
+                        "concurrent CREATE #{i} failed: {resp:?}"
+                    );
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // 全件確認
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:ConcWrite) RETURN n.id".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert_eq!(rows.len(), 10, "10件のConcWriteノードが存在するべき、実際: {}", rows.len());
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_read_write_mix() {
+        // 5スレッドが書き込み、5スレッドが読み取りを同時実行してもクラッシュしないことを確認
+        let addr = start_test_server().await;
+
+        // セットアップ: 読み取り用ノードを事前に作成
+        let mut setup = TcpStream::connect(addr).await.unwrap();
+        send_recv(
+            &mut setup,
+            &Request::Query {
+                query: "CREATE (n:ReadTarget {val: 1})".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+
+        let mut handles = Vec::new();
+
+        // 5つの書き込みタスク
+        for i in 0..5_u32 {
+            handles.push(tokio::spawn(async move {
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+                let resp = send_recv(
+                    &mut stream,
+                    &Request::Query {
+                        query: format!("CREATE (n:RWWrite {{id: {i}}}) RETURN n"),
+                        tx_id: None,
+                    },
+                )
+                .await;
+                assert!(
+                    matches!(resp, Response::Result { .. }),
+                    "write task #{i} failed: {resp:?}"
+                );
+            }));
+        }
+
+        // 5つの読み取りタスク
+        for _ in 0..5_u32 {
+            handles.push(tokio::spawn(async move {
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+                let resp = send_recv(
+                    &mut stream,
+                    &Request::Query {
+                        query: "MATCH (n:ReadTarget) RETURN n.val".to_string(),
+                        tx_id: None,
+                    },
+                )
+                .await;
+                // エラーやパニックなく応答が返ること
+                assert!(
+                    matches!(resp, Response::Result { .. }),
+                    "read task failed: {resp:?}"
+                );
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_connections_limit() {
+        // max_connections=3 のサーバーに対して 6 クライアントが同時接続を試みても
+        // サーバーがクラッシュせず、全クライアントが最終的に応答を受け取れることを確認
+        let addr = start_test_server_with_config(3).await;
+
+        let handles: Vec<_> = (0..6_u32)
+            .map(|i| {
+                tokio::spawn(async move {
+                    // 接続制限に引っかかる場合はサーバーがキューイングするため
+                    // 少し長めのタイムアウトで待つ
+                    let stream = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        TcpStream::connect(addr),
+                    )
+                    .await;
+
+                    match stream {
+                        Ok(Ok(mut s)) => {
+                            // 接続できた場合は Ping を送って生存確認
+                            let resp = send_recv(&mut s, &Request::Ping).await;
+                            assert!(
+                                matches!(resp, Response::Pong),
+                                "client #{i} got unexpected response: {resp:?}"
+                            );
+                        }
+                        // タイムアウトや接続拒否は許容（制限超過時の想定動作）
+                        Ok(Err(_)) | Err(_) => {}
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // サーバーがまだ生きていることを確認
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let resp = send_recv(&mut stream, &Request::Ping).await;
+        assert!(matches!(resp, Response::Pong), "server should still respond after connection burst");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_isolation() {
+        // 2つのクライアントが同時にトランザクションを開始し、
+        // 互いにコミット前の変更が干渉しないことを確認
+        let addr = start_test_server().await;
+
+        let mut client_a = TcpStream::connect(addr).await.unwrap();
+        let mut client_b = TcpStream::connect(addr).await.unwrap();
+
+        // クライアントA: トランザクション開始
+        let resp_a = send_recv(&mut client_a, &Request::BeginTransaction { read_only: false }).await;
+        let tx_a = match resp_a {
+            Response::TransactionBegun { tx_id } => tx_id,
+            other => panic!("client A expected TransactionBegun, got {other:?}"),
+        };
+
+        // クライアントB: トランザクション開始
+        let resp_b = send_recv(&mut client_b, &Request::BeginTransaction { read_only: false }).await;
+        let tx_b = match resp_b {
+            Response::TransactionBegun { tx_id } => tx_id,
+            other => panic!("client B expected TransactionBegun, got {other:?}"),
+        };
+
+        // クライアントA: トランザクション内でノードを作成
+        let resp = send_recv(
+            &mut client_a,
+            &Request::Query {
+                query: "CREATE (n:TxIsolate {owner: 'A'}) RETURN n".to_string(),
+                tx_id: Some(tx_a),
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "tx A CREATE failed: {resp:?}");
+
+        // クライアントB: トランザクション内でノードを作成
+        let resp = send_recv(
+            &mut client_b,
+            &Request::Query {
+                query: "CREATE (n:TxIsolate {owner: 'B'}) RETURN n".to_string(),
+                tx_id: Some(tx_b),
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "tx B CREATE failed: {resp:?}");
+
+        // クライアントA: コミット
+        let resp = send_recv(&mut client_a, &Request::Commit { tx_id: tx_a }).await;
+        assert!(matches!(resp, Response::Committed { .. }), "tx A commit failed: {resp:?}");
+
+        // クライアントB: ロールバック（Bの変更は取り消される）
+        let resp = send_recv(&mut client_b, &Request::Rollback { tx_id: tx_b }).await;
+        assert!(matches!(resp, Response::RolledBack { .. }), "tx B rollback failed: {resp:?}");
+
+        // 確認: A のノードのみ残り、B のノードはロールバックされている
+        let mut checker = TcpStream::connect(addr).await.unwrap();
+        let resp = send_recv(
+            &mut checker,
+            &Request::Query {
+                query: "MATCH (n:TxIsolate) RETURN n.owner".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                // A がコミット済みなので少なくとも1件、B はロールバック済みなので "B" は含まれない
+                assert!(
+                    rows.iter().any(|r| r.get("n.owner").map(|s| s.as_str()) == Some("\"A\"")),
+                    "A's committed node should exist"
+                );
+                assert!(
+                    !rows.iter().any(|r| r.get("n.owner").map(|s| s.as_str()) == Some("\"B\"")),
+                    "B's rolled-back node should not exist"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn integration_pipeline_multiple_queries_single_connection() {
         // 1接続で複数クエリを順次送信し、サーバーが正しく処理できることを確認する

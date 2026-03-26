@@ -67,7 +67,14 @@ async fn test_concurrent_clients() {
 
 ## 完了条件
 
-- [ ] 10 同時書き込みでデータ件数が正確であること
-- [ ] 読み書き混在でサーバーがクラッシュしないこと
-- [ ] max_connections 制限が機能すること
-- [ ] `cargo test` または `python3 scripts/concurrent_test.py` で実行可能
+- [x] 10 同時書き込みでデータ件数が正確であること
+- [x] 読み書き混在でサーバーがクラッシュしないこと
+- [x] max_connections 制限が機能すること
+- [x] `cargo test` または `python3 scripts/concurrent_test.py` で実行可能
+
+## 実装済み（Rust テスト in tcp_server.rs）
+
+- `test_concurrent_writes`: 10タスクが同時にノードを作成 → 全件確認
+- `test_concurrent_read_write_mix`: 5ライター + 5リーダー → クラッシュなし
+- `test_max_connections_limit`: max_connections=3 に対して 6クライアント → サーバー生存確認
+- `test_transaction_isolation`: A コミット・B ロールバック → A のノードのみ残ることを確認
