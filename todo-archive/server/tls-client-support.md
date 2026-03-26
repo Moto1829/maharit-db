@@ -1,9 +1,9 @@
-# TLS Connection Support for maharit-client
+# maharit-client TLS接続サポート
 
-## Task
+## 概要
 Add TLS connection support to the maharit-client crate.
 
-## Implementation Details
+## 実装内容
 
 ### Added Components
 
@@ -41,10 +41,10 @@ Added comprehensive tests:
 - ConnectionStream enum existence
 - All existing tests still pass (27 total tests)
 
-## Status
+## ステータス
 ✅ Completed
 
-## Notes
+## 注意
 - TLS reconnection is not supported - users must create a new client
 - Custom CA certificates can be loaded from PEM files
 - Skip verification mode is available but marked as dangerous

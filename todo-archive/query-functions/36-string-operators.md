@@ -1,4 +1,4 @@
-# タスク36: 文字列演算子 (STARTS WITH, ENDS WITH, IS NORMALIZED)
+# Task 36: 文字列演算子 (STARTS WITH, ENDS WITH, IS NORMALIZED)
 
 ## 概要
 Cypherの文字列比較演算子 STARTS WITH, ENDS WITH, IS NORMALIZED を追加する。

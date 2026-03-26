@@ -1,11 +1,11 @@
 # Task 71: バックアップ・リストア時にインデックス定義を保存・復元
 
-## Status: completed
+## ステータス: 完了
 
-## Overview
+## 概要
 `backup.rs` の `serialize_graph` / `deserialize_graph` を拡張し、`PropertyIndex` の定義をバックアップファイルに保存・復元できるようにする。
 
-## Changes
+## 実装内容
 
 ### `crates/maharit-storage/src/backup.rs`
 
@@ -18,5 +18,5 @@
    - `test_backup_restore_with_index_definitions` — インデックス定義・データの往復確認
    - `test_restore_old_format_without_index_section` — 旧フォーマット（インデックスなし）の互換性確認
 
-## Test Results
+## テスト
 - `cargo test -p maharit-storage`: 74/74 passed

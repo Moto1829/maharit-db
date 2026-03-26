@@ -1,11 +1,11 @@
-# Task 64: Parallel Fulltext Index Building
+# Task 64: 全文検索インデックスの並列構築
 
-## Summary
+## 概要
 
 Parallelized the tokenization phase of fulltext index construction in
 `crates/maharit-core/src/fulltext.rs`.
 
-## Changes
+## 実装内容
 
 - Added `use rayon::prelude::*` to `fulltext.rs`
 - Added `PARALLEL_BUILD_THRESHOLD = 200` constant
@@ -17,6 +17,6 @@ Parallelized the tokenization phase of fulltext index construction in
 - Added `FulltextManager::build_index_bulk()` — bulk-index multiple nodes
   across all matching indexes using the parallel build path
 
-## Tests
+## テスト
 
 All 44 fulltext tests pass (including Japanese tests).

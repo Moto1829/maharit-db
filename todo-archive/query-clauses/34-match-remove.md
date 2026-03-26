@@ -1,4 +1,4 @@
-# MATCH + REMOVE 複合クエリ
+# Task 34: MATCH + REMOVE 複合クエリ
 
 ## 概要
 MATCHで取得したノード・エッジからプロパティやラベルを削除するREMOVE句を実装する。

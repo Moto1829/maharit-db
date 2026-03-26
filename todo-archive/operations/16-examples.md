@@ -1,4 +1,4 @@
-# exampleの追加
+# Task 16: exampleの追加
 
 ## 概要
 maharit-dbの使用方法を示すサンプルコードを追加する。

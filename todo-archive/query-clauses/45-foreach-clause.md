@@ -1,15 +1,15 @@
-# Task 45: FOREACH Clause
+# Task 45: FOREACH句
 
-## Overview
+## 概要
 
 Add FOREACH clause support to the `maharit-query` crate. FOREACH iterates over a list and executes update operations (CREATE, SET, REMOVE, DELETE, MERGE) for each element.
 
-## Syntax
+## 構文
 ```cypher
 FOREACH (variable IN list | update_clauses)
 ```
 
-## Examples
+## クエリ例
 ```cypher
 -- リストからノード作成
 FOREACH (name IN ['Alice', 'Bob', 'Charlie'] |
@@ -30,7 +30,7 @@ FOREACH (city IN ['Tokyo', 'Osaka'] |
 )
 ```
 
-## Status: Done
+## ステータス: 完了
 
 ### Changes Made
 1. `ast.rs` - Added `ForeachStatement`, `ForeachClause`, `MatchForeachStatement` types and `Statement::Foreach` + `Statement::MatchForeach` variants

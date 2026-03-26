@@ -1,4 +1,4 @@
-# レプリケーション: WalEntryData の複数ラベル対応
+# Task 53: レプリケーション: WalEntryData の複数ラベル対応
 
 ## 概要
 

@@ -1,12 +1,12 @@
-# Task 72: Aggregation Query Optimization
+# Task 72: 集計クエリ最適化
 
-## Status: completed
+## ステータス: 完了
 
-## Overview
+## 概要
 
 Two performance and correctness improvements to aggregation query execution.
 
-## Changes
+## 実装内容
 
 ### 1. COUNT(node_var) Short-circuit Optimization
 
@@ -45,7 +45,7 @@ New implementation:
 `return_item_to_column_name` for `Count(Some(inner))` now returns `"count(<inner>)"`
 instead of the incorrect `"COUNT(*)"`. `COUNT(*)` (no inner) still returns `"COUNT(*)"`.
 
-## Tests Added
+## テスト
 
 - `test_count_node_optimization`: 3 Person nodes, verifies `count(n)` returns 3
 - `test_group_by_count`: 2 Tokyo + 1 Osaka nodes, verifies 2 rows with correct columns

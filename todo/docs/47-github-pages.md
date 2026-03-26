@@ -1,4 +1,4 @@
-# GitHub Pages でドキュメントを公開
+# Task 47: GitHub Pages でドキュメントを公開
 
 ## 概要
 mdBook で作成したドキュメントを GitHub Pages で自動ビルド・公開する。

@@ -1,10 +1,10 @@
-# Task 63: Graph Algorithm Parallelization
+# Task 63: グラフアルゴリズムの並列化
 
-## Summary
+## 概要
 
 Parallelized graph algorithms in `crates/maharit-core/src/algorithms.rs` using `rayon`.
 
-## Changes
+## 実装内容
 
 - Added `rayon = "1.10"` to `crates/maharit-core/Cargo.toml`
 - Added `PARALLEL_THRESHOLD = 500` constant — algorithms fall back to sequential for small graphs
@@ -12,6 +12,6 @@ Parallelized graph algorithms in `crates/maharit-core/src/algorithms.rs` using `
 - `betweenness_centrality`: extracted inner Brandes per-source computation into a pure function, outer loop parallelized via `par_iter()`, results merged sequentially
 - `pagerank`: dangling-node sum parallelized via `par_iter().sum()` (iteration loop is inherently sequential)
 
-## Tests
+## テスト
 
 All 14 algorithm tests pass.

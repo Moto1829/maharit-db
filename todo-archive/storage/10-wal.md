@@ -1,4 +1,4 @@
-# Write-Ahead Logging (WAL)
+# Task 10: Write-Ahead Logging (WAL)
 
 ## 概要
 クラッシュリカバリのためのWAL（先行書き込みログ）を実装する。

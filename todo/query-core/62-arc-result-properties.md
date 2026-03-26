@@ -1,4 +1,4 @@
-# クエリエンジン: クエリ結果のプロパティ共有化
+# Task 62: クエリエンジン: クエリ結果のプロパティ共有化
 
 ## 概要
 
@@ -45,7 +45,7 @@ pub enum Value {
 
 `maharit-core`, `maharit-query`
 
-## Changes
+## 実装内容（変更ファイル詳細）
 
 ### `crates/maharit-core/src/graph.rs`
 - `Node.properties` の型を `HashMap<String, PropertyValue>` から `Arc<HashMap<String, PropertyValue>>` に変更
@@ -71,7 +71,7 @@ pub enum Value {
 ### `crates/maharit-io/src/graphml_io.rs`
 - `for (key, value) in &node.properties` を `for (key, value) in node.properties.iter()` に変更（4箇所）
 
-## Tests
+## テスト
 
 全テストスイートが通過（857テスト）:
 - maharit-core: 147 passed

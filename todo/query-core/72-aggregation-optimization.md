@@ -1,4 +1,4 @@
-# 集計クエリ最適化（COUNT / GROUP BY）
+# Task 72: 集計クエリ最適化（COUNT / GROUP BY）
 
 ## 概要
 `count(n)` と `n.skill, count(n)` が 44〜48 ms かかっており、

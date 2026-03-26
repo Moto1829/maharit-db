@@ -1,12 +1,12 @@
-# Task 19: Replication
+# Task 19: レプリケーション
 
-## Overview
+## 概要
 Add leader/follower replication to maharit-server.
 
-## Status
+## ステータス
 - [x] Completed
 
-## Implementation
+## 実装内容
 
 ### File
 `crates/maharit-server/src/replication.rs`

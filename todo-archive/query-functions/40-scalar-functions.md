@@ -1,9 +1,9 @@
-# Task 40: Add 15 Scalar Functions
+# Task 40: スカラー関数の追加（15件）
 
-## Summary
+## 概要
 Added 15 new scalar functions to the maharit-query crate for metadata access, NULL handling, type conversion, and utilities.
 
-## New Functions
+## 新規関数
 
 ### Node/Edge Metadata (8 functions)
 1. `id(v)` - Returns node/edge ID as integer
@@ -28,7 +28,7 @@ Added 15 new scalar functions to the maharit-query crate for metadata access, NU
 14. `timestamp()` - Returns current Unix timestamp in milliseconds
 15. `randomUUID()` - Returns a UUID v4 string
 
-## Files Modified
+## 変更ファイル
 
 ### `/Users/suzukishimei/Git/maharit-db/crates/maharit-query/src/ast.rs`
 - Added 15 new variants to `ScalarFunction` enum (after `Pi` variant at line 362)
@@ -43,7 +43,7 @@ Added 15 new scalar functions to the maharit-query crate for metadata access, NU
 - Implemented all 15 functions in `evaluate_scalar_function()`
 - Added 11 new test functions covering all new functionality
 
-## Test Coverage
+## テスト
 
 Added comprehensive tests for all new functions:
 - `test_id()` - Tests id() for nodes and edges
@@ -58,12 +58,12 @@ Added comprehensive tests for all new functions:
 - `test_timestamp()` - Tests timestamp() returns valid Unix millis
 - `test_random_uuid()` - Tests randomUUID() format
 
-## Test Results
+## テスト結果
 - Total tests: 292 (increased from 257)
 - All tests passing
 - No new clippy warnings introduced
 
-## Implementation Details
+## 実装内容
 
 ### UUID Generation
 - Implemented UUID v4 without external dependencies
@@ -81,5 +81,5 @@ Added comprehensive tests for all new functions:
 - Returns appropriate error for type mismatches
 - Returns NodeData with full properties for startNode/endNode
 
-## Status
+## ステータス
 ✅ Complete

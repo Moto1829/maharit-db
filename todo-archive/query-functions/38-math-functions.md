@@ -1,9 +1,9 @@
-# Task 38: Math Functions
+# Task 38: 数学関数
 
-## Status
-✅ COMPLETED
+## ステータス
+✅ 完了
 
-## Summary
+## 概要
 Added 13 mathematical functions to the maharit-db Cypher-like query language:
 - `abs(v)` - absolute value
 - `ceil(v)` - ceiling (round up)
@@ -18,7 +18,7 @@ Added 13 mathematical functions to the maharit-db Cypher-like query language:
 - `e()` - Euler's number
 - `pi()` - Pi constant
 
-## Files Modified
+## 変更ファイル
 All in `/Users/suzukishimei/Git/maharit-db/crates/maharit-query/src/`:
 
 1. **ast.rs** - Added 13 new variants to `ScalarFunction` enum (lines 339-351)
@@ -29,7 +29,7 @@ All in `/Users/suzukishimei/Git/maharit-db/crates/maharit-query/src/`:
    - `evaluate_scalar_function()` - Added 13 match arms implementing the math logic (lines 2390-2499)
    - Added 8 new comprehensive tests (lines 5584-5725)
 
-## Implementation Details
+## 実装内容
 
 ### Zero-argument functions
 - `rand()` - Uses `DefaultHasher` with `SystemTime` and thread ID for entropy
@@ -51,13 +51,13 @@ All handle `Int`, `Float`, and `Null` appropriately:
 - `round(v)` - Rounds to nearest integer, returns `Int`
 - `round(v, precision)` - Rounds to `precision` decimal places, returns `Float`
 
-## Test Results
+## テスト
 - All 8 new tests pass
 - Total maharit-query tests: 281 (up from 273)
 - All existing tests still pass
 - No new clippy warnings introduced
 
-## Notes
+## 注意
 - Uses `PropertyValue` from `maharit-core` for setting graph properties in tests
 - Follows the same pattern as Task 37 (string functions)
 - All match arms are exhaustive to satisfy Rust compiler

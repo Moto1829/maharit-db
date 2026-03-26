@@ -1,4 +1,4 @@
-# mdBook を廃止して Jekyll (just-the-docs) に移行
+# Task 70: mdBook を廃止して Jekyll (just-the-docs) に移行
 
 ## 概要
 mdBook を廃止し、Jekyll + just-the-docs テーマで GitHub Pages に公開する。
