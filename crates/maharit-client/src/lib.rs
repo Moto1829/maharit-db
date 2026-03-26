@@ -742,6 +742,27 @@ impl Client {
         Ok(())
     }
 
+    /// Execute multiple queries sequentially on the same connection.
+    ///
+    /// Returns a `Vec<QueryResult>` in the same order as the input queries.
+    /// Stops and returns an error if any query fails.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = client.execute_many(&[
+    ///     "CREATE (n:Person {name: 'Alice'})",
+    ///     "CREATE (n:Person {name: 'Bob'})",
+    ///     "MATCH (n:Person) RETURN n.name",
+    /// ]).await?;
+    /// ```
+    pub async fn execute_many(&mut self, queries: &[&str]) -> Result<Vec<QueryResult>> {
+        let mut results = Vec::with_capacity(queries.len());
+        for q in queries {
+            results.push(self.query(q).await?);
+        }
+        Ok(results)
+    }
+
     /// Begin a new transaction
     pub async fn begin(&mut self) -> Result<TxId> {
         self.begin_with_options(false).await

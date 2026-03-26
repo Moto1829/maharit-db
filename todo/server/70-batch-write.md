@@ -20,8 +20,8 @@ UNWIND を使った複数ノード/エッジの一括書き込みに対応し、
 - [x] `Expression::Property` 評価で `BindingValue::Scalar(Value::Map(...))` の場合、`access_temporal_field` に委譲していたため Null を返す問題を修正。Map のキーを直接参照するよう変更。
 
 ### TCP パイプライン対応（任意）
-- [ ] 複数クエリを1接続で連続送信したとき、サーバーが順次処理できるか検証
-- [ ] クライアント側でパイプライン送信するユーティリティを検討
+- [x] 複数クエリを1接続で連続送信したとき、サーバーが順次処理できるか検証（integration_pipeline_multiple_queries_single_connection テスト追加）
+- [x] クライアント側でパイプライン送信するユーティリティを検討（Client::execute_many() を追加）
 
 ### ベンチマーク追加
 - [x] `scripts/benchmark.py` に UNWIND バッチ書き込みの計測項目を追加（`bench_unwind_batch_create`）

@@ -1576,4 +1576,64 @@ mod tests {
             other => panic!("expected Result, got {:?}", other),
         }
     }
+
+    #[tokio::test]
+    async fn integration_pipeline_multiple_queries_single_connection() {
+        // 1接続で複数クエリを順次送信し、サーバーが正しく処理できることを確認する
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // 10件の CREATE を同一接続で連続送信
+        for i in 0..10 {
+            let resp = send_recv(
+                &mut stream,
+                &Request::Query {
+                    query: format!("CREATE (n:Pipeline {{idx: {}}}) RETURN n", i),
+                    tx_id: None,
+                },
+            )
+            .await;
+            assert!(
+                matches!(resp, Response::Result { .. }),
+                "CREATE #{} failed: {:?}", i, resp
+            );
+        }
+
+        // 同じ接続で MATCH して件数を確認
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:Pipeline) RETURN n.idx".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert_eq!(rows.len(), 10, "10件のノードが作成されているべき");
+            }
+            other => panic!("expected Result, got {:?}", other),
+        }
+
+        // Ping も挟んで接続が生きていることを確認
+        let resp = send_recv(&mut stream, &Request::Ping).await;
+        assert!(matches!(resp, Response::Pong));
+
+        // さらに別クエリを続けて送れること
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "MATCH (n:Pipeline {idx: 5}) RETURN n.idx".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get("n.idx").map(String::as_str), Some("5"));
+            }
+            other => panic!("expected Result, got {:?}", other),
+        }
+    }
 }
