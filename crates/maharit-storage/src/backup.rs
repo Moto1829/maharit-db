@@ -414,10 +414,10 @@ impl Backup {
 
         for def in &index_defs {
             for node in graph.nodes() {
-                if node.labels.contains(&def.label) {
-                    if let Some(val) = node.get_property(&def.property) {
-                        property_index.index_property(node.id, &def.property, val);
-                    }
+                if node.labels.contains(&def.label)
+                    && let Some(val) = node.get_property(&def.property)
+                {
+                    property_index.index_property(node.id, &def.property, val);
                 }
             }
         }
