@@ -31,24 +31,44 @@ RETURN dot_string
 ### Rust API からのエクスポート
 
 ```rust
-use maharit_viz::dot::DotExporter;
+use maharit_viz::dot::{DotExporter, DotStyle};
 use maharit_core::Graph;
 use std::fs;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::io::Result<()> {
     let graph = Graph::new(); // グラフを構築...
 
-    let exporter = DotExporter::new()
-        .with_node_label("name")           // ノードのラベルに使うプロパティ
-        .with_edge_label("type")           // エッジのラベルに使うプロパティ
-        .with_node_color_by_label(true)    // ラベルで色分け
-        .with_directed(true);             // 有向グラフ
-
-    let dot = exporter.export(&graph)?;
+    // デフォルトスタイルでエクスポート（静的メソッド）
+    let dot = DotExporter::export(&graph);
 
     // ファイルに保存
     fs::write("graph.dot", &dot)?;
     println!("Exported to graph.dot");
+
+    Ok(())
+}
+```
+
+スタイルをカスタマイズする場合は `DotStyle` を構築して `export_with_style` を使用します：
+
+```rust
+use maharit_viz::dot::{DotExporter, DotStyle};
+use maharit_core::Graph;
+
+fn main() -> std::io::Result<()> {
+    let graph = Graph::new(); // グラフを構築...
+
+    let style = DotStyle {
+        top_to_bottom: false,    // 左から右に描画
+        node_shape: "box".to_string(),
+        node_color: "lightyellow".to_string(),
+        edge_color: "black".to_string(),
+        show_properties: true,
+        max_properties: 5,
+    };
+
+    let dot = DotExporter::export_with_style(&graph, &style);
+    std::fs::write("graph.dot", &dot)?;
 
     Ok(())
 }
@@ -95,21 +115,15 @@ MaharitDB は Graphviz なしで直接 SVG を生成できます。力学モデ�
 ### Rust API からの SVG エクスポート
 
 ```rust
-use maharit_viz::svg::SvgExporter;
+use maharit_viz::svg::{SvgExporter, ForceDirectedLayout};
+use maharit_core::Graph;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::io::Result<()> {
     let graph = Graph::new(); // グラフを構築...
 
-    let exporter = SvgExporter::new()
-        .with_width(1200)
-        .with_height(800)
-        .with_node_radius(20)
-        .with_node_label("name")
-        .with_force_iterations(500)  // 力学モデルの反復回数
-        .with_spring_length(100.0)   // バネ定数
-        .with_repulsion(1000.0);     // 反発力
-
-    let svg = exporter.export(&graph)?;
+    // デフォルト設定でエクスポート
+    let exporter = SvgExporter::default();
+    let svg = exporter.export(&graph);
 
     std::fs::write("graph.svg", &svg)?;
     println!("SVG exported to graph.svg");
@@ -120,64 +134,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### SVG のカスタマイズ
 
-```rust
-let exporter = SvgExporter::new()
-    // 色の設定
-    .with_label_color("Person", "#3498DB")
-    .with_label_color("Company", "#2ECC71")
-    .with_edge_color("KNOWS", "#E74C3C")
-    // フォントの設定
-    .with_font_size(12)
-    .with_font_family("Arial, sans-serif")
-    // スタイルの設定
-    .with_node_stroke("#2C3E50")
-    .with_node_stroke_width(2);
-```
-
-## インタラクティブ SVG
-
-生成された SVG にはインタラクティブな機能を追加できます：
+`SvgExporter` と `ForceDirectedLayout` のフィールドを直接設定してカスタマイズします：
 
 ```rust
-let exporter = SvgExporter::new()
-    .with_interactive(true)     // クリックでノード情報を表示
-    .with_zoom_enabled(true)    // マウスホイールでズーム
-    .with_pan_enabled(true);    // ドラッグでパン
-```
+use maharit_viz::svg::{SvgExporter, ForceDirectedLayout};
+use maharit_core::Graph;
 
-## JSON エクスポート（可視化ライブラリ向け）
+fn main() -> std::io::Result<()> {
+    let graph = Graph::new(); // グラフを構築...
 
-D3.js や Vis.js などのブラウザ側の可視化ライブラリと連携するための JSON 形式でエクスポートできます。
+    let exporter = SvgExporter {
+        layout: ForceDirectedLayout {
+            iterations: 300,        // 反復回数を増やして安定したレイアウトに
+            repulsion: 1000.0,      // ノード間の反発力
+            attraction: 0.05,       // エッジの引力
+            damping: 0.9,           // 速度の減衰係数
+            canvas_width: 1200.0,   // キャンバス幅（ピクセル）
+            canvas_height: 900.0,   // キャンバス高さ（ピクセル）
+        },
+        node_radius: 25.0,
+        node_color: "#3498DB".to_string(),
+        edge_color: "#E74C3C".to_string(),
+        font_size: 14.0,
+    };
 
-```cypher
-CALL db.export.json()
-YIELD json_string
-RETURN json_string
-```
+    // ファイルに直接書き出す
+    exporter.export_to_file(&graph, "graph.svg")?;
 
-出力形式（D3.js 互換）：
-
-```json
-{
-  "nodes": [
-    {"id": 1, "label": "Alice", "labels": ["Person"], "properties": {"name": "Alice", "age": 30}},
-    {"id": 2, "label": "Bob", "labels": ["Person"], "properties": {"name": "Bob", "age": 25}}
-  ],
-  "links": [
-    {"source": 1, "target": 2, "type": "KNOWS", "properties": {"since": 2021}}
-  ]
+    Ok(())
 }
-```
-
-## サブグラフのエクスポート
-
-大規模グラフの場合、特定のサブグラフだけをエクスポートします。
-
-```rust
-use maharit_viz::dot::DotExporter;
-
-// 特定のノード群だけをエクスポート
-let node_ids = vec![1, 2, 3, 4, 5];
-let dot = DotExporter::new()
-    .export_subgraph(&graph, &node_ids)?;
 ```
