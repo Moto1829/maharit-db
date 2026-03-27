@@ -395,6 +395,37 @@ def save_report(all_results: list[BenchResult], args, output_path: str):
     print(f"  {CYAN}ℹ{RESET}  分析するには Claude Code で {BOLD}/analyze-benchmark{RESET} を実行してください。")
 
 
+def save_json_report(all_results: list[BenchResult], args, output_path: str):
+    """JSON フォーマットでベンチマーク結果を保存する（perf_check.py で利用）"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    results = {}
+    for r in all_results:
+        if r.count == 0:
+            continue
+        results[r.name] = {
+            "ops_per_sec": round(r.throughput, 2),
+            "latency_ms":  round(r.latency_ms, 4),
+            "count":       r.count,
+            "elapsed_s":   round(r.elapsed, 4),
+        }
+
+    payload = {
+        "timestamp":  now,
+        "node_count": args.nodes,
+        "host":       args.host,
+        "port":       args.port,
+        "results":    results,
+    }
+
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    print(f"  {GREEN}✓{RESET} JSON レポートを保存しました: {BOLD}{output_path}{RESET}")
+
+
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
 def main():
@@ -412,8 +443,12 @@ def main():
     parser.add_argument("--no-cleanup", action="store_true",
                         help="ベンチ後にデータを削除しない")
     parser.add_argument("--output", default=None,
-                        help="レポートの出力先ファイルパス (省略時は自動生成: "
+                        help="Markdown レポートの出力先ファイルパス (省略時は自動生成: "
                              "benchmark_reports/bench_YYYYMMDD_HHMMSS.md)")
+    parser.add_argument("--output-json", default=None, metavar="PATH",
+                        help="JSON 形式でも保存するパス "
+                             "(例: benchmark_reports/baseline.json)。"
+                             "perf_check.py によるベースライン比較に使用します。")
     args = parser.parse_args()
 
     print(f"\n{BOLD}MaharitDB 大量データ性能ベンチマーク{RESET}")
@@ -462,6 +497,9 @@ def main():
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = args.output or f"benchmark_reports/bench_{ts}.md"
     save_report(all_results, args, output_path)
+
+    if args.output_json:
+        save_json_report(all_results, args, args.output_json)
 
 
 if __name__ == "__main__":
