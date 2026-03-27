@@ -67,7 +67,7 @@ async fn test_heartbeat_timeout_detection() {
 
 ## 完了条件
 
-- [ ] リーダー停止後にフォロワーを昇格できること
-- [ ] 昇格後の新リーダーへの書き込みが成功すること
-- [ ] ハートビートタイムアウト検知のテストがあること
-- [ ] `python3 scripts/failover_test.py` で実行可能
+- [x] リーダー停止後にフォロワーを昇格できること
+- [x] 昇格後の新リーダーへの書き込みが成功すること
+- [x] ハートビートタイムアウト検知のテストがあること
+- [x] `python3 scripts/failover_test.py` で実行可能

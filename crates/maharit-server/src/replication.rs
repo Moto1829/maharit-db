@@ -1548,4 +1548,117 @@ mod tests {
             "FollowerReplicationManager and TcpServer must share the same graph Arc"
         );
     }
+
+    // 20. Verify that a follower promotes itself after receiving a PromoteToLeader message
+    #[tokio::test]
+    async fn test_promote_to_leader() {
+        // Bind a mock leader listener on an ephemeral port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+
+        // Start a follower pointing at the mock leader
+        let manager = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            ReplicationConfig {
+                role: NodeRole::Follower,
+                node_id: "f-promote".to_string(),
+                replication_bind_address: "127.0.0.1:0".to_string(),
+                leader_address: Some(leader_addr.to_string()),
+                heartbeat_interval_secs: 1,
+                heartbeat_timeout_secs: 5,
+            },
+            Arc::new(ConcurrentGraph::new()),
+        ));
+        manager.start().await.unwrap();
+
+        // Spawn mock leader: accept connection, do handshake, then send PromoteToLeader
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = socket.into_split();
+            // Read the Handshake from the follower
+            let _ = recv_message(&mut reader).await.unwrap();
+            // Acknowledge the handshake so is_leader_alive flips to true
+            send_message(
+                &mut writer,
+                &ReplicationMessage::HandshakeAck {
+                    leader_id: "mock-leader".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            // Wait longer than the first assertion below (200 ms), then promote.
+            // This ensures is_leader_alive is still true when the test first checks it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            send_message(&mut writer, &ReplicationMessage::PromoteToLeader)
+                .await
+                .unwrap();
+            // Keep socket alive long enough for the follower to process the message
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        // Wait for handshake to complete (is_leader_alive → true).
+        // PromoteToLeader won't arrive for another ~200 ms, so this is safe.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(manager.is_leader_alive(), "leader should be alive after handshake");
+        assert!(!manager.is_promoted(), "should not be promoted yet");
+
+        // Wait for the PromoteToLeader message to be processed (arrives at ~200 ms).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(manager.is_promoted(), "follower should be promoted after PromoteToLeader");
+        assert!(!manager.is_leader_alive(), "is_leader_alive should be false after promotion");
+    }
+
+    // 21. Verify that the heartbeat watchdog marks the leader as dead when no heartbeat arrives
+    #[tokio::test]
+    async fn test_heartbeat_timeout_detection() {
+        // Use a short timeout so the test finishes quickly
+        let timeout_secs = 2u64;
+
+        // Bind a mock leader listener
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+
+        // Start a follower with the short heartbeat timeout
+        let manager = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            ReplicationConfig {
+                role: NodeRole::Follower,
+                node_id: "f-timeout".to_string(),
+                replication_bind_address: "127.0.0.1:0".to_string(),
+                leader_address: Some(leader_addr.to_string()),
+                heartbeat_interval_secs: 1,
+                heartbeat_timeout_secs: timeout_secs,
+            },
+            Arc::new(ConcurrentGraph::new()),
+        ));
+        manager.start().await.unwrap();
+
+        // Spawn mock leader: accept, handshake, then go silent (no heartbeats)
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = socket.into_split();
+            // Read the Handshake
+            let _ = recv_message(&mut reader).await.unwrap();
+            // Reply with HandshakeAck so the follower marks the leader as alive
+            send_message(
+                &mut writer,
+                &ReplicationMessage::HandshakeAck {
+                    leader_id: "mock-leader".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            // Hold the connection open but send no further heartbeats
+            tokio::time::sleep(Duration::from_secs(timeout_secs + 5)).await;
+        });
+
+        // After handshake the leader should be considered alive
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(manager.is_leader_alive(), "leader should be alive after handshake");
+
+        // After heartbeat_timeout_secs + one watchdog-tick second the leader should be dead
+        tokio::time::sleep(Duration::from_secs(timeout_secs + 1)).await;
+        assert!(
+            !manager.is_leader_alive(),
+            "leader should be marked dead after heartbeat timeout"
+        );
+    }
 }
