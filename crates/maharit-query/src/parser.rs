@@ -2379,7 +2379,11 @@ impl Parser {
 
         if !self.check(TokenKind::RBrace) {
             loop {
-                let key = self.expect_ident()?;
+                // Map keys can be bare identifiers ({id: 1}) or quoted strings ({"id": 1})
+                let key = match self.peek_kind() {
+                    Some(TokenKind::String(_)) => self.expect_string()?,
+                    _ => self.expect_ident()?,
+                };
                 self.expect(TokenKind::Colon)?;
                 let value = self.parse_expression()?;
                 props.insert(key, value);
@@ -3975,6 +3979,27 @@ mod tests {
     fn test_parse_unwind_keyword() {
         let stmt = parse("UNWIND [1] AS x RETURN x");
         assert!(stmt.is_ok());
+    }
+
+    #[test]
+    fn test_parse_map_literal_quoted_keys() {
+        // JSON形式のクォート付きキーを持つマップリテラル (Task 88)
+        let stmt = parse(r#"UNWIND [{"id": 0, "name": "Alice"}] AS item RETURN item.id"#);
+        assert!(stmt.is_ok(), "Failed to parse quoted map keys: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_map_literal_mixed_keys() {
+        // ベアキーとクォートキーの混在したマップリテラルのパース
+        let stmt = parse(r#"UNWIND [{"id": 1, name: "Alice"}] AS item RETURN item"#);
+        assert!(stmt.is_ok(), "Failed to parse mixed map keys: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_unwind_json_map_list() {
+        // benchmark.py の bench_unwind_batch_create が生成するクエリ形式
+        let stmt = parse(r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name})"#);
+        assert!(stmt.is_ok(), "Failed to parse JSON map list UNWIND: {:?}", stmt);
     }
 
     // ========== Subquery parser tests ==========
