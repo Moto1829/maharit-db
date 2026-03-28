@@ -532,6 +532,7 @@ impl<'a> Executor<'a> {
             Statement::Explain(inner) => self.execute_explain(*inner),
             Statement::Profile(inner) => self.execute_profile(*inner),
             Statement::ProcedureCall(pc) => self.execute_procedure_call(pc),
+            Statement::Return(rc) => self.build_result_set(&rc, &[Bindings::new()]),
         }
     }
 
@@ -1950,7 +1951,7 @@ impl<'a> Executor<'a> {
             .return_clause
             .items
             .iter()
-            .any(|item| matches!(item, ReturnItem::Aggregate(_)));
+            .any(|item| Self::is_aggregate(item));
 
         let early_limit: Option<usize> =
             if !has_aggregation && m.return_clause.order_by.is_none() {
@@ -2127,6 +2128,7 @@ impl<'a> Executor<'a> {
                 } else {
                     // Use the original variable name if available
                     match &item.expression {
+                        ReturnItem::Alias(_, name) => name.clone(),
                         ReturnItem::Variable(v) => v.clone(),
                         ReturnItem::Property(v, p) => format!("{}.{}", v, p),
                         ReturnItem::Aggregate(agg) => self.aggregate_to_name(agg),
@@ -2726,7 +2728,7 @@ impl<'a> Executor<'a> {
         let has_aggregation = return_clause
             .items
             .iter()
-            .any(|item| matches!(item, ReturnItem::Aggregate(_)));
+            .any(|item| Self::is_aggregate(item));
 
         if has_aggregation {
             return self.build_aggregated_result_set(return_clause, bindings_list);
@@ -2954,8 +2956,18 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// Alias の内側を再帰的に辿って、集計関数かどうかを判定するヘルパー。
+    fn is_aggregate(item: &ReturnItem) -> bool {
+        match item {
+            ReturnItem::Aggregate(_) => true,
+            ReturnItem::Alias(inner, _) => Self::is_aggregate(inner),
+            _ => false,
+        }
+    }
+
     fn return_item_to_column_name(&self, item: &ReturnItem) -> String {
         match item {
+            ReturnItem::Alias(_, name) => name.clone(),
             ReturnItem::Variable(v) => v.clone(),
             ReturnItem::Property(v, p) => format!("{}.{}", v, p),
             ReturnItem::All => "*".to_string(),
@@ -3224,6 +3236,7 @@ impl<'a> Executor<'a> {
                 }
                 Ok(Value::Null)
             }
+            ReturnItem::Alias(inner, _) => self.evaluate_return_item(inner, bindings),
             ReturnItem::Aggregate(_) => {
                 // Aggregates are handled separately
                 Ok(Value::Null)
@@ -4220,7 +4233,7 @@ impl<'a> Executor<'a> {
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| !matches!(item, ReturnItem::Aggregate(_)))
+            .filter(|(_, item)| !Self::is_aggregate(item))
             .map(|(i, _)| i)
             .collect();
 
@@ -4281,7 +4294,7 @@ impl<'a> Executor<'a> {
 
             // Fill aggregate columns
             for (col_idx, item) in return_clause.items.iter().enumerate() {
-                if matches!(item, ReturnItem::Aggregate(_)) {
+                if Self::is_aggregate(item) {
                     row_values[col_idx] = self.evaluate_aggregate(item, &group_bindings)?;
                 }
             }
@@ -4702,6 +4715,8 @@ impl<'a> Executor<'a> {
                     Ok(Value::List(result))
                 }
             },
+            // Alias wrapping an aggregate: delegate to the inner aggregate
+            ReturnItem::Alias(inner, _) => self.evaluate_aggregate(inner, bindings_list),
             // Non-aggregate items in an aggregated query just use the first binding
             _ => {
                 if let Some(bindings) = bindings_list.first() {
@@ -11400,5 +11415,46 @@ mod tests {
         // missing key evaluates to Null; Null properties may be stored as PropertyValue::Null
         let b = node.get_property("b");
         assert!(b.is_none() || b == Some(&PropertyValue::Null));
+    }
+
+    // ========== Standalone RETURN tests (Task 89) ==========
+
+    #[test]
+    fn test_execute_standalone_return_literal() {
+        let mut graph = Graph::new();
+        let stmt = Parser::new("RETURN 1 + 1 AS result")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result = Executor::new(&mut graph).execute(stmt).unwrap();
+        assert_eq!(result.columns, vec!["result"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(2));
+    }
+
+    #[test]
+    fn test_execute_standalone_return_string() {
+        let mut graph = Graph::new();
+        let stmt = Parser::new(r#"RETURN 'hello' AS greeting"#)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result = Executor::new(&mut graph).execute(stmt).unwrap();
+        assert_eq!(result.columns, vec!["greeting"]);
+        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_execute_standalone_return_multiple() {
+        let mut graph = Graph::new();
+        let stmt = Parser::new("RETURN 1 AS a, 2 AS b")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let result = Executor::new(&mut graph).execute(stmt).unwrap();
+        assert_eq!(result.columns, vec!["a", "b"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns[0], Value::Int(1));
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));
     }
 }

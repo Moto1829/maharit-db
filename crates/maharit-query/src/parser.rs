@@ -162,6 +162,7 @@ impl Parser {
             Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
             Some(TokenKind::Unwind) => return self.parse_unwind(),
             Some(TokenKind::Foreach) => return self.parse_foreach(),
+            Some(TokenKind::Return) => return self.parse_standalone_return(),
             Some(TokenKind::Drop) => {
                 // Peek ahead to check for DROP FULLTEXT INDEX vs DROP CONSTRAINT
                 if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Fulltext) {
@@ -192,7 +193,7 @@ impl Parser {
             }
             Some(_) => {
                 return Err(self.unexpected_token(
-                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, DROP, DROP INDEX, SHOW, ALTER, CALL, EXPLAIN, or PROFILE",
+                    "CREATE, MATCH, MERGE, UNWIND, FOREACH, RETURN, DROP, DROP INDEX, SHOW, ALTER, CALL, EXPLAIN, or PROFILE",
                 ));
             }
             None => return Err(ParseError::UnexpectedEof),
@@ -696,13 +697,27 @@ impl Parser {
 
         let mut items = Vec::new();
 
-        // First item
-        items.push(self.parse_return_item()?);
+        // First item (with optional AS alias)
+        {
+            let mut item = self.parse_return_item()?;
+            if self.check(TokenKind::As) {
+                self.advance();
+                let alias = self.expect_ident()?;
+                item = ReturnItem::Alias(Box::new(item), alias);
+            }
+            items.push(item);
+        }
 
-        // Additional items
+        // Additional items (with optional AS alias)
         while self.check(TokenKind::Comma) {
             self.advance();
-            items.push(self.parse_return_item()?);
+            let mut item = self.parse_return_item()?;
+            if self.check(TokenKind::As) {
+                self.advance();
+                let alias = self.expect_ident()?;
+                item = ReturnItem::Alias(Box::new(item), alias);
+            }
+            items.push(item);
         }
 
         // ORDER BY (optional)
@@ -852,6 +867,22 @@ impl Parser {
                 }));
             }
             return Err(self.unexpected_token("("));
+        }
+
+        // 非identifierトークンの場合はexpressionとして解析
+        match self.peek_kind() {
+            Some(TokenKind::Int(_))
+            | Some(TokenKind::Float(_))
+            | Some(TokenKind::String(_))
+            | Some(TokenKind::True)
+            | Some(TokenKind::False)
+            | Some(TokenKind::Null)
+            | Some(TokenKind::Not)
+            | Some(TokenKind::Minus) => {
+                let expr = self.parse_expression()?;
+                return Ok(ReturnItem::Expr(expr));
+            }
+            _ => {}
         }
 
         let saved_pos = self.pos;
@@ -1469,6 +1500,14 @@ impl Parser {
             on_match_set,
             return_clause,
         }))
+    }
+
+    // ========== Standalone RETURN ==========
+
+    fn parse_standalone_return(&mut self) -> Result<Statement, ParseError> {
+        self.expect(TokenKind::Return)?;
+        let return_clause = self.parse_return_clause()?;
+        Ok(Statement::Return(return_clause))
     }
 
     // ========== UNWIND ==========
@@ -3979,6 +4018,33 @@ mod tests {
     fn test_parse_unwind_keyword() {
         let stmt = parse("UNWIND [1] AS x RETURN x");
         assert!(stmt.is_ok());
+    }
+
+    // ========== Standalone RETURN tests (Task 89) ==========
+
+    #[test]
+    fn test_parse_standalone_return_literal() {
+        let stmt = parse("RETURN 1 + 1 AS result");
+        assert!(stmt.is_ok(), "Failed: {:?}", stmt);
+        assert!(matches!(stmt.unwrap(), Statement::Return(_)));
+    }
+
+    #[test]
+    fn test_parse_standalone_return_string() {
+        let stmt = parse(r#"RETURN 'hello' AS greeting"#);
+        assert!(stmt.is_ok(), "Failed: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_standalone_return_bool_expr() {
+        let stmt = parse("RETURN true AND false AS check");
+        assert!(stmt.is_ok(), "Failed: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_standalone_return_multiple_items() {
+        let stmt = parse("RETURN 1 AS a, 2 AS b, 'x' AS c");
+        assert!(stmt.is_ok(), "Failed: {:?}", stmt);
     }
 
     #[test]

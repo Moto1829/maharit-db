@@ -440,6 +440,9 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         Statement::ProcedureCall(pc) => {
             vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
         }
+        Statement::Return(rc) => {
+            vec![PlanNode::new("StandaloneReturn", 1, rc.items.len() as u64, "")]
+        }
     };
 
     QueryPlan { nodes }
@@ -512,6 +515,9 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         Statement::Profile(inner) => return build_plan(inner, node_count, edge_count),
         Statement::ProcedureCall(pc) => {
             vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
+        }
+        Statement::Return(rc) => {
+            vec![PlanNode::new("StandaloneReturn", 1, rc.items.len() as u64, "")]
         }
     };
 
@@ -1187,6 +1193,11 @@ fn has_implicit_group_by(return_clause: &ReturnClause) -> bool {
     for item in &return_clause.items {
         match item {
             ReturnItem::Aggregate(_) => has_aggregate = true,
+            ReturnItem::Alias(inner, _) => match inner.as_ref() {
+                ReturnItem::Aggregate(_) => has_aggregate = true,
+                ReturnItem::Variable(_) | ReturnItem::Property(_, _) => has_non_aggregate = true,
+                _ => {}
+            },
             ReturnItem::Variable(_) | ReturnItem::Property(_, _) => has_non_aggregate = true,
             ReturnItem::All | ReturnItem::Function(_) | ReturnItem::Expr(_) => {}
         }
@@ -1196,10 +1207,11 @@ fn has_implicit_group_by(return_clause: &ReturnClause) -> bool {
 
 /// RETURN 句に集計関数が1つでも含まれているか判定する。
 fn has_any_aggregate(return_clause: &ReturnClause) -> bool {
-    return_clause
-        .items
-        .iter()
-        .any(|item| matches!(item, ReturnItem::Aggregate(_)))
+    return_clause.items.iter().any(|item| match item {
+        ReturnItem::Aggregate(_) => true,
+        ReturnItem::Alias(inner, _) => matches!(inner.as_ref(), ReturnItem::Aggregate(_)),
+        _ => false,
+    })
 }
 
 /// GROUP BY キーのリストを文字列化する（プラン表示用）。
@@ -1210,6 +1222,7 @@ fn group_by_keys(return_clause: &ReturnClause) -> String {
         .filter_map(|item| match item {
             ReturnItem::Variable(v) => Some(v.clone()),
             ReturnItem::Property(v, p) => Some(format!("{}.{}", v, p)),
+            ReturnItem::Alias(_, name) => Some(name.clone()),
             _ => None,
         })
         .collect();
@@ -1238,7 +1251,10 @@ fn analyze_projection(return_clause: &ReturnClause) -> String {
             ReturnItem::Property(var, prop) => {
                 properties.push(format!("{}.{}", var, prop));
             }
-            ReturnItem::Aggregate(_) | ReturnItem::Function(_) | ReturnItem::Expr(_) => {
+            ReturnItem::Alias(_, _)
+            | ReturnItem::Aggregate(_)
+            | ReturnItem::Function(_)
+            | ReturnItem::Expr(_) => {
                 // Aggregates need full data, no pruning possible
                 has_variable = true;
             }

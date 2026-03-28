@@ -16,6 +16,7 @@ pub fn is_read_only(stmt: &Statement) -> bool {
     match stmt {
         // Pure reads
         Statement::Match(_) => true,
+        Statement::Return(_) => true,
         Statement::Union(u) => u.queries.iter().all(|_| true), // all MATCH queries
         Statement::ShowConstraints => true,
         Statement::ShowUsers => true,
@@ -99,6 +100,8 @@ pub enum Statement {
     Profile(Box<Statement>),
     /// プロシージャコール: CALL proc.name(args) YIELD col1, col2 ...
     ProcedureCall(ProcedureCallStatement),
+    /// 単独RETURN文: RETURN 1+1 AS result
+    Return(ReturnClause),
 }
 
 /// UNION文
@@ -383,6 +386,8 @@ pub enum ReturnItem {
     Function(ScalarFunction),
     /// 任意の式: RETURN [x IN list | expr], RETURN list[i], etc.
     Expr(Expression),
+    /// AS エイリアス: RETURN expr AS name
+    Alias(Box<ReturnItem>, String),
 }
 
 /// 集計関数
