@@ -1,2 +1,4 @@
 /target
 /benchmark_reports/
+
+.claude/agent-memory/
