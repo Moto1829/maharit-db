@@ -15,6 +15,7 @@ import argparse
 import json
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -237,6 +238,38 @@ def test_cleanup_propagation(followers: list, wait_sec: float):
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
+def check_docker_compose() -> None:
+    """docker-compose.replication.yml のコンテナ群が起動中か確認する。"""
+    required = {"maharit-leader", "maharit-follower1", "maharit-follower2"}
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = set(result.stdout.splitlines())
+    except Exception:
+        print(f"{YELLOW}警告: Docker が利用できないため前提環境の確認をスキップします。{RESET}")
+        return
+
+    missing = required - running
+    if not missing:
+        return
+
+    if "maharit-db-server" in running:
+        print(f"\n{RED}エラー: docker-compose.yml (シングルサーバー) の環境が起動中です。{RESET}")
+        print("このスクリプトには docker-compose.replication.yml が必要です。\n")
+        print("  docker compose down")
+        print("  docker compose -f docker-compose.replication.yml up -d --build\n")
+        sys.exit(1)
+
+    print(f"\n{RED}エラー: レプリケーション環境が起動していません。{RESET}")
+    if len(missing) < len(required):
+        print(f"  未起動コンテナ: {', '.join(sorted(missing))}")
+    print("以下のコマンドで起動してください:\n")
+    print("  docker compose -f docker-compose.replication.yml up -d --build\n")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MaharitDB レプリケーション動作確認")
     parser.add_argument("--host", default="localhost", help="接続ホスト (default: localhost)")
@@ -246,6 +279,7 @@ def main():
     parser.add_argument("--wait", type=float, default=1.0,
                         help="レプリケーション伝播を待つ秒数 (default: 1.0)")
     args = parser.parse_args()
+    check_docker_compose()
 
     follower_ports = [int(p.strip()) for p in args.follower_ports.split(",")]
 

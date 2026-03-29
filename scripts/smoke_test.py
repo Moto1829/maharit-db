@@ -12,15 +12,17 @@ import argparse
 import json
 import socket
 import struct
+import subprocess
 import sys
 import time
 
 # ── ANSI カラー ──────────────────────────────────────────────────────────────
-GREEN = "\033[92m"
-RED   = "\033[91m"
-CYAN  = "\033[96m"
-BOLD  = "\033[1m"
-RESET = "\033[0m"
+GREEN  = "\033[92m"
+RED    = "\033[91m"
+YELLOW = "\033[93m"
+CYAN   = "\033[96m"
+BOLD   = "\033[1m"
+RESET  = "\033[0m"
 
 
 # ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
@@ -290,11 +292,40 @@ def test_cleanup(client: MaharitClient):
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
+def check_docker_compose() -> None:
+    """docker-compose.yml の maharit-db-server が起動中か確認する。"""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = set(result.stdout.splitlines())
+    except Exception:
+        print(f"{YELLOW}警告: Docker が利用できないため前提環境の確認をスキップします。{RESET}")
+        return
+
+    if "maharit-db-server" in running:
+        return
+
+    if running & {"maharit-leader", "maharit-follower1", "maharit-follower2"}:
+        print(f"\n{RED}エラー: docker-compose.replication.yml の環境が起動中です。{RESET}")
+        print("このスクリプトには docker-compose.yml (シングルサーバー) が必要です。\n")
+        print("  docker compose -f docker-compose.replication.yml down")
+        print("  docker compose up -d maharit-server\n")
+        sys.exit(1)
+
+    print(f"\n{RED}エラー: maharit-db-server コンテナが起動していません。{RESET}")
+    print("以下のコマンドで起動してください:\n")
+    print("  docker compose up -d maharit-server\n")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MaharitDB Smoke Test")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=7687)
     args = parser.parse_args()
+    check_docker_compose()
 
     print(f"\n{BOLD}MaharitDB Smoke Test{RESET}")
     print(f"接続先: {args.host}:{args.port}")

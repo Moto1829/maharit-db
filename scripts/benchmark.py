@@ -20,6 +20,7 @@ import os
 import random
 import socket
 import struct
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -428,6 +429,34 @@ def save_json_report(all_results: list[BenchResult], args, output_path: str):
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
+def check_docker_compose() -> None:
+    """docker-compose.yml の maharit-db-server が起動中か確認する。"""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = set(result.stdout.splitlines())
+    except Exception:
+        print(f"{YELLOW}警告: Docker が利用できないため前提環境の確認をスキップします。{RESET}")
+        return
+
+    if "maharit-db-server" in running:
+        return
+
+    if running & {"maharit-leader", "maharit-follower1", "maharit-follower2"}:
+        print(f"\n{RED}エラー: docker-compose.replication.yml の環境が起動中です。{RESET}")
+        print("このスクリプトには docker-compose.yml (シングルサーバー) が必要です。\n")
+        print("  docker compose -f docker-compose.replication.yml down")
+        print("  docker compose up -d maharit-server\n")
+        sys.exit(1)
+
+    print(f"\n{RED}エラー: maharit-db-server コンテナが起動していません。{RESET}")
+    print("以下のコマンドで起動してください:\n")
+    print("  docker compose up -d maharit-server\n")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MaharitDB 大量データ性能ベンチマーク")
     parser.add_argument("--host",       default="localhost")
@@ -450,6 +479,7 @@ def main():
                              "(例: benchmark_reports/baseline.json)。"
                              "perf_check.py によるベースライン比較に使用します。")
     args = parser.parse_args()
+    check_docker_compose()
 
     print(f"\n{BOLD}MaharitDB 大量データ性能ベンチマーク{RESET}")
     print(f"接続先  : {args.host}:{args.port}")
