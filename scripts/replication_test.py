@@ -238,9 +238,21 @@ def test_cleanup_propagation(followers: list, wait_sec: float):
 
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
+def _port_open(host: str, port: int) -> bool:
+    """指定ホスト:ポートへの接続を試みる。"""
+    try:
+        s = socket.create_connection((host, port), timeout=1.0)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
 def check_docker_compose() -> None:
-    """docker-compose.replication.yml のコンテナ群が起動中か確認する。"""
+    """docker-compose.replication.yml のコンテナ群、またはローカルプロセスが
+    起動中か確認する。"""
     required = {"maharit-leader", "maharit-follower1", "maharit-follower2"}
+    running: set = set()
     try:
         result = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],
@@ -248,13 +260,19 @@ def check_docker_compose() -> None:
         )
         running = set(result.stdout.splitlines())
     except Exception:
-        print(f"{YELLOW}警告: Docker が利用できないため前提環境の確認をスキップします。{RESET}")
+        pass  # Docker が使えない場合はポートチェックへフォールバック
+
+    # Docker コンテナで全コンテナが起動中
+    if not (required - running):
         return
 
-    missing = required - running
-    if not missing:
+    # ローカルプロセスとしてポートが開いているか確認
+    local_ports = [7687, 7689, 7690]
+    if all(_port_open("127.0.0.1", p) for p in local_ports):
+        print(f"{CYAN}ℹ ローカルプロセスモードで実行します (ports: {local_ports}){RESET}")
         return
 
+    # 誤った compose が起動中
     if "maharit-db-server" in running:
         print(f"\n{RED}エラー: docker-compose.yml (シングルサーバー) の環境が起動中です。{RESET}")
         print("このスクリプトには docker-compose.replication.yml が必要です。\n")
@@ -262,11 +280,13 @@ def check_docker_compose() -> None:
         print("  docker compose -f docker-compose.replication.yml up -d --build\n")
         sys.exit(1)
 
+    # 何も起動していない
     print(f"\n{RED}エラー: レプリケーション環境が起動していません。{RESET}")
-    if len(missing) < len(required):
-        print(f"  未起動コンテナ: {', '.join(sorted(missing))}")
-    print("以下のコマンドで起動してください:\n")
-    print("  docker compose -f docker-compose.replication.yml up -d --build\n")
+    if running and (required - running):
+        print(f"  未起動コンテナ: {', '.join(sorted(required - running))}")
+    print("以下のいずれかのコマンドで起動してください:\n")
+    print("  bash scripts/start_replication_local.sh          # ローカルプロセス")
+    print("  docker compose -f docker-compose.replication.yml up -d --build  # Docker\n")
     sys.exit(1)
 
 
