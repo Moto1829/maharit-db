@@ -11417,6 +11417,31 @@ mod tests {
         assert!(b.is_none() || b == Some(&PropertyValue::Null));
     }
 
+    #[test]
+    fn test_unwind_inline_json_map_create() {
+        // benchmark.py の bench_unwind_batch_create が生成するクエリ形式 (Task 88)
+        // json.dumps で {"key": value} 形式になるインラインマップリテラル + CREATE
+        let mut graph = Graph::new();
+        let result = execute(
+            &mut graph,
+            r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name, city: item.city})"#,
+        );
+        assert!(result.is_ok(), "UNWIND with inline JSON map literal failed: {:?}", result);
+        assert_eq!(graph.node_count(), 2);
+
+        let result = execute(
+            &mut graph,
+            "MATCH (n:UnwindBench) RETURN n.id, n.name, n.city ORDER BY n.id",
+        ).unwrap();
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::Int(0));
+        assert_eq!(result.rows[0].columns[1], Value::String("Alice0".to_string()));
+        assert_eq!(result.rows[0].columns[2], Value::String("Tokyo".to_string()));
+        assert_eq!(result.rows[1].columns[0], Value::Int(1));
+        assert_eq!(result.rows[1].columns[1], Value::String("Bob1".to_string()));
+        assert_eq!(result.rows[1].columns[2], Value::String("Osaka".to_string()));
+    }
+
     // ========== Standalone RETURN tests (Task 89) ==========
 
     #[test]
