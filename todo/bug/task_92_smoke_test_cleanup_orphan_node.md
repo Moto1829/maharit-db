@@ -68,6 +68,10 @@ smoke_test.py が自分で作成したノードのみを対象にするよう、
 
 MEDIUM
 
+## 状態
+
+完了 (2026-03-30)
+
 ## 関連ファイル
 
 - `scripts/smoke_test.py` — `test_cleanup()` (L278〜L290), `main()` (L323〜)

@@ -278,12 +278,8 @@ def test_error_handling(client: MaharitClient):
 def test_cleanup(client: MaharitClient):
     section("クリーンアップ")
 
-    for label in ("TxTest", "StreamTest", "Company"):
-        resp = run_query(client, f"MATCH (n:{label}) DETACH DELETE n")
-        check(f"{label} 削除", resp.get("type") == "result", str(resp))
-
-    resp = run_query(client, "MATCH (n:Person) DETACH DELETE n")
-    check("Person 削除", resp.get("type") == "result", str(resp))
+    resp = run_query(client, "MATCH (n) DETACH DELETE n")
+    check("全ノード削除", resp.get("type") == "result", str(resp))
 
     resp = run_query(client, "MATCH (n) RETURN n")
     check("全ノード削除済み", len(resp.get("rows", [])) == 0,
@@ -336,6 +332,9 @@ def main():
     except Exception as e:
         print(f"{RED}接続失敗: {e}{RESET}")
         sys.exit(1)
+
+    # テスト開始前にDB全体をリセットして冪等性を確保
+    run_query(client, "MATCH (n) DETACH DELETE n")
 
     try:
         test_ping(client)
