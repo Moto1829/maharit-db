@@ -1,105 +1,108 @@
 {
-  "timestamp": "2026-03-29T00:03:38Z",
+  "timestamp": "2026-03-31T15:14:51Z",
   "node_count": 1000,
   "host": "localhost",
   "port": 7687,
-  "_note": "このファイルはパフォーマンス回帰チェックのベースラインです。サーバーを起動して以下のコマンドで更新してください: python3 scripts/benchmark.py --nodes 1000 --output-json benchmark_reports/baseline.json",
+  "environment": {
+    "build_type": "docker_release",
+    "docker_image_id": "sha256:0467432e079d1cd1f2e434566d7023bcb749c830ee899e5b601be8d18dbb7ca1"
+  },
   "results": {
     "CREATE Person nodes": {
-      "ops_per_sec": 14891.89,
-      "latency_ms": 0.0672,
+      "ops_per_sec": 120.45,
+      "latency_ms": 8.3021,
       "count": 1000,
-      "elapsed_s": 0.0672
+      "elapsed_s": 8.3021
     },
     "UNWIND batch CREATE (map list)": {
-      "ops_per_sec": 171493.49,
-      "latency_ms": 0.0058,
+      "ops_per_sec": 11870.81,
+      "latency_ms": 0.0842,
       "count": 1000,
-      "elapsed_s": 0.0058
+      "elapsed_s": 0.0842
     },
     "CREATE KNOWS edges": {
-      "ops_per_sec": 2859.59,
-      "latency_ms": 0.3497,
+      "ops_per_sec": 56.32,
+      "latency_ms": 17.7554,
       "count": 300,
-      "elapsed_s": 0.1049
+      "elapsed_s": 5.3266
     },
     "MATCH full scan (BenchPerson)": {
-      "ops_per_sec": 1091604.29,
-      "latency_ms": 0.0009,
+      "ops_per_sec": 116370.98,
+      "latency_ms": 0.0086,
       "count": 1000,
-      "elapsed_s": 0.0009
+      "elapsed_s": 0.0086
     },
     "MATCH WHERE age > 40": {
-      "ops_per_sec": 683491.66,
-      "latency_ms": 0.0015,
+      "ops_per_sec": 167565.5,
+      "latency_ms": 0.006,
       "count": 580,
-      "elapsed_s": 0.0008
+      "elapsed_s": 0.0035
     },
     "MATCH WHERE city = 'Tokyo'": {
-      "ops_per_sec": 166724.79,
-      "latency_ms": 0.006,
+      "ops_per_sec": 43295.52,
+      "latency_ms": 0.0231,
       "count": 100,
-      "elapsed_s": 0.0006
+      "elapsed_s": 0.0023
     },
     "MATCH WHERE skill = 'Rust'": {
-      "ops_per_sec": 178704.55,
-      "latency_ms": 0.0056,
+      "ops_per_sec": 53191.49,
+      "latency_ms": 0.0188,
       "count": 100,
-      "elapsed_s": 0.0006
+      "elapsed_s": 0.0019
     },
     "MATCH WHERE id < 100": {
-      "ops_per_sec": 188723.74,
-      "latency_ms": 0.0053,
+      "ops_per_sec": 53402.15,
+      "latency_ms": 0.0187,
       "count": 100,
-      "elapsed_s": 0.0005
+      "elapsed_s": 0.0019
     },
     "AGG COUNT all": {
-      "ops_per_sec": 3076.54,
-      "latency_ms": 0.325,
+      "ops_per_sec": 20.6,
+      "latency_ms": 48.5551,
       "count": 1,
-      "elapsed_s": 0.0003
+      "elapsed_s": 0.0486
     },
     "AGG AVG age": {
-      "ops_per_sec": 2145.15,
-      "latency_ms": 0.4662,
+      "ops_per_sec": 122.09,
+      "latency_ms": 8.1904,
       "count": 1,
-      "elapsed_s": 0.0005
+      "elapsed_s": 0.0082
     },
     "AGG COUNT per city": {
-      "ops_per_sec": 13372.7,
-      "latency_ms": 0.0748,
+      "ops_per_sec": 1662.03,
+      "latency_ms": 0.6017,
       "count": 10,
-      "elapsed_s": 0.0007
+      "elapsed_s": 0.006
     },
     "AGG COUNT per skill": {
-      "ops_per_sec": 13936.48,
-      "latency_ms": 0.0718,
+      "ops_per_sec": 214.54,
+      "latency_ms": 4.6611,
       "count": 10,
-      "elapsed_s": 0.0007
+      "elapsed_s": 0.0466
     },
     "TRAV 1-hop KNOWS": {
-      "ops_per_sec": 373347.5,
-      "latency_ms": 0.0027,
+      "ops_per_sec": 72213.02,
+      "latency_ms": 0.0138,
       "count": 300,
-      "elapsed_s": 0.0008
+      "elapsed_s": 0.0042
     },
     "TRAV filter on edge": {
-      "ops_per_sec": 219979.29,
-      "latency_ms": 0.0045,
+      "ops_per_sec": 60479.71,
+      "latency_ms": 0.0165,
       "count": 168,
-      "elapsed_s": 0.0008
+      "elapsed_s": 0.0028
     },
     "STREAM MATCH (chunk=100)": {
-      "ops_per_sec": 1183373.05,
-      "latency_ms": 0.0008,
+      "ops_per_sec": 253777.52,
+      "latency_ms": 0.0039,
       "count": 1000,
-      "elapsed_s": 0.0008
+      "elapsed_s": 0.0039
     },
     "Repeated point-lookup (id filter)": {
-      "ops_per_sec": 2067.62,
-      "latency_ms": 0.4836,
+      "ops_per_sec": 53.71,
+      "latency_ms": 18.6186,
       "count": 50,
-      "elapsed_s": 0.0242
+      "elapsed_s": 0.9309
     }
   }
 }

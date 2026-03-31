@@ -82,6 +82,29 @@ python3 scripts/perf_check.py benchmark_reports/baseline_docker.json /tmp/curren
 
 HIGH
 
+## 状態
+
+完了 (2026-04-01)
+
+## 対応内容
+
+### 実施した修正
+
+1. **`scripts/benchmark.py`**: `get_docker_image_id()` ヘルパーを追加し、`save_json_report()` の出力 JSON に `environment` フィールド（`build_type`, `docker_image_id`）を記録するように変更
+
+2. **`scripts/perf_check.py`**: ベースラインと現在の結果で `docker_image_id` が異なる場合に警告を表示する検証ロジックを追加。`build_type` の不一致も警告対象
+
+3. **Docker イメージの再ビルド**: `docker compose build maharit-server` で最新コード（v0.2.0）からイメージを再ビルド（旧イメージは 3 週間前のビルド）
+
+4. **ベースラインの再測定**: 新しい Docker イメージで `benchmark.py --nodes 1000 --output-json benchmark_reports/baseline.json` を実行し、Docker 環境のベースラインを再取得
+
+### 結果
+
+- 旧ベースライン (release バイナリ): CREATE Person nodes **14,892/s**
+- 新ベースライン (Docker): CREATE Person nodes **120/s**
+- 以降は同一 Docker 環境で測定するため、環境差異による誤検知は発生しない
+- `perf_check.py` がイメージ ID を表示・比較するため、将来の不一致も即座に検出可能
+
 ## 関連ファイル
 
 - `scripts/perf_check.py`

@@ -108,10 +108,39 @@ def main():
     print(f"  ベースライン : {args.baseline}")
     print(f"    timestamp  : {baseline.get('timestamp', 'N/A')}")
     print(f"    node_count : {baseline.get('node_count', 'N/A'):,}")
+    base_env = baseline.get("environment", {})
+    if base_env:
+        print(f"    build_type : {base_env.get('build_type', 'N/A')}")
+        if "docker_image_id" in base_env:
+            print(f"    image_id   : {base_env['docker_image_id'][:19]}…")
     print(f"  現在の結果   : {args.current}")
     print(f"    timestamp  : {current.get('timestamp', 'N/A')}")
     print(f"    node_count : {current.get('node_count', 'N/A'):,}")
+    curr_env = current.get("environment", {})
+    if curr_env:
+        print(f"    build_type : {curr_env.get('build_type', 'N/A')}")
+        if "docker_image_id" in curr_env:
+            print(f"    image_id   : {curr_env['docker_image_id'][:19]}…")
     print(f"  失敗閾値     : {args.threshold:.0%} 以上の劣化")
+
+    # 環境不一致の警告
+    base_image = base_env.get("docker_image_id")
+    curr_image = curr_env.get("docker_image_id")
+    if base_image and curr_image and base_image != curr_image:
+        print(f"\n{YELLOW}{BOLD}⚠ 警告: ベースラインと現在の結果で Docker イメージが異なります。{RESET}")
+        print(f"{YELLOW}  ベースライン image_id : {base_image[:40]}{RESET}")
+        print(f"{YELLOW}  現在         image_id : {curr_image[:40]}{RESET}")
+        print(f"{YELLOW}  環境差異により比較結果が不正確になる可能性があります。{RESET}")
+        print(f"{YELLOW}  ベースラインを再取得することを推奨します:{RESET}")
+        print(f"{YELLOW}    docker compose build maharit-server{RESET}")
+        print(f"{YELLOW}    docker compose up -d maharit-server{RESET}")
+        print(f"{YELLOW}    python3 scripts/benchmark.py --nodes 1000 --output-json benchmark_reports/baseline.json{RESET}")
+    elif (base_env.get("build_type") or curr_env.get("build_type")) and \
+            base_env.get("build_type") != curr_env.get("build_type"):
+        print(f"\n{YELLOW}{BOLD}⚠ 警告: ビルドタイプが異なります "
+              f"(ベースライン: {base_env.get('build_type', 'N/A')} / "
+              f"現在: {curr_env.get('build_type', 'N/A')})。{RESET}")
+        print(f"{YELLOW}  比較結果が不正確になる可能性があります。{RESET}")
     print()
 
     failures, warnings, skipped = check_regression(baseline, current, args.threshold)

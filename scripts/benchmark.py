@@ -396,6 +396,19 @@ def save_report(all_results: list[BenchResult], args, output_path: str):
     print(f"  {CYAN}ℹ{RESET}  分析するには Claude Code で {BOLD}/analyze-benchmark{RESET} を実行してください。")
 
 
+def get_docker_image_id(container_name: str = "maharit-db-server") -> str | None:
+    """起動中コンテナのイメージ ID を取得する（取得できない場合は None）"""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Image}}", container_name],
+            capture_output=True, text=True, timeout=5,
+        )
+        image_id = result.stdout.strip()
+        return image_id if image_id else None
+    except Exception:
+        return None
+
+
 def save_json_report(all_results: list[BenchResult], args, output_path: str):
     """JSON フォーマットでベンチマーク結果を保存する（perf_check.py で利用）"""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -411,12 +424,18 @@ def save_json_report(all_results: list[BenchResult], args, output_path: str):
             "elapsed_s":   round(r.elapsed, 4),
         }
 
+    environment: dict = {"build_type": "docker_release"}
+    image_id = get_docker_image_id()
+    if image_id:
+        environment["docker_image_id"] = image_id
+
     payload = {
-        "timestamp":  now,
-        "node_count": args.nodes,
-        "host":       args.host,
-        "port":       args.port,
-        "results":    results,
+        "timestamp":   now,
+        "node_count":  args.nodes,
+        "host":        args.host,
+        "port":        args.port,
+        "environment": environment,
+        "results":     results,
     }
 
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
