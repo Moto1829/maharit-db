@@ -96,8 +96,8 @@ def main():
     parser.add_argument("baseline", help="ベースライン JSON ファイルパス")
     parser.add_argument("current",  help="現在の結果 JSON ファイルパス")
     parser.add_argument(
-        "--threshold", type=float, default=0.20,
-        help="FAIL とみなす劣化率（デフォルト: 0.20 = 20%%）",
+        "--threshold", type=float, default=0.30,
+        help="FAIL とみなす劣化率（デフォルト: 0.30 = 30%%）",
     )
     args = parser.parse_args()
 
@@ -121,7 +121,7 @@ def main():
         print(f"    build_type : {curr_env.get('build_type', 'N/A')}")
         if "docker_image_id" in curr_env:
             print(f"    image_id   : {curr_env['docker_image_id'][:19]}…")
-    print(f"  失敗閾値     : {args.threshold:.0%} 以上の劣化")
+    print(f"  失敗閾値     : {args.threshold:.0%} 以上の劣化（WARN: {args.threshold/2:.0%} 以上）")
 
     # 環境不一致の警告
     base_image = base_env.get("docker_image_id")

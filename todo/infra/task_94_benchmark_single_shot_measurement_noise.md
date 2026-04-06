@@ -105,6 +105,32 @@ count = len(resp.get("rows", []))
 
 MEDIUM
 
+## 状態
+
+完了 (2026-04-06)
+
+## 対応内容
+
+### 方針C（両方対応）を実施
+
+1. **`scripts/benchmark.py`** に繰り返し計測ヘルパーを追加:
+   - `REPEAT_MIN_SECS = 1.0`、`WARMUP_ITERS = 3` 定数を定義
+   - `_run_timed()`: 単一クエリを 1 秒以上繰り返し、中央値レイテンシを返す
+   - `_run_timed_stream()`: streamQuery を 1 秒以上繰り返し、中央値レイテンシを返す
+   - `bench_full_scan`、`bench_filter_queries`、`bench_aggregation`、`bench_traversal`、`bench_stream` を繰り返し計測方式に変更
+
+2. **`scripts/perf_check.py`** のデフォルト閾値を `0.20 → 0.30` に変更（方針C）
+
+3. **ベースラインを繰り返し計測版で再取得**
+
+### 結果
+
+| | 修正前 | 修正後 |
+|--|--------|--------|
+| 同一環境 2回計測での FAIL | 4〜6件 | 0件 |
+| 計測のばらつき（TRAV系） | 1.63x〜1.76x | ±3% 以内 |
+| MATCH WHERE 系スループット | 24,000〜41,000/s | 100,000〜413,000/s（中央値で安定） |
+
 ## 関連ファイル
 
 - `scripts/benchmark.py` (line 195-216: bench_filter_queries, line 250+: bench_traversal, bench_stream)

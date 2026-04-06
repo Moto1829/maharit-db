@@ -88,6 +88,43 @@ class MaharitClient:
         self.sock.close()
 
 
+# ── 繰り返し計測定数 ──────────────────────────────────────────────────────────
+REPEAT_MIN_SECS = 1.0   # 高速クエリを少なくともこの秒数分繰り返す
+WARMUP_ITERS    = 3     # ウォームアップ回数（計測対象外）
+
+
+def _run_timed(client: "MaharitClient", cypher: str, min_secs: float = REPEAT_MIN_SECS) -> tuple[int, float]:
+    """単一クエリを繰り返し実行し (件数, 中央値レイテンシ) を返す。
+    合計時間が min_secs を超えるまで実行し、外れ値を排除するために中央値を使用する。"""
+    resp = None
+    for _ in range(WARMUP_ITERS):
+        resp = client.query(cypher)
+    times: list[float] = []
+    deadline = time.perf_counter() + min_secs
+    while time.perf_counter() < deadline or len(times) < 5:
+        t0 = time.perf_counter()
+        resp = client.query(cypher)
+        times.append(time.perf_counter() - t0)
+    count = len(resp.get("rows", [])) if resp else 0
+    return count, sorted(times)[len(times) // 2]
+
+
+def _run_timed_stream(client: "MaharitClient", request: dict, min_secs: float = REPEAT_MIN_SECS) -> tuple[int, float]:
+    """streamQuery を繰り返し実行し (総行数, 中央値レイテンシ) を返す。"""
+    messages = None
+    for _ in range(WARMUP_ITERS):
+        client.send(request)
+    times: list[float] = []
+    deadline = time.perf_counter() + min_secs
+    while time.perf_counter() < deadline or len(times) < 5:
+        t0 = time.perf_counter()
+        messages = client.send(request)
+        times.append(time.perf_counter() - t0)
+    chunks = [m for m in messages if m.get("type") == "streamChunk"] if messages else []
+    total_rows = sum(len(c.get("rows", [])) for c in chunks)
+    return total_rows, sorted(times)[len(times) // 2]
+
+
 # ── 計測ユーティリティ ─────────────────────────────────────────────────────────
 
 class BenchResult:
@@ -183,11 +220,8 @@ def bench_create_edges(client: MaharitClient, n: int, edge_ratio: float = 0.3) -
 def bench_full_scan(client: MaharitClient) -> BenchResult:
     """全 BenchPerson ノードをスキャンする"""
     section("MATCH フルスキャン")
-    start = time.perf_counter()
-    resp  = client.query("MATCH (n:BenchPerson) RETURN n")
-    elapsed = time.perf_counter() - start
-    count = len(resp.get("rows", []))
-    r = BenchResult("MATCH full scan (BenchPerson)", count, elapsed)
+    count, med = _run_timed(client, "MATCH (n:BenchPerson) RETURN n")
+    r = BenchResult("MATCH full scan (BenchPerson)", count, med)
     r.print()
     return r
 
@@ -205,11 +239,8 @@ def bench_filter_queries(client: MaharitClient, n: int) -> list[BenchResult]:
     ]
 
     for label, cypher in patterns:
-        start   = time.perf_counter()
-        resp    = client.query(cypher)
-        elapsed = time.perf_counter() - start
-        count   = len(resp.get("rows", []))
-        r = BenchResult(f"MATCH {label}", count, elapsed)
+        count, med = _run_timed(client, cypher)
+        r = BenchResult(f"MATCH {label}", count, med)
         r.print()
         results.append(r)
 
@@ -229,11 +260,8 @@ def bench_aggregation(client: MaharitClient) -> list[BenchResult]:
     ]
 
     for label, cypher in agg_queries:
-        start   = time.perf_counter()
-        resp    = client.query(cypher)
-        elapsed = time.perf_counter() - start
-        count   = len(resp.get("rows", []))
-        r = BenchResult(f"AGG {label}", count, elapsed)
+        count, med = _run_timed(client, cypher)
+        r = BenchResult(f"AGG {label}", count, med)
         r.print()
         results.append(r)
 
@@ -251,11 +279,8 @@ def bench_traversal(client: MaharitClient) -> list[BenchResult]:
     ]
 
     for label, cypher in trav_queries:
-        start   = time.perf_counter()
-        resp    = client.query(cypher)
-        elapsed = time.perf_counter() - start
-        count   = len(resp.get("rows", []))
-        r = BenchResult(f"TRAV {label}", count, elapsed)
+        count, med = _run_timed(client, cypher)
+        r = BenchResult(f"TRAV {label}", count, med)
         r.print()
         results.append(r)
 
@@ -265,16 +290,13 @@ def bench_traversal(client: MaharitClient) -> list[BenchResult]:
 def bench_stream(client: MaharitClient, chunk_size: int = 100) -> BenchResult:
     """ストリーミングで全ノードを取得する"""
     section(f"ストリーミング (chunkSize={chunk_size})")
-    start    = time.perf_counter()
-    messages = client.send({
+    request = {
         "type":      "streamQuery",
         "query":     "MATCH (n:BenchPerson) RETURN n",
         "chunkSize": chunk_size,
-    })
-    elapsed = time.perf_counter() - start
-    chunks     = [m for m in messages if m.get("type") == "streamChunk"]
-    total_rows = sum(len(c.get("rows", [])) for c in chunks)
-    r = BenchResult(f"STREAM MATCH (chunk={chunk_size})", total_rows, elapsed)
+    }
+    total_rows, med = _run_timed_stream(client, request)
+    r = BenchResult(f"STREAM MATCH (chunk={chunk_size})", total_rows, med)
     r.print()
     return r
 
