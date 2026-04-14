@@ -8,12 +8,12 @@
 //! - Graceful shutdown
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{ConcurrentGraph, EdgeId, GraphBackend, NodeId, PropertyValue};
+use maharit_core::{ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId, PropertyValue};
 use maharit_query::{Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,10 @@ pub struct TcpServer {
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
+    /// Shared constraint manager: persists across all query executions.
+    constraints: Arc<Mutex<ConstraintManager>>,
+    /// Shared fulltext index manager: persists across all query executions.
+    fulltext: Arc<Mutex<FulltextManager>>,
     /// Optional leader replication manager: when set, write operations are
     /// automatically replicated to followers via WAL entries.
     replication: Option<Arc<LeaderReplicationManager>>,
@@ -239,6 +243,8 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
+            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
+            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
         }
     }
@@ -251,6 +257,8 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
+            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
+            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
         }
     }
@@ -263,6 +271,8 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
+            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
+            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
         }
     }
@@ -329,6 +339,8 @@ impl TcpServer {
                     let stats = Arc::clone(&self.stats);
                     let shutdown = Arc::clone(&self.shutdown);
                     let tx_manager = Arc::clone(&self.tx_manager);
+                    let constraints = Arc::clone(&self.constraints);
+                    let fulltext = Arc::clone(&self.fulltext);
                     let config = self.config.clone();
                     let replication = self.replication.clone();
                     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -340,6 +352,8 @@ impl TcpServer {
                             stats.clone(),
                             shutdown,
                             tx_manager,
+                            constraints,
+                            fulltext,
                             config,
                             replication,
                             &mut shutdown_rx,
@@ -388,6 +402,8 @@ async fn handle_connection(
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
+    constraints: Arc<Mutex<ConstraintManager>>,
+    fulltext: Arc<Mutex<FulltextManager>>,
     config: ServerConfig,
     replication: Option<Arc<LeaderReplicationManager>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
@@ -447,11 +463,13 @@ async fn handle_connection(
                             &query,
                             id,
                             &tx_manager,
+                            &constraints,
+                            &fulltext,
                             replication.as_deref(),
                         )
                         .await
                     }
-                    None => execute_query(&graph, &query, replication.as_deref()).await,
+                    None => execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref()).await,
                 };
                 tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
                 resp
@@ -471,6 +489,8 @@ async fn handle_connection(
                     &query,
                     chunk_size,
                     config.write_timeout,
+                    &constraints,
+                    &fulltext,
                     replication.as_deref(),
                 )
                 .await
@@ -588,6 +608,7 @@ async fn send_response(
 }
 
 /// Execute a streaming query and send results in chunks
+#[allow(clippy::too_many_arguments)]
 async fn execute_streaming_query(
     socket: &mut TcpStream,
     graph: &Arc<ConcurrentGraph>,
@@ -595,6 +616,8 @@ async fn execute_streaming_query(
     query: &str,
     chunk_size: usize,
     write_timeout: Duration,
+    constraints: &Arc<Mutex<ConstraintManager>>,
+    fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
 ) -> std::io::Result<()> {
     // Parse the query
@@ -628,11 +651,21 @@ async fn execute_streaming_query(
         (HashSet::new(), HashSet::new())
     };
 
+    // Clone shared managers into the executor for this query.
+    let cm = constraints.lock().unwrap().clone();
+    let fm = fulltext.lock().unwrap().clone();
+
     // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
     // uses the raw pointer only during the synchronous execute() call below.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent(graph) };
-        executor.execute(stmt)
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let result = executor.execute(stmt);
+        if result.is_ok() {
+            let (new_cm, new_fm) = executor.into_managers();
+            *constraints.lock().unwrap() = new_cm;
+            *fulltext.lock().unwrap() = new_fm;
+        }
+        result
     };
 
     let result = match exec_result {
@@ -798,11 +831,14 @@ fn record_undo_diff_concurrent(
 }
 
 /// Execute a write query within a transaction: snapshot → execute → record undo diff.
+#[allow(clippy::too_many_arguments)]
 async fn execute_query_with_tx(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
     tx_id: u64,
     tx_manager: &TransactionManager,
+    constraints: &Arc<Mutex<ConstraintManager>>,
+    fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
 ) -> Response {
     let stmt = match Parser::new(query) {
@@ -824,7 +860,7 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, replication).await;
+        return execute_query(graph, query, constraints, fulltext, replication).await;
     }
 
     // Snapshot before execution for undo tracking and WAL diff.
@@ -838,10 +874,20 @@ async fn execute_query_with_tx(
         (HashSet::new(), HashSet::new())
     };
 
+    // Clone shared managers into the executor for this query.
+    let cm = constraints.lock().unwrap().clone();
+    let fm = fulltext.lock().unwrap().clone();
+
     // SAFETY: ConcurrentGraph has interior mutability via DashMap.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent(graph) };
-        executor.execute(stmt)
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let result = executor.execute(stmt);
+        if result.is_ok() {
+            let (new_cm, new_fm) = executor.into_managers();
+            *constraints.lock().unwrap() = new_cm;
+            *fulltext.lock().unwrap() = new_fm;
+        }
+        result
     };
 
     match exec_result {
@@ -879,6 +925,8 @@ async fn execute_query_with_tx(
 async fn execute_query(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
+    constraints: &Arc<Mutex<ConstraintManager>>,
+    fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
 ) -> Response {
     let stmt = match Parser::new(query) {
@@ -909,11 +957,21 @@ async fn execute_query(
         (HashSet::new(), HashSet::new())
     };
 
+    // Clone shared managers into the executor for this query.
+    let cm = constraints.lock().unwrap().clone();
+    let fm = fulltext.lock().unwrap().clone();
+
     // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
     // uses the raw pointer only during the synchronous execute() call.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent(graph) };
-        executor.execute(stmt)
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let result = executor.execute(stmt);
+        if result.is_ok() {
+            let (new_cm, new_fm) = executor.into_managers();
+            *constraints.lock().unwrap() = new_cm;
+            *fulltext.lock().unwrap() = new_fm;
+        }
+        result
     };
 
     if is_write
@@ -1888,5 +1946,98 @@ mod tests {
             }
             other => panic!("expected Result, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_constraint_persists_across_queries() {
+        // 制約が複数クエリをまたいで永続化されることを確認する
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // CREATE CONSTRAINT
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE CONSTRAINT unique_test_id FOR (n:TestItem) REQUIRE n.id IS UNIQUE".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "CREATE CONSTRAINT failed: {:?}", resp);
+
+        // 最初のノード作成（成功するはず）
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "First CREATE failed: {:?}", resp);
+
+        // 重複 id で2回目の作成（制約違反でエラーになるはず）
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "Expected constraint violation error, got: {:?}",
+            resp
+        );
+
+        // SHOW CONSTRAINTS で登録済みを確認
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "SHOW CONSTRAINTS".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Result { rows } => {
+                assert!(!rows.is_empty(), "SHOW CONSTRAINTS should return at least one row");
+            }
+            other => panic!("SHOW CONSTRAINTS failed: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fulltext_index_persists_across_queries() {
+        // フルテキストインデックスが複数クエリをまたいで永続化されることを確認する
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // CREATE FULLTEXT INDEX
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE FULLTEXT INDEX ft_test_body FOR (a:Article) ON (a.body)".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "CREATE FULLTEXT INDEX failed: {:?}", resp);
+
+        // DROP FULLTEXT INDEX（永続化されていれば成功するはず）
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "DROP FULLTEXT INDEX ft_test_body".to_string(),
+                tx_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "DROP FULLTEXT INDEX failed (index not persisted): {:?}",
+            resp
+        );
     }
 }

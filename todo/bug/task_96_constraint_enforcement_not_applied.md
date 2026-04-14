@@ -70,3 +70,13 @@ HIGH
 - `crates/maharit-query/src/ast.rs` — CreateConstraintStatement の定義
 - `crates/maharit-server/src/tcp_server.rs` — Executor/ConstraintManager の保持方法
 - `scripts/constraint_test.py` — 失敗テスト
+
+## 解決済み (2026-04-14)
+
+**根本原因**: `TcpServer` が `Executor` を毎クエリ新規作成しており、`ConstraintManager` が空のまま生成されていた。
+
+**修正内容**:
+- `TcpServer` に `Arc<Mutex<ConstraintManager>>` と `Arc<Mutex<FulltextManager>>` を追加
+- `Executor::new_concurrent_with_managers()` および `into_managers()` メソッドを追加
+- 全クエリ実行関数（`execute_query`, `execute_query_with_tx`, `execute_streaming_query`）でマネージャーを注入・更新するよう修正
+- task_97（DROP FULLTEXT INDEX not found）も同一修正で解決

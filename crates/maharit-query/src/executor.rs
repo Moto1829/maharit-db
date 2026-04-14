@@ -371,6 +371,36 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// Create an `Executor` for use with a [`ConcurrentGraph`], pre-populated
+    /// with existing constraint and fulltext managers for state persistence.
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as [`new_concurrent`].
+    pub unsafe fn new_concurrent_with_managers(
+        graph: &'a ConcurrentGraph,
+        constraints: ConstraintManager,
+        fulltext: FulltextManager,
+    ) -> Self {
+        let g: &dyn GraphBackend = graph;
+        Self {
+            graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
+            readonly: false,
+            _marker: std::marker::PhantomData,
+            constraints,
+            fulltext,
+            property_index: PropertyIndex::new(),
+            params: HashMap::new(),
+        }
+    }
+
+    /// Consume the executor and return the constraint and fulltext managers.
+    ///
+    /// Use this after `execute()` to persist updated manager state.
+    pub fn into_managers(self) -> (ConstraintManager, FulltextManager) {
+        (self.constraints, self.fulltext)
+    }
+
     /// Return a shared reference to the graph backend.
     ///
     /// Safe to call in both writable and read-only mode.

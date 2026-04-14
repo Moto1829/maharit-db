@@ -52,3 +52,7 @@ MEDIUM
 - `crates/maharit-query/src/executor.rs` — CreateFulltextIndex/DropFulltextIndex の実行処理
 - `crates/maharit-server/src/tcp_server.rs` — FulltextManager の保持方法
 - `scripts/constraint_test.py` — 失敗テスト（test_fulltext_index）
+
+## 解決済み (2026-04-14)
+
+task_96 と同一根本原因。task_96 の修正により同時解決。
