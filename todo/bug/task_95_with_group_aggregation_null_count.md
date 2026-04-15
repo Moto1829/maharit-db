@@ -64,3 +64,13 @@ HIGH
 - `crates/maharit-query/src/executor.rs` — WITH 句の実行処理
 - `crates/maharit-query/src/ast.rs` — WithClause, WithItem の定義
 - `scripts/query_feature_test.py` — 失敗テスト（test_with_pipeline）
+
+## 解決済み (2026-04-15)
+
+**根本原因**: `apply_with_clause` が各バインディングを個別にループして集計関数を評価していたため、GROUP BY が機能せずグループ集計値が null になっていた。
+
+**修正内容**:
+- `apply_with_clause` に集計関数検出を追加
+- 集計ありの場合は `build_aggregated_result_set` を呼び出してグルーピング・集計を実行
+- 結果を `Vec<Bindings>` に変換して返す
+- `test_with_group_count`, `test_with_group_sum`, `test_with_aggregate_pipeline_then_return` テストを追加

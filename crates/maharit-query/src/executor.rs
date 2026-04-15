@@ -2143,20 +2143,14 @@ impl<'a> Executor<'a> {
         with_clause: &WithClause,
         bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
-        // Project bindings through WITH items
-        let mut result: Vec<Bindings> = Vec::new();
-
-        for binding in &bindings {
-            let mut new_binding = Bindings::new();
-
-            for item in &with_clause.items {
-                let value = self.evaluate_return_item(&item.expression, binding)?;
-
-                // Determine the variable name for this item
-                let var_name = if let Some(ref alias) = item.alias {
+        // Determine effective column names (alias takes priority)
+        let col_names: Vec<String> = with_clause
+            .items
+            .iter()
+            .map(|item| {
+                if let Some(ref alias) = item.alias {
                     alias.clone()
                 } else {
-                    // Use the original variable name if available
                     match &item.expression {
                         ReturnItem::Alias(_, name) => name.clone(),
                         ReturnItem::Variable(v) => v.clone(),
@@ -2166,18 +2160,87 @@ impl<'a> Executor<'a> {
                         ReturnItem::All => "*".to_string(),
                         ReturnItem::Expr(e) => Self::expression_to_display(e),
                     }
-                };
+                }
+            })
+            .collect();
+
+        // Check if any item is an aggregate — if so, delegate to aggregated path
+        let has_aggregation = with_clause
+            .items
+            .iter()
+            .any(|item| Self::is_aggregate(&item.expression));
+
+        if has_aggregation {
+            // Build a temporary ReturnClause so we can reuse build_aggregated_result_set
+            let temp_return_clause = ReturnClause {
+                distinct: with_clause.distinct,
+                items: with_clause
+                    .items
+                    .iter()
+                    .map(|wi| {
+                        // Wrap the expression in an alias if one was provided so that
+                        // return_item_to_column_name produces the right column name.
+                        if let Some(ref alias) = wi.alias {
+                            ReturnItem::Alias(Box::new(wi.expression.clone()), alias.clone())
+                        } else {
+                            wi.expression.clone()
+                        }
+                    })
+                    .collect(),
+                order_by: with_clause.order_by.clone(),
+                skip: with_clause.skip.clone(),
+                limit: with_clause.limit.clone(),
+            };
+
+            let result_set = self.build_aggregated_result_set(&temp_return_clause, &bindings)?;
+
+            // Convert each result row back to Bindings
+            let result: Vec<Bindings> = result_set
+                .rows
+                .into_iter()
+                .map(|row| {
+                    let mut new_binding = Bindings::new();
+                    for (col, value) in col_names.iter().zip(row.columns.into_iter()) {
+                        match value {
+                            Value::Node(id) | Value::NodeData { id, .. } => {
+                                new_binding.insert(col.clone(), BindingValue::Node(id));
+                            }
+                            Value::Path { nodes, edges } => {
+                                new_binding
+                                    .insert(col.clone(), BindingValue::Path { nodes, edges });
+                            }
+                            other => {
+                                new_binding.insert(col.clone(), BindingValue::Scalar(other));
+                            }
+                        }
+                    }
+                    new_binding
+                })
+                .collect();
+
+            return Ok(result);
+        }
+
+        // No aggregation: project bindings row-by-row
+        let mut result: Vec<Bindings> = Vec::new();
+
+        for binding in &bindings {
+            let mut new_binding = Bindings::new();
+
+            for (item, var_name) in with_clause.items.iter().zip(col_names.iter()) {
+                let value = self.evaluate_return_item(&item.expression, binding)?;
 
                 // Convert Value back to BindingValue for the new binding
                 match value {
                     Value::Node(id) | Value::NodeData { id, .. } => {
-                        new_binding.insert(var_name, BindingValue::Node(id));
+                        new_binding.insert(var_name.clone(), BindingValue::Node(id));
                     }
                     Value::Path { nodes, edges } => {
-                        new_binding.insert(var_name, BindingValue::Path { nodes, edges });
+                        new_binding
+                            .insert(var_name.clone(), BindingValue::Path { nodes, edges });
                     }
                     other => {
-                        new_binding.insert(var_name, BindingValue::Scalar(other));
+                        new_binding.insert(var_name.clone(), BindingValue::Scalar(other));
                     }
                 }
             }
@@ -6763,6 +6826,71 @@ mod tests {
             result.rows[1].columns[0],
             Value::String("Charlie".to_string())
         );
+    }
+
+    // ========== WITH group aggregation tests (task_95) ==========
+
+    #[test]
+    fn test_with_group_count() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Charlie", city: "Tokyo"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Person {name: "Bob", city: "Osaka"})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (n:Person) WITH n.city AS city, COUNT(n) AS cnt RETURN city, cnt ORDER BY cnt DESC"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2, "Expected 2 groups (Tokyo, Osaka)");
+        // First row: Tokyo with cnt=2
+        assert_eq!(result.rows[0].columns[0], Value::String("Tokyo".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));
+        // Second row: Osaka with cnt=1
+        assert_eq!(result.rows[1].columns[0], Value::String("Osaka".to_string()));
+        assert_eq!(result.rows[1].columns[1], Value::Int(1));
+    }
+
+    #[test]
+    fn test_with_group_sum() {
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (:Sale {region: "East", amount: 100})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Sale {region: "East", amount: 200})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Sale {region: "West", amount: 50})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (o:Sale) WITH o.region AS region, SUM(o.amount) AS total RETURN region, total ORDER BY total DESC"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("East".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::Int(300));
+        assert_eq!(result.rows[1].columns[0], Value::String("West".to_string()));
+        assert_eq!(result.rows[1].columns[1], Value::Int(50));
+    }
+
+    #[test]
+    fn test_with_aggregate_pipeline_then_return() {
+        // WITH aggregation の結果をさらに RETURN で絞り込む
+        let mut graph = Graph::new();
+        execute(&mut graph, r#"CREATE (:Item {cat: "A", val: 10})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Item {cat: "A", val: 20})"#).unwrap();
+        execute(&mut graph, r#"CREATE (:Item {cat: "B", val: 5})"#).unwrap();
+
+        let result = execute(
+            &mut graph,
+            r#"MATCH (i:Item) WITH i.cat AS cat, COUNT(i) AS cnt RETURN cat, cnt ORDER BY cat"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.row_count(), 2);
+        assert_eq!(result.rows[0].columns[0], Value::String("A".to_string()));
+        assert_eq!(result.rows[0].columns[1], Value::Int(2));
+        assert_eq!(result.rows[1].columns[0], Value::String("B".to_string()));
+        assert_eq!(result.rows[1].columns[1], Value::Int(1));
     }
 
     // ========== Regex match (=~) tests ==========
