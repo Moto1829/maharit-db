@@ -61,6 +61,16 @@ Cypher では Map リテラルのキーは `identifier` でも `string_literal` 
 
 HIGH
 
+## 状態
+
+完了 (2026-03-30)
+
+## 対応内容
+
+- `parse_properties()` で `TokenKind::String` をマップキーとして受け入れる実装は既に存在していた
+- executor の `Expression::Map` 評価・`Expression::Property` の `Value::Map` アクセスも実装済みだった
+- 不足していた executor レベルの統合テスト (`test_unwind_inline_json_map_create`) を追加して動作を確認・固定した
+
 ## 関連ファイル
 
 - `maharit-query/src/parser.rs`
