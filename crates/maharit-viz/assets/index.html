@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MaharitDB Visualizer (preview)</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f1115;
+        --panel: #181c24;
+        --border: #2a303c;
+        --text: #e6e8ec;
+        --muted: #8a93a6;
+        --accent: #5aa9ff;
+        --error: #ff6b6b;
+        --ok: #51cf66;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans",
+          "Meiryo", sans-serif;
+      }
+      header {
+        padding: 12px 20px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+      }
+      h1 { font-size: 16px; margin: 0; font-weight: 600; }
+      .meta { color: var(--muted); font-size: 12px; }
+      main {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 16px;
+        padding: 16px;
+      }
+      .editor {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 100px;
+        background: #0d1014;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 10px;
+        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+        font-size: 13px;
+        resize: vertical;
+      }
+      .controls {
+        margin-top: 8px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      button {
+        background: var(--accent);
+        color: #0a0d12;
+        border: 0;
+        border-radius: 4px;
+        padding: 8px 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.6; cursor: progress; }
+      .status { color: var(--muted); font-size: 12px; }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--error); }
+      .results {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+        overflow: auto;
+        min-height: 200px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 13px;
+      }
+      th, td {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th { background: #1f2530; }
+      pre.error {
+        margin: 0;
+        color: var(--error);
+        white-space: pre-wrap;
+      }
+      .placeholder {
+        color: var(--muted);
+        margin: 16px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>MaharitDB Visualizer</h1>
+      <span class="meta" id="meta">connecting…</span>
+    </header>
+    <main>
+      <section class="editor">
+        <textarea id="query" spellcheck="false" placeholder="例: MATCH (n) RETURN n LIMIT 25"></textarea>
+        <div class="controls">
+          <button id="run">Run query</button>
+          <span class="status" id="status"></span>
+        </div>
+      </section>
+      <section class="results" id="results">
+        <p class="placeholder">
+          クエリを入力して「Run query」を押すと結果がここに表示されます。
+          <br />
+          (preview UI — テーブル/グラフ表示は後続タスクで Tabulator + cytoscape.js を追加予定)
+        </p>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const meta = $("meta"),
+        results = $("results"),
+        statusEl = $("status"),
+        run = $("run"),
+        query = $("query");
+
+      // 接続先情報を取得
+      fetch("/api/info")
+        .then((r) => r.json())
+        .then((info) => {
+          meta.textContent = `server: ${info.server_addr}  ·  viz: v${info.version}`;
+        })
+        .catch(() => {
+          meta.textContent = "server: (unknown)";
+        });
+
+      run.addEventListener("click", runQuery);
+      query.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") runQuery();
+      });
+
+      async function runQuery() {
+        const q = query.value.trim();
+        if (!q) return;
+        run.disabled = true;
+        statusEl.textContent = "running…";
+        statusEl.className = "status";
+        try {
+          const resp = await fetch("/api/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: q }),
+          });
+          const body = await resp.json();
+          if (!resp.ok || body.error) {
+            renderError(body.error || `HTTP ${resp.status}`);
+            statusEl.className = "status err";
+            statusEl.textContent = "error";
+          } else {
+            renderTable(body);
+            statusEl.className = "status ok";
+            statusEl.textContent = `${body.rows.length} rows · ${body.elapsed_ms} ms`;
+          }
+        } catch (e) {
+          renderError(String(e));
+          statusEl.className = "status err";
+          statusEl.textContent = "network error";
+        } finally {
+          run.disabled = false;
+        }
+      }
+
+      function renderTable({ columns, rows }) {
+        if (!rows.length) {
+          results.innerHTML = '<p class="placeholder">no rows</p>';
+          return;
+        }
+        const thead =
+          "<thead><tr>" +
+          columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") +
+          "</tr></thead>";
+        const tbody =
+          "<tbody>" +
+          rows
+            .map(
+              (row) =>
+                "<tr>" +
+                columns
+                  .map((c) => `<td>${formatCell(row[c])}</td>`)
+                  .join("") +
+                "</tr>"
+            )
+            .join("") +
+          "</tbody>";
+        results.innerHTML = `<table>${thead}${tbody}</table>`;
+      }
+
+      function renderError(msg) {
+        results.innerHTML = `<pre class="error">${escapeHtml(msg)}</pre>`;
+      }
+
+      function formatCell(v) {
+        if (v === null || v === undefined) return '<span style="color:#666">null</span>';
+        return escapeHtml(String(v));
+      }
+
+      function escapeHtml(s) {
+        return s
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+    </script>
+  </body>
+</html>
