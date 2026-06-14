@@ -658,6 +658,82 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// キーワードトークンを識別子として再解釈する際の名前を返す。
+///
+/// プロパティキー / エイリアス / リレーションシップタイプなど、
+/// コンテキスト上は識別子として扱える位置でキーワードトークン
+/// （例: `role`, `name`, `type`, `user`）が現れたときに利用する。
+///
+/// Cypher の慣習に従い、すべて小文字で返す（元の入力ケースは lexer
+/// 段階で失われているため復元不可）。
+///
+/// 識別子・文字列リテラル・数値・記号など、キーワード以外には `None` を返す。
+pub fn keyword_as_ident(kind: &TokenKind) -> Option<&'static str> {
+    Some(match kind {
+        TokenKind::Create => "create",
+        TokenKind::Match => "match",
+        TokenKind::Where => "where",
+        TokenKind::Return => "return",
+        TokenKind::Delete => "delete",
+        TokenKind::Set => "set",
+        TokenKind::Detach => "detach",
+        TokenKind::And => "and",
+        TokenKind::Or => "or",
+        TokenKind::Not => "not",
+        TokenKind::True => "true",
+        TokenKind::False => "false",
+        TokenKind::Null => "null",
+        TokenKind::Order => "order",
+        TokenKind::By => "by",
+        TokenKind::Asc => "asc",
+        TokenKind::Desc => "desc",
+        TokenKind::Limit => "limit",
+        TokenKind::Skip => "skip",
+        TokenKind::Distinct => "distinct",
+        TokenKind::Nulls => "nulls",
+        TokenKind::First => "first",
+        TokenKind::Last => "last",
+        TokenKind::Optional => "optional",
+        TokenKind::With => "with",
+        TokenKind::As => "as",
+        TokenKind::Case => "case",
+        TokenKind::When => "when",
+        TokenKind::Then => "then",
+        TokenKind::Else => "else",
+        TokenKind::End => "end",
+        TokenKind::Union => "union",
+        TokenKind::All => "all",
+        TokenKind::Merge => "merge",
+        TokenKind::Remove => "remove",
+        TokenKind::Unwind => "unwind",
+        TokenKind::On => "on",
+        TokenKind::Constraint => "constraint",
+        TokenKind::Require => "require",
+        TokenKind::Unique => "unique",
+        TokenKind::Show => "show",
+        TokenKind::Drop => "drop",
+        TokenKind::For => "for",
+        TokenKind::Foreach => "foreach",
+        TokenKind::Is => "is",
+        TokenKind::Explain => "explain",
+        TokenKind::Profile => "profile",
+        TokenKind::Contains => "contains",
+        TokenKind::Fulltext => "fulltext",
+        TokenKind::Index => "index",
+        TokenKind::User => "user",
+        TokenKind::Password => "password",
+        TokenKind::Role => "role",
+        TokenKind::Alter => "alter",
+        TokenKind::Starts => "starts",
+        TokenKind::Ends => "ends",
+        TokenKind::Normalized => "normalized",
+        TokenKind::In => "in",
+        TokenKind::Call => "call",
+        TokenKind::Yield => "yield",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

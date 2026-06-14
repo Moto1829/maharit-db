@@ -8,6 +8,6 @@ pub mod planner;
 pub use ast::is_read_only;
 pub use cache::{AstCache, CacheStats, PlanCache, QueryCache};
 pub use executor::{ExecuteError, Executor, ResultSet, Row, Value};
-pub use lexer::{Lexer, LexerError, Span, Token, TokenKind};
+pub use lexer::{Lexer, LexerError, Span, Token, TokenKind, keyword_as_ident};
 pub use parser::{ParseError, ParseResult, Parser, parse_with_recovery};
 pub use planner::{GraphStats, QueryPlan, build_plan, build_plan_with_stats};

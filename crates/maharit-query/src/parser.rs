@@ -656,7 +656,7 @@ impl Parser {
         } else {
             // n.prop = value
             self.expect(TokenKind::Dot)?;
-            let property = self.expect_ident()?;
+            let property = self.expect_ident_or_keyword()?;
             self.expect(TokenKind::Eq)?;
             let value = self.parse_expression()?;
             Ok(SetItem::Property(variable, property, value))
@@ -772,7 +772,7 @@ impl Parser {
 
         let expression = if self.check(TokenKind::Dot) {
             self.advance();
-            let prop = self.expect_ident()?;
+            let prop = self.expect_ident_or_keyword()?;
             OrderByExpression::Property(var, prop)
         } else {
             OrderByExpression::Variable(var)
@@ -936,7 +936,7 @@ impl Parser {
 
         if self.check(TokenKind::Dot) {
             self.advance();
-            let prop = self.expect_ident()?;
+            let prop = self.expect_ident_or_keyword()?;
             Ok(ReturnItem::Property(var, prop))
         } else {
             Ok(ReturnItem::Variable(var))
@@ -1437,7 +1437,7 @@ impl Parser {
         if self.check(TokenKind::Dot) {
             // REMOVE n.prop
             self.advance();
-            let property = self.expect_ident()?;
+            let property = self.expect_ident_or_keyword()?;
             Ok(RemoveItem::Property(variable, property))
         } else if self.check(TokenKind::Colon) {
             // REMOVE n:Label
@@ -1709,7 +1709,7 @@ impl Parser {
                     });
                 }
                 self.expect(TokenKind::Dot)?;
-                let prop = self.expect_ident()?;
+                let prop = self.expect_ident_or_keyword()?;
                 props.push(prop);
 
                 if !self.check(TokenKind::Comma) {
@@ -1731,7 +1731,7 @@ impl Parser {
                 });
             }
             self.expect(TokenKind::Dot)?;
-            let property = self.expect_ident()?;
+            let property = self.expect_ident_or_keyword()?;
             vec![property]
         };
 
@@ -1930,7 +1930,7 @@ impl Parser {
                 });
             }
             self.expect(TokenKind::Dot)?;
-            let prop_name = self.expect_ident()?;
+            let prop_name = self.expect_ident_or_keyword()?;
             properties.push(prop_name);
 
             if !self.check(TokenKind::Comma) {
@@ -2178,6 +2178,12 @@ impl Parser {
     }
 
     /// Expect an identifier or a keyword that can serve as an identifier in dotted names.
+    /// プロパティ名 / プロシージャ名パート / マップキーなど、
+    /// コンテキスト上は識別子として扱える位置で識別子またはキーワードを読み取る。
+    ///
+    /// Cypher 標準ではキーワードは予約語ではなく、識別子位置に現れたときは
+    /// 識別子として解釈される。lexer 段階で大文字小文字を区別しないキーワード化を
+    /// 行っているため、ここで再び識別子に戻す。
     fn expect_ident_or_keyword(&mut self) -> Result<String, ParseError> {
         match self.peek_kind() {
             Some(TokenKind::Ident(s)) => {
@@ -2185,16 +2191,15 @@ impl Parser {
                 self.advance();
                 Ok(s)
             }
-            // Allow keywords commonly used as identifiers in procedure names
-            Some(TokenKind::Index) => {
-                self.advance();
-                Ok("index".to_string())
+            Some(kind) => {
+                if let Some(name) = crate::lexer::keyword_as_ident(kind) {
+                    self.advance();
+                    Ok(name.to_string())
+                } else {
+                    self.expect_ident()
+                }
             }
-            Some(TokenKind::Fulltext) => {
-                self.advance();
-                Ok("fulltext".to_string())
-            }
-            _ => self.expect_ident(),
+            None => self.expect_ident(),
         }
     }
 
@@ -2418,11 +2423,7 @@ impl Parser {
 
         if !self.check(TokenKind::RBrace) {
             loop {
-                // Map keys can be bare identifiers ({id: 1}) or quoted strings ({"id": 1})
-                let key = match self.peek_kind() {
-                    Some(TokenKind::String(_)) => self.expect_string()?,
-                    _ => self.expect_ident()?,
-                };
+                let key = self.parse_property_key()?;
                 self.expect(TokenKind::Colon)?;
                 let value = self.parse_expression()?;
                 props.insert(key, value);
@@ -2437,6 +2438,16 @@ impl Parser {
         self.expect(TokenKind::RBrace)?;
 
         Ok(props)
+    }
+
+    /// マップリテラルのキー位置で識別子を読み取る。
+    /// クォート付き文字列キー (`{"id": 1}`) も許容。
+    /// 識別子位置で現れたキーワードも識別子として再解釈する。
+    fn parse_property_key(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::String(_)) => self.expect_string(),
+            _ => self.expect_ident_or_keyword(),
+        }
     }
 
     // ========== Expression ==========
@@ -2757,7 +2768,7 @@ impl Parser {
                 }
                 if self.check(TokenKind::Dot) {
                     self.advance();
-                    let prop = self.expect_ident()?;
+                    let prop = self.expect_ident_or_keyword()?;
                     Ok(Expression::Property(var, prop))
                 } else {
                     Ok(Expression::Variable(var))
@@ -4066,6 +4077,78 @@ mod tests {
         // benchmark.py の bench_unwind_batch_create が生成するクエリ形式
         let stmt = parse(r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name})"#);
         assert!(stmt.is_ok(), "Failed to parse JSON map list UNWIND: {:?}", stmt);
+    }
+
+    #[test]
+    fn test_parse_property_key_keyword_role() {
+        // Task 98: RBAC キーワードの "role" をプロパティキーに使えること
+        let stmt = parse("CREATE (n {role: 'Engineer'})");
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse 'role' as property key: {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn test_parse_property_key_keyword_in_relationship() {
+        // Task 98: リレーションシップの property にキーワードを使えること
+        let stmt = parse(
+            "MATCH (a), (b) CREATE (a)-[:WORKS_AT {role: 'Engineer'}]->(b)",
+        );
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse 'role' in relationship properties: {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn test_parse_property_key_multiple_keywords() {
+        // Task 98: 複数のキーワードを同時にプロパティキーとして使えること
+        // (role, user, password, type, index などのよく使われる名前)
+        let stmt = parse(
+            "CREATE (n {role: 'r', user: 'u', password: 'p', index: 1, contains: true, call: 'c'})",
+        );
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse multiple keyword keys: {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn test_parse_property_key_keyword_uppercase() {
+        // Task 98: 大文字のキーワードもプロパティキーとして受け入れ
+        // (lexer が大文字小文字を区別しないキーワード認識をしているため)
+        let stmt = parse("CREATE (n {ROLE: 'admin', USER: 'alice'})");
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse uppercase keyword keys: {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn test_parse_property_access_keyword() {
+        // Task 98: n.role / r.type など、ドットアクセス位置のプロパティ名も
+        // キーワードを受け入れること
+        for q in [
+            "MATCH (n) RETURN n.role",
+            "MATCH (n)-[r]->(m) RETURN r.type, n.user, m.password",
+            "MATCH (n) WHERE n.role = 'admin' RETURN n",
+            "MATCH (n) RETURN n ORDER BY n.role DESC",
+            "MATCH (n) SET n.role = 'admin'",
+            "MATCH (n) REMOVE n.role",
+        ] {
+            let stmt = parse(q);
+            assert!(
+                stmt.is_ok(),
+                "Failed to parse property access with keyword: {}\n  err: {:?}",
+                q,
+                stmt
+            );
+        }
     }
 
     // ========== Subquery parser tests ==========
