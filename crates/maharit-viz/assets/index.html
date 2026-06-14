@@ -16,9 +16,29 @@
     <script type="module" src="/app.js"></script>
   </head>
   <body>
+    <!-- 認証有効時のログイン画面 (デフォルトは非表示) -->
+    <div id="login-overlay" hidden>
+      <form id="login-form" class="login-card">
+        <h2>MaharitDB Visualizer</h2>
+        <p class="login-hint">サーバーに認証が必要です</p>
+        <label>
+          ユーザー名
+          <input type="text" id="login-username" autocomplete="username" required />
+        </label>
+        <label>
+          パスワード
+          <input type="password" id="login-password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">ログイン</button>
+        <p class="login-error" id="login-error"></p>
+      </form>
+    </div>
+
     <header>
       <h1>MaharitDB Visualizer</h1>
+      <span class="role-badge" id="role-badge" hidden></span>
       <span class="meta" id="meta">connecting…</span>
+      <button id="logout-button" class="logout-button" type="button" hidden>ログアウト</button>
     </header>
 
     <section class="editor">

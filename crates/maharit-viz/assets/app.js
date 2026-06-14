@@ -6,6 +6,7 @@ import * as api from "./modules/api.js";
 import * as table from "./modules/table_view.js";
 import * as graph from "./modules/graph_view.js";
 import * as history from "./modules/history.js";
+import * as auth from "./modules/auth.js";
 import { attach as attachTabs } from "./modules/tabs.js";
 
 const $ = (id) => document.getElementById(id);
@@ -32,16 +33,30 @@ const els = {
   historyDropdown: $("history-dropdown"),
   historyList: $("history-list"),
   historyClear: $("history-clear"),
+  // 認証
+  loginOverlay: $("login-overlay"),
+  loginForm: $("login-form"),
+  loginUsername: $("login-username"),
+  loginPassword: $("login-password"),
+  loginError: $("login-error"),
+  roleBadge: $("role-badge"),
+  logoutButton: $("logout-button"),
 };
 
 // ── サーバー情報 ───────────────────────────────────────────────────────────
 api.info()
   .then((info) => {
-    els.meta.textContent = `server: ${info.server_addr}  ·  viz: v${info.version}`;
+    const tlsBadge = info.tls_enabled ? "  🔒" : "";
+    els.meta.textContent = `server: ${info.server_addr}${tlsBadge}  ·  viz: v${info.version}`;
   })
   .catch(() => {
     els.meta.textContent = "server: (unknown)";
   });
+
+// ── 認証初期化 ─────────────────────────────────────────────────────────────
+auth.init(els, (_role) => {
+  // 認証完了後（または不要）に他の DOM 配線を行う
+});
 
 // ── タブ切替 ──────────────────────────────────────────────────────────────
 attachTabs({
@@ -97,6 +112,11 @@ async function runQuery() {
       : (resp.body ?? { error: resp.error });
     els.rawContent.textContent = JSON.stringify(rawJson, null, 2);
     if (!resp.ok) {
+      // セッション切れ → ログイン画面に戻す
+      if (resp.status === 401) {
+        auth.handleUnauthorized();
+        return;
+      }
       table.renderError(els.tableHost, resp.error);
       graph.clearOnError(els.graphCanvas);
       els.status.className = "status err";

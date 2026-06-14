@@ -309,3 +309,100 @@ button:disabled { opacity: 0.6; cursor: progress; }
 .tabulator-header { background: var(--panel-2) !important; }
 .tabulator-row { background: var(--bg) !important; }
 .tabulator-row.tabulator-row-even { background: #12161e !important; }
+
+/* ── 認証関連 ──────────────────────────────────────────────────────── */
+
+#login-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 17, 21, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+#login-overlay[hidden] { display: none; }
+.login-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 28px 28px 22px;
+  width: min(360px, 90vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.login-card h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+.login-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.login-card input {
+  background: #0d1014;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.login-card button {
+  margin-top: 4px;
+  padding: 10px;
+  width: 100%;
+}
+.login-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 12px;
+  min-height: 1.2em;
+  text-align: center;
+}
+
+.role-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #0a0d12;
+}
+.role-badge.read_write { background: #b489ff; color: #0a0d12; }
+.role-badge.read_only { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+.role-badge[hidden] { display: none; }
+
+.logout-button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.logout-button:hover { background: var(--border); }
+.logout-button[hidden] { display: none; }
+
+/* ReadOnly 警告 */
+.readonly-warning {
+  color: var(--error);
+  font-size: 11px;
+  display: none;
+}
+.readonly-warning.visible { display: inline; }
