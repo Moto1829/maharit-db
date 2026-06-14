@@ -120,7 +120,100 @@
       }
       .panel.active { display: block; }
       #table-panel, #graph-panel { height: 100%; }
+      #graph-panel { position: relative; }
       #graph-canvas { width: 100%; height: 100%; background: #0d1014; }
+
+      /* Graph 要素の詳細パネル */
+      #graph-detail {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        width: 300px;
+        max-height: calc(100% - 24px);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 10;
+      }
+      #graph-detail.open { display: flex; }
+      .detail-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        background: var(--panel-2);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+      }
+      .detail-kind {
+        text-transform: uppercase;
+        font-weight: 600;
+        font-size: 10px;
+        letter-spacing: 0.5px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: var(--accent);
+        color: #0a0d12;
+      }
+      .detail-kind.edge { background: #b489ff; }
+      .detail-title {
+        flex: 1;
+        color: var(--text);
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .detail-close {
+        background: transparent;
+        color: var(--muted);
+        border: 0;
+        padding: 0 4px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      .detail-close:hover { color: var(--text); background: transparent; }
+      .detail-body {
+        padding: 8px 12px 12px;
+        overflow-y: auto;
+        font-size: 12px;
+      }
+      .detail-section {
+        margin-top: 8px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+        padding-bottom: 4px;
+        border-bottom: 1px solid var(--border);
+      }
+      .detail-row {
+        display: grid;
+        grid-template-columns: minmax(80px, 30%) 1fr;
+        gap: 8px;
+        padding: 5px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .detail-key {
+        color: var(--muted);
+        font-family: ui-monospace, Menlo, monospace;
+        word-break: break-all;
+      }
+      .detail-value {
+        color: var(--text);
+        font-family: ui-monospace, Menlo, monospace;
+        word-break: break-all;
+      }
+      .detail-value.null { color: #555; font-style: italic; }
+      .detail-empty {
+        color: var(--muted);
+        padding: 8px 0;
+        font-style: italic;
+      }
       #raw-panel pre {
         margin: 0;
         padding: 16px;
@@ -183,6 +276,14 @@
       </div>
       <div id="graph-panel" class="panel">
         <div id="graph-canvas"></div>
+        <aside id="graph-detail" aria-hidden="true">
+          <header class="detail-header">
+            <span class="detail-kind" id="detail-kind">NODE</span>
+            <span class="detail-title" id="detail-title">—</span>
+            <button class="detail-close" id="detail-close" aria-label="close">×</button>
+          </header>
+          <div class="detail-body" id="detail-body"></div>
+        </aside>
       </div>
       <div id="raw-panel" class="panel">
         <pre id="raw-content"></pre>
@@ -329,11 +430,12 @@
           return;
         }
 
-        const nodes = new Map(); // id -> { data: { id, label, group } }
-        const edges = []; // { data: { source, target, label } }
+        const nodes = new Map(); // nodeId -> cytoscape element
+        const edges = [];
+        // エッジ用のプロパティ集約: 行ごとに r.* / rel.* / その他「ノード以外」のキーを集める
+        const edgePropPrefixes = collectEdgePrefixes(columns, groups);
 
         for (const row of rows) {
-          // 各グループのノードを登録
           const present = [];
           for (const g of groups) {
             const id = stripQuotes(row[`${g}.id`]);
@@ -348,13 +450,23 @@
                 if (v) { label = v; break; }
               }
               nodes.set(nodeId, {
-                data: { id: nodeId, label: `${label}`, group: g },
+                data: {
+                  id: nodeId,
+                  label: `${label}`,
+                  group: g,
+                  kind: "node",
+                  properties: collectPrefixedProps(row, `${g}.`),
+                },
               });
             }
           }
-          // 同一行で2グループ以上あればエッジを張る
           if (present.length >= 2) {
             const edgeLabel = pickEdgeLabel(row, columns);
+            // エッジ側プロパティ: r.* など、ノードグループ以外の prefix を集める
+            const edgeProps = {};
+            for (const p of edgePropPrefixes) {
+              Object.assign(edgeProps, collectPrefixedProps(row, `${p}.`));
+            }
             for (let i = 0; i < present.length - 1; i++) {
               const a = present[i], b = present[i + 1];
               edges.push({
@@ -363,6 +475,8 @@
                   source: a.nodeId,
                   target: b.nodeId,
                   label: edgeLabel || "",
+                  kind: "edge",
+                  properties: edgeProps,
                 },
               });
             }
@@ -412,6 +526,14 @@
           ],
           layout: { name: "cose", animate: false, fit: true, padding: 30 },
         });
+
+        // ノード／エッジクリックで詳細パネルを表示
+        cy.on("tap", "node", (evt) => showDetail(evt.target.data()));
+        cy.on("tap", "edge", (evt) => showDetail(evt.target.data()));
+        cy.on("tap", (evt) => {
+          if (evt.target === cy) hideDetail();
+        });
+        hideDetail();
       }
 
       function detectNodeGroups(columns) {
@@ -421,6 +543,26 @@
           if (m) groups.add(m[1]);
         }
         return [...groups];
+      }
+
+      function collectPrefixedProps(row, prefix) {
+        const out = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (k.startsWith(prefix)) {
+            out[k.slice(prefix.length)] = stripQuotes(v);
+          }
+        }
+        return out;
+      }
+
+      function collectEdgePrefixes(columns, nodeGroups) {
+        const nodeSet = new Set(nodeGroups);
+        const prefixes = new Set();
+        for (const c of columns) {
+          const m = c.match(/^([A-Za-z_][A-Za-z0-9_]*)\./);
+          if (m && !nodeSet.has(m[1])) prefixes.add(m[1]);
+        }
+        return [...prefixes];
       }
 
       function pickEdgeLabel(row, columns) {
@@ -434,6 +576,81 @@
           }
         }
         return "";
+      }
+
+      const detailPanel = $("graph-detail"),
+        detailKind = $("detail-kind"),
+        detailTitle = $("detail-title"),
+        detailBody = $("detail-body"),
+        detailClose = $("detail-close");
+
+      detailClose.addEventListener("click", hideDetail);
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") hideDetail();
+      });
+
+      function showDetail(data) {
+        const isEdge = data.kind === "edge";
+        detailKind.textContent = isEdge ? "EDGE" : "NODE";
+        detailKind.classList.toggle("edge", isEdge);
+        detailTitle.textContent = data.label || data.id || "(unnamed)";
+
+        const sections = [];
+        if (isEdge) {
+          sections.push({
+            title: "Edge",
+            rows: [
+              ["id", data.id],
+              ["source", data.source],
+              ["target", data.target],
+              ["label", data.label || ""],
+            ],
+          });
+        } else {
+          sections.push({
+            title: "Node",
+            rows: [
+              ["id", data.id],
+              ["group", data.group || ""],
+              ["label", data.label || ""],
+            ],
+          });
+        }
+
+        const props = data.properties || {};
+        const propRows = Object.entries(props).sort(([a], [b]) =>
+          a.localeCompare(b)
+        );
+        sections.push({ title: "Properties", rows: propRows });
+
+        detailBody.innerHTML = sections
+          .map((s) => {
+            const head = `<div class="detail-section">${escapeHtml(s.title)}</div>`;
+            if (!s.rows.length) {
+              return head + '<div class="detail-empty">(no values)</div>';
+            }
+            const body = s.rows
+              .map(([k, v]) => {
+                const nullish = v === null || v === undefined || v === "";
+                const valHtml = nullish
+                  ? '<span class="detail-value null">null</span>'
+                  : `<span class="detail-value">${escapeHtml(String(v))}</span>`;
+                return `<div class="detail-row"><span class="detail-key">${escapeHtml(
+                  String(k)
+                )}</span>${valHtml}</div>`;
+              })
+              .join("");
+            return head + body;
+          })
+          .join("");
+
+        detailPanel.classList.add("open");
+        detailPanel.setAttribute("aria-hidden", "false");
+      }
+
+      function hideDetail() {
+        detailPanel.classList.remove("open");
+        detailPanel.setAttribute("aria-hidden", "true");
       }
 
       function stripQuotes(v) {

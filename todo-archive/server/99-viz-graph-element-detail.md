@@ -81,3 +81,33 @@ MEDIUM（Web UI の本来の体験向上）
 ## 関連ファイル
 
 - `crates/maharit-viz/assets/index.html` (renderGraph / cytoscape セットアップ / CSS)
+
+## 解決済み (2026-06-14)
+
+### 実装内容
+
+`crates/maharit-viz/assets/index.html` のみ修正:
+
+1. **CSS**: `#graph-detail` 詳細パネル（右上オーバーレイ、幅 300px、最大高さ
+   グラフ領域の calc(100% - 24px)、スクロール可能、ダークテーマ準拠）
+2. **マークアップ**: Graph タブ内に `<aside id="graph-detail">` を追加
+   （ヘッダにバッジ NODE/EDGE + タイトル + ✕ ボタン、本文に詳細リスト）
+3. **`renderGraph` 拡張**:
+   - 各ノードに `kind: "node"` と `properties: { ... }` を保持
+     （`<g>.*` 列を集約）
+   - 各エッジに `kind: "edge"` と `properties: { ... }` を保持
+     （ノードグループ以外の prefix 列、典型的には `r.*` を集約）
+4. **ヘルパー追加**: `collectPrefixedProps()` / `collectEdgePrefixes()`
+5. **イベントハンドラ**:
+   - cytoscape の `tap` イベント（node/edge/背景）
+   - ✕ ボタンクリック
+   - Esc キー
+6. **表示ロジック** (`showDetail`/`hideDetail`):
+   - Node/Edge セクション（id / group or source・target / label）
+   - Properties セクション（キーをソートして表示、null は薄色イタリック）
+
+### 反映方法
+
+`docker cp ./crates/maharit-viz/assets/index.html maharit-db-viz:/app/assets/index.html`
+で hot-patch（Rust バイナリ再ビルド不要）。再デプロイ時には Docker イメージに
+含めるためそのまま `docker compose build` で反映される。
