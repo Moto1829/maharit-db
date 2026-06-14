@@ -1,9 +1,17 @@
-# Task 106: maharit-viz Web UI に認証を導入する
+# Task 106: maharit-viz Web UI に認証 / TLS をオプションで導入する
 
 ## 背景・目的
 
-現状の maharit-viz は **認証なし**で誰でも `/api/query` を叩ける状態。
-本番想定や複数ユーザー環境では危険。
+現状の maharit-viz は **認証なし・HTTP のみ** で動作している。本番想定や
+複数ユーザー環境では危険だが、開発時の手軽さは保ちたい。
+
+そこで、**認証と TLS をいずれもオプション機能として実装**し、必要なときだけ
+有効化できるようにする。
+
+> **デフォルト動作（破壊的変更なし）**
+> - 認証: **無効** (`require_auth=false`)、誰でも `/api/query` を叩ける現状の挙動
+> - TLS: **無効**、HTTP のみで listen
+> - `cargo run -p maharit-viz` / `docker compose up` の体験は今までと完全に同じ
 
 `maharit-server` には既に完全な認証基盤がある:
 
@@ -59,9 +67,25 @@ session token で認証できるようにする。
 - `require_auth = false` のサーバーは現状通り無認証で動く
 - 既存テストはそのまま PASS する想定
 
-### Phase 2: maharit-viz 側のログイン・セッション管理
+### Phase 2: maharit-viz 側のログイン・セッション管理（オプション）
+
+> **デフォルトは無効。** `VizConfig::require_auth: bool` を新設し、CLI フラグ
+> または環境変数で明示的に有効化したときだけログインフローが動く。
+> 無効時は今まで通り誰でも `/api/query` を叩ける。
+
+#### 切り替え方法
+
+| 切り替え | デフォルト | 有効化 |
+|---------|-----------|-------|
+| CLI フラグ | 無効 | `maharit-viz --auth` |
+| 環境変数 | 無効 | `MAHARIT_VIZ_AUTH=true` |
+| docker-compose | 無効 | `environment: MAHARIT_VIZ_AUTH=true` |
+
+CLI フラグと環境変数の両方を指定した場合は CLI フラグを優先。
 
 #### バックエンド (`maharit-viz`)
+
+認証**有効時のみ** 以下のエンドポイントと middleware を有効化する:
 
 - ログインエンドポイント:
   - `POST /api/login { username, password }` → server に `Login` 投げて
@@ -72,21 +96,30 @@ session token で認証できるようにする。
     server リクエストに付与
   - Cookie がなければ `401 Unauthorized`
 
+認証**無効時**は middleware を組み込まず、`/api/login` ルートも未登録に
+すれば「ログイン機能はそもそも存在しない」状態になる（混乱回避）。
+
 #### Cookie 設計
 
 - 名前: `maharit_viz_session`
-- 属性: `HttpOnly; SameSite=Lax; Path=/`（HTTPS 環境では `Secure` も）
+- 属性: `HttpOnly; SameSite=Lax; Path=/`（TLS 有効時は `Secure` も自動付与）
 - 有効期限: server 側 session の expiresAt と一致させる
 
 XSS 対策のため **localStorage には保存しない**。
 
 #### フロントエンド (`assets/`)
 
+認証**有効時のみ** 以下を有効化:
+
 - `index.html` を 2 画面構成に:
   - `/login` 相当のログインフォーム
   - `/` (既存) のクエリ UI（未認証なら `/login` にリダイレクト）
 - セッション切れの 401 を検知したらログイン画面に戻す
 - ヘッダに「現在のユーザー名」と「ログアウト」ボタンを表示
+
+認証**無効時**はログインフォームを表示せず、現状の UI のみ。
+フロント側は `/api/info` のレスポンスに `"auth_enabled": true|false` を含めて
+判定する。
 
 実装方式の選択肢:
 
@@ -106,28 +139,51 @@ XSS 対策のため **localStorage には保存しない**。
     （送信は止めない。実エラーは server 側で返ってくる）
 - Admin のときだけ「ユーザー管理」リンクを表示（将来用）
 
-### Phase 4: TLS 必須化
+### Phase 4: TLS サポート（オプション）
 
-認証情報を平文 HTTP で送るのは危険。Phase 2 を本番運用する場合、
-以下のいずれかが必須:
+> **デフォルトは無効。** TLS 関連の CLI フラグ／環境変数が指定された
+> ときだけ HTTPS で listen する。指定なしでは現状通り HTTP。
+> 認証フェーズと独立して有効化／無効化できる
+> （例: 「認証は有効・TLS は無効」も「認証は無効・TLS は有効」も成立）。
 
-#### 案 1: axum 自体に TLS サポートを追加
+#### 切り替え方法
+
+| 切り替え | デフォルト | 有効化 |
+|---------|-----------|-------|
+| CLI フラグ | 無効 (HTTP) | `maharit-viz --tls-cert <PATH> --tls-key <PATH>` |
+| 環境変数 | 無効 (HTTP) | `MAHARIT_VIZ_TLS_CERT=...` + `MAHARIT_VIZ_TLS_KEY=...` |
+| docker-compose | 無効 (HTTP) | 上記環境変数 + 証明書をボリュームでマウント |
+
+両方指定されたとき初めて TLS が有効になる（片方だけは起動時にエラー）。
+
+#### 案 1: axum 自体に TLS サポートを追加（推奨デフォルト）
 
 - `axum-server` の `bind_rustls` を使う
-- `--tls-cert`, `--tls-key` CLI オプションを追加
-- メリット: 余計なコンポーネント不要
+- 上記の CLI フラグ／環境変数を実装
+- メリット: 余計なコンポーネント不要、`docker compose up` 1 発で完結
 - デメリット: 証明書管理を viz が抱える
 
-#### 案 2: リバースプロキシ前提
+#### 案 2: リバースプロキシ前提（ドキュメントで案内のみ）
 
-- viz は HTTP のまま、`docker-compose.yml` に caddy/nginx を追加
+- viz は HTTP のまま、`docker-compose.yml` の追加サンプルとして caddy / nginx
+  の構成例を提供
 - メリット: TLS 設定の柔軟性、Let's Encrypt 自動化が楽
 - デメリット: コンポーネント増加
 
-→ **デフォルトは案 2、案 1 はオプション**で提供。
-ドキュメントに本番運用時の構成例を載せる（`docs/operations/`）。
+→ **コードとして実装するのは案 1**。案 2 は `docs/operations/` に
+構成例を載せるだけ。
 
 ## UX フロー
+
+### 認証無効（デフォルト）
+
+```
+ブラウザでアクセス → そのままクエリ画面（現状と同じ）
+```
+
+ログインフォームもログアウトボタンも一切表示しない。
+
+### 認証有効
 
 ```
 未認証 → ログイン画面表示
@@ -148,6 +204,15 @@ XSS 対策のため **localStorage には保存しない**。
           → Cookie 削除
           → ログイン画面表示
 ```
+
+## 設定マトリクス
+
+| 認証 | TLS | 想定用途 |
+|-----|-----|---------|
+| 無効 | 無効 | **デフォルト**。ローカル開発、Docker compose で立ち上げて触る |
+| 有効 | 無効 | 信頼できる内部ネットワーク + 認証は要る場合（推奨はしない） |
+| 無効 | 有効 | エッジで TLS 終端したいだけのケース |
+| 有効 | 有効 | **本番運用の推奨構成** |
 
 ## スコープ外（将来検討）
 
