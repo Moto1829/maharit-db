@@ -12,6 +12,23 @@
 > - 認証: **無効** (`require_auth=false`)、誰でも `/api/query` を叩ける現状の挙動
 > - TLS: **無効**、HTTP のみで listen
 > - `cargo run -p maharit-viz` / `docker compose up` の体験は今までと完全に同じ
+> - ただし起動時に **WARN ログを出力** して、デフォルト構成が本番想定で
+>   ないことを明示する（後述）
+
+## ログ要件
+
+無効化されていることを運用者が気づけるよう、起動時に WARN レベルで出力する。
+
+| 状態 | ログ例 |
+|------|-------|
+| 認証無効で起動 | `WARN: maharit-viz authentication is DISABLED. /api/query is publicly accessible. Set MAHARIT_VIZ_AUTH=true (or --auth) to enable.` |
+| TLS 無効で起動 | `WARN: maharit-viz is serving over plain HTTP (no TLS). Set --tls-cert/--tls-key (or MAHARIT_VIZ_TLS_CERT/KEY) for production use.` |
+| 認証無効＋TLS無効 | 上記 2 つの WARN を両方とも出す |
+| 認証有効＋TLS無効 | TLS 無効の WARN に加えて `WARN: authentication credentials are transmitted over plain HTTP.` を追加 |
+
+実装は `tracing::warn!` を使い、`maharit-server` 側 (`require_auth=false` 時) も
+同じ方針で WARN を出す。INFO ログでサーバー起動を通知している箇所の直後で出すと
+運用者が見落としにくい。
 
 `maharit-server` には既に完全な認証基盤がある:
 
