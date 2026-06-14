@@ -655,8 +655,7 @@ impl Parser {
             Ok(SetItem::AddLabel(variable, label))
         } else {
             // n.prop = value
-            self.expect(TokenKind::Dot)?;
-            let property = self.expect_ident_or_keyword()?;
+            let property = self.expect_dot_property()?;
             self.expect(TokenKind::Eq)?;
             let value = self.parse_expression()?;
             Ok(SetItem::Property(variable, property, value))
@@ -770,12 +769,9 @@ impl Parser {
     fn parse_order_by_item(&mut self) -> Result<OrderByItem, ParseError> {
         let var = self.expect_ident()?;
 
-        let expression = if self.check(TokenKind::Dot) {
-            self.advance();
-            let prop = self.expect_ident_or_keyword()?;
-            OrderByExpression::Property(var, prop)
-        } else {
-            OrderByExpression::Variable(var)
+        let expression = match self.try_consume_dot_property()? {
+            Some(prop) => OrderByExpression::Property(var, prop),
+            None => OrderByExpression::Variable(var),
         };
 
         let direction = if self.check(TokenKind::Desc) {
@@ -934,12 +930,9 @@ impl Parser {
             return self.parse_aggregate_function(&var);
         }
 
-        if self.check(TokenKind::Dot) {
-            self.advance();
-            let prop = self.expect_ident_or_keyword()?;
-            Ok(ReturnItem::Property(var, prop))
-        } else {
-            Ok(ReturnItem::Variable(var))
+        match self.try_consume_dot_property()? {
+            Some(prop) => Ok(ReturnItem::Property(var, prop)),
+            None => Ok(ReturnItem::Variable(var)),
         }
     }
 
@@ -1434,10 +1427,8 @@ impl Parser {
     fn parse_remove_item(&mut self) -> Result<RemoveItem, ParseError> {
         let variable = self.expect_ident()?;
 
-        if self.check(TokenKind::Dot) {
+        if let Some(property) = self.try_consume_dot_property()? {
             // REMOVE n.prop
-            self.advance();
-            let property = self.expect_ident_or_keyword()?;
             Ok(RemoveItem::Property(variable, property))
         } else if self.check(TokenKind::Colon) {
             // REMOVE n:Label
@@ -1708,8 +1699,7 @@ impl Parser {
                         span: self.current_span(),
                     });
                 }
-                self.expect(TokenKind::Dot)?;
-                let prop = self.expect_ident_or_keyword()?;
+                let prop = self.expect_dot_property()?;
                 props.push(prop);
 
                 if !self.check(TokenKind::Comma) {
@@ -1730,8 +1720,7 @@ impl Parser {
                     span: self.current_span(),
                 });
             }
-            self.expect(TokenKind::Dot)?;
-            let property = self.expect_ident_or_keyword()?;
+            let property = self.expect_dot_property()?;
             vec![property]
         };
 
@@ -1929,8 +1918,7 @@ impl Parser {
                     span: self.current_span(),
                 });
             }
-            self.expect(TokenKind::Dot)?;
-            let prop_name = self.expect_ident_or_keyword()?;
+            let prop_name = self.expect_dot_property()?;
             properties.push(prop_name);
 
             if !self.check(TokenKind::Comma) {
@@ -2178,6 +2166,29 @@ impl Parser {
     }
 
     /// Expect an identifier or a keyword that can serve as an identifier in dotted names.
+    /// `.prop` 形式のドットプロパティアクセスを読み取る（オプショナル版）。
+    /// 次のトークンが `.` でなければ `Ok(None)` を返し、ある場合は dot を
+    /// 消費してプロパティ名（識別子またはキーワード）を返す。
+    ///
+    /// 利用箇所: `parse_order_by_item`, `parse_return_item`, `parse_remove_item`,
+    /// `parse_primary` (Expression::Property).
+    fn try_consume_dot_property(&mut self) -> Result<Option<String>, ParseError> {
+        if self.check(TokenKind::Dot) {
+            self.advance();
+            Ok(Some(self.expect_ident_or_keyword()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// `.prop` を必ず期待する版（Dot がなければパースエラー）。
+    ///
+    /// 利用箇所: `parse_set_item`, REQUIRE constraint (単一/複合), FULLTEXT INDEX.
+    fn expect_dot_property(&mut self) -> Result<String, ParseError> {
+        self.expect(TokenKind::Dot)?;
+        self.expect_ident_or_keyword()
+    }
+
     /// プロパティ名 / プロシージャ名パート / マップキーなど、
     /// コンテキスト上は識別子として扱える位置で識別子またはキーワードを読み取る。
     ///
@@ -2766,12 +2777,9 @@ impl Parser {
                         _ => {}
                     }
                 }
-                if self.check(TokenKind::Dot) {
-                    self.advance();
-                    let prop = self.expect_ident_or_keyword()?;
-                    Ok(Expression::Property(var, prop))
-                } else {
-                    Ok(Expression::Variable(var))
+                match self.try_consume_dot_property()? {
+                    Some(prop) => Ok(Expression::Property(var, prop)),
+                    None => Ok(Expression::Variable(var)),
                 }
             }
             Some(

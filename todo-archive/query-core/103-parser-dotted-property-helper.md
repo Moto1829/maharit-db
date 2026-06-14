@@ -81,3 +81,32 @@ LOW（コード重複の削減、将来の拡張が容易になる）
 ## 関連ファイル
 
 - `crates/maharit-query/src/parser.rs`
+
+## 解決済み (2026-06-14)
+
+### 実装内容
+
+2 つのヘルパーを `Parser` に追加:
+
+```rust
+fn try_consume_dot_property(&mut self) -> Result<Option<String>, ParseError> { ... }
+fn expect_dot_property(&mut self) -> Result<String, ParseError> { ... }
+```
+
+### 置換箇所 (計 7 箇所)
+
+- `try_consume_dot_property` (Dot 任意):
+  - `parse_order_by_item` (ORDER BY n.prop)
+  - `parse_return_item` (RETURN n.prop)
+  - `parse_remove_item` (REMOVE n.prop)
+  - `parse_primary` (Expression::Property)
+- `expect_dot_property` (Dot 必須):
+  - `parse_set_item` (SET n.prop = value)
+  - `parse_constraint` 複合 (REQUIRE n.prop1, n.prop2 IS ...)
+  - `parse_constraint` 単一 (REQUIRE n.prop IS ...)
+  - `parse_create_fulltext_index` (FOR (n.prop1, n.prop2))
+
+### 検証
+
+- `cargo test -p maharit-query` → **487/487 PASS** (リグレッションなし)
+- 既存の Task 98 追加テスト (`test_parse_property_access_keyword` 等) も全て PASS
