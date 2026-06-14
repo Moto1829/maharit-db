@@ -3,52 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MaharitDB Visualizer (preview)</title>
+    <title>MaharitDB Visualizer</title>
+
+    <link
+      href="https://unpkg.com/tabulator-tables@6.3.0/dist/css/tabulator_midnight.min.css"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/tabulator-tables@6.3.0/dist/js/tabulator.min.js"></script>
+    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+
     <style>
       :root {
-        color-scheme: light dark;
+        color-scheme: dark;
         --bg: #0f1115;
         --panel: #181c24;
+        --panel-2: #1f2530;
         --border: #2a303c;
         --text: #e6e8ec;
         --muted: #8a93a6;
         --accent: #5aa9ff;
+        --accent-2: #4a8ad8;
         --error: #ff6b6b;
         --ok: #51cf66;
       }
       * { box-sizing: border-box; }
+      html, body { height: 100%; }
       body {
         margin: 0;
         background: var(--bg);
         color: var(--text);
         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans",
           "Meiryo", sans-serif;
+        display: grid;
+        grid-template-rows: auto auto 1fr;
       }
       header {
-        padding: 12px 20px;
+        padding: 10px 20px;
         background: var(--panel);
         border-bottom: 1px solid var(--border);
         display: flex;
-        align-items: baseline;
+        align-items: center;
         gap: 16px;
       }
       h1 { font-size: 16px; margin: 0; font-weight: 600; }
-      .meta { color: var(--muted); font-size: 12px; }
-      main {
-        display: grid;
-        grid-template-rows: auto 1fr;
-        gap: 16px;
-        padding: 16px;
-      }
+      .meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+
       .editor {
+        padding: 12px 16px;
         background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 12px;
+        border-bottom: 1px solid var(--border);
       }
       textarea {
         width: 100%;
-        min-height: 100px;
+        min-height: 80px;
+        max-height: 200px;
         background: #0d1014;
         color: var(--text);
         border: 1px solid var(--border);
@@ -63,6 +71,7 @@
         display: flex;
         gap: 8px;
         align-items: center;
+        flex-wrap: wrap;
       }
       button {
         background: var(--accent);
@@ -73,39 +82,75 @@
         font-weight: 600;
         cursor: pointer;
       }
+      button:hover { background: var(--accent-2); color: var(--text); }
       button:disabled { opacity: 0.6; cursor: progress; }
-      .status { color: var(--muted); font-size: 12px; }
+      .hint { color: var(--muted); font-size: 12px; }
+      .status { color: var(--muted); font-size: 12px; margin-left: auto; }
       .status.ok { color: var(--ok); }
       .status.err { color: var(--error); }
-      .results {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 12px;
-        overflow: auto;
-        min-height: 200px;
+
+      .results-wrap {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        overflow: hidden;
+        min-height: 0;
       }
-      table {
-        border-collapse: collapse;
-        width: 100%;
+      .tabs {
+        display: flex;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 0 16px;
+      }
+      .tab {
+        padding: 10px 14px;
+        cursor: pointer;
+        color: var(--muted);
+        border-bottom: 2px solid transparent;
         font-size: 13px;
       }
-      th, td {
-        border: 1px solid var(--border);
-        padding: 6px 10px;
-        text-align: left;
-        vertical-align: top;
+      .tab.active {
+        color: var(--text);
+        border-bottom-color: var(--accent);
       }
-      th { background: #1f2530; }
-      pre.error {
+      .panel {
+        display: none;
+        overflow: auto;
+        min-height: 0;
+        background: var(--bg);
+      }
+      .panel.active { display: block; }
+      #table-panel, #graph-panel { height: 100%; }
+      #graph-canvas { width: 100%; height: 100%; background: #0d1014; }
+      #raw-panel pre {
         margin: 0;
+        padding: 16px;
+        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 24px;
+        text-align: center;
+      }
+      .error-box {
+        margin: 16px;
+        padding: 12px;
+        background: rgba(255, 107, 107, 0.08);
+        border: 1px solid rgba(255, 107, 107, 0.4);
+        border-radius: 4px;
         color: var(--error);
         white-space: pre-wrap;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
       }
-      .placeholder {
-        color: var(--muted);
-        margin: 16px 0;
-      }
+
+      /* Tabulator dark overrides */
+      .tabulator { background: var(--bg); border: none; font-size: 13px; }
+      .tabulator-header { background: var(--panel-2) !important; }
+      .tabulator-row { background: var(--bg) !important; }
+      .tabulator-row.tabulator-row-even { background: #12161e !important; }
     </style>
   </head>
   <body>
@@ -113,32 +158,54 @@
       <h1>MaharitDB Visualizer</h1>
       <span class="meta" id="meta">connecting…</span>
     </header>
-    <main>
-      <section class="editor">
-        <textarea id="query" spellcheck="false" placeholder="例: MATCH (n) RETURN n LIMIT 25"></textarea>
-        <div class="controls">
-          <button id="run">Run query</button>
-          <span class="status" id="status"></span>
-        </div>
-      </section>
-      <section class="results" id="results">
-        <p class="placeholder">
-          クエリを入力して「Run query」を押すと結果がここに表示されます。
-          <br />
-          (preview UI — テーブル/グラフ表示は後続タスクで Tabulator + cytoscape.js を追加予定)
-        </p>
-      </section>
-    </main>
+
+    <section class="editor">
+      <textarea
+        id="query"
+        spellcheck="false"
+        placeholder="例: MATCH (n)-[r]->(m) RETURN n.id, n.name, r.type, m.id, m.name"
+      ></textarea>
+      <div class="controls">
+        <button id="run">Run query</button>
+        <span class="hint">Ctrl/⌘+Enter で実行</span>
+        <span class="status" id="status"></span>
+      </div>
+    </section>
+
+    <section class="results-wrap">
+      <nav class="tabs" role="tablist">
+        <div class="tab active" data-tab="table" role="tab">Table</div>
+        <div class="tab" data-tab="graph" role="tab">Graph</div>
+        <div class="tab" data-tab="raw" role="tab">Raw JSON</div>
+      </nav>
+      <div id="table-panel" class="panel active">
+        <div id="table-host" style="height: 100%;"></div>
+      </div>
+      <div id="graph-panel" class="panel">
+        <div id="graph-canvas"></div>
+      </div>
+      <div id="raw-panel" class="panel">
+        <pre id="raw-content"></pre>
+      </div>
+    </section>
 
     <script>
       const $ = (id) => document.getElementById(id);
       const meta = $("meta"),
-        results = $("results"),
         statusEl = $("status"),
         run = $("run"),
-        query = $("query");
+        query = $("query"),
+        rawContent = $("raw-content"),
+        tableHost = $("table-host"),
+        tablePanel = $("table-panel"),
+        graphPanel = $("graph-panel"),
+        rawPanel = $("raw-panel"),
+        graphCanvas = $("graph-canvas");
 
-      // 接続先情報を取得
+      let tabulator = null;
+      let cy = null;
+      let lastResponse = null;
+
       fetch("/api/info")
         .then((r) => r.json())
         .then((info) => {
@@ -148,10 +215,24 @@
           meta.textContent = "server: (unknown)";
         });
 
+      document.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+      });
       run.addEventListener("click", runQuery);
       query.addEventListener("keydown", (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") runQuery();
       });
+
+      function switchTab(name) {
+        document
+          .querySelectorAll(".tab")
+          .forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+        tablePanel.classList.toggle("active", name === "table");
+        graphPanel.classList.toggle("active", name === "graph");
+        rawPanel.classList.toggle("active", name === "raw");
+        if (name === "graph" && cy) cy.resize();
+        if (name === "table" && tabulator) tabulator.redraw(true);
+      }
 
       async function runQuery() {
         const q = query.value.trim();
@@ -166,12 +247,15 @@
             body: JSON.stringify({ query: q }),
           });
           const body = await resp.json();
+          lastResponse = body;
+          rawContent.textContent = JSON.stringify(body, null, 2);
           if (!resp.ok || body.error) {
             renderError(body.error || `HTTP ${resp.status}`);
             statusEl.className = "status err";
             statusEl.textContent = "error";
           } else {
             renderTable(body);
+            renderGraph(body);
             statusEl.className = "status ok";
             statusEl.textContent = `${body.rows.length} rows · ${body.elapsed_ms} ms`;
           }
@@ -185,37 +269,177 @@
       }
 
       function renderTable({ columns, rows }) {
+        tableHost.innerHTML = "";
         if (!rows.length) {
-          results.innerHTML = '<p class="placeholder">no rows</p>';
+          tableHost.innerHTML = '<div class="empty">0 rows</div>';
+          tabulator = null;
           return;
         }
-        const thead =
-          "<thead><tr>" +
-          columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") +
-          "</tr></thead>";
-        const tbody =
-          "<tbody>" +
-          rows
-            .map(
-              (row) =>
-                "<tr>" +
-                columns
-                  .map((c) => `<td>${formatCell(row[c])}</td>`)
-                  .join("") +
-                "</tr>"
-            )
-            .join("") +
-          "</tbody>";
-        results.innerHTML = `<table>${thead}${tbody}</table>`;
+        const tabCols = columns.map((c) => ({
+          title: c,
+          field: c,
+          headerFilter: "input",
+          formatter: (cell) => {
+            const v = cell.getValue();
+            return v === null || v === undefined
+              ? '<span style="color:#666">null</span>'
+              : escapeHtml(String(v));
+          },
+        }));
+        tabulator = new Tabulator(tableHost, {
+          data: rows,
+          columns: tabCols,
+          layout: "fitDataStretch",
+          pagination: true,
+          paginationSize: 50,
+          paginationSizeSelector: [25, 50, 100, 250],
+          height: "100%",
+          movableColumns: true,
+          reactiveData: false,
+        });
       }
 
       function renderError(msg) {
-        results.innerHTML = `<pre class="error">${escapeHtml(msg)}</pre>`;
+        tableHost.innerHTML = `<div class="error-box">${escapeHtml(msg)}</div>`;
+        graphCanvas.innerHTML = "";
+        if (cy) { cy.destroy(); cy = null; }
+        tabulator = null;
       }
 
-      function formatCell(v) {
-        if (v === null || v === undefined) return '<span style="color:#666">null</span>';
-        return escapeHtml(String(v));
+      /**
+       * 行データからノード／エッジを推定してグラフ描画する。
+       *
+       * 推定ルール:
+       *  - "<prefix>.id" 列があれば、その prefix をノードグループとみなす
+       *    (例: n.id, n.name → ノード "n", id を識別子に)
+       *  - 2 つのノードグループが同一行にあればエッジを生成
+       *    (相互接続は MATCH (a)-[r]->(b) RETURN a.id, b.id, r.type 形式を想定)
+       */
+      function renderGraph({ columns, rows }) {
+        graphCanvas.innerHTML = "";
+        if (cy) { cy.destroy(); cy = null; }
+
+        const groups = detectNodeGroups(columns);
+        if (groups.length === 0 || !rows.length) {
+          graphCanvas.innerHTML =
+            '<div class="empty">グラフ表示には "&lt;prefix&gt;.id" を含むクエリが必要です。<br>例: MATCH (n)-[r]->(m) RETURN n.id, n.name, r.type, m.id, m.name</div>';
+          return;
+        }
+
+        const nodes = new Map(); // id -> { data: { id, label, group } }
+        const edges = []; // { data: { source, target, label } }
+
+        for (const row of rows) {
+          // 各グループのノードを登録
+          const present = [];
+          for (const g of groups) {
+            const id = stripQuotes(row[`${g}.id`]);
+            if (id === undefined || id === null || id === "") continue;
+            const nodeId = `${g}:${id}`;
+            present.push({ group: g, id, nodeId });
+            if (!nodes.has(nodeId)) {
+              const labelCandidates = ["name", "title", "label"];
+              let label = id;
+              for (const k of labelCandidates) {
+                const v = stripQuotes(row[`${g}.${k}`]);
+                if (v) { label = v; break; }
+              }
+              nodes.set(nodeId, {
+                data: { id: nodeId, label: `${label}`, group: g },
+              });
+            }
+          }
+          // 同一行で2グループ以上あればエッジを張る
+          if (present.length >= 2) {
+            const edgeLabel = pickEdgeLabel(row, columns);
+            for (let i = 0; i < present.length - 1; i++) {
+              const a = present[i], b = present[i + 1];
+              edges.push({
+                data: {
+                  id: `${a.nodeId}->${b.nodeId}:${edges.length}`,
+                  source: a.nodeId,
+                  target: b.nodeId,
+                  label: edgeLabel || "",
+                },
+              });
+            }
+          }
+        }
+
+        if (nodes.size === 0) {
+          graphCanvas.innerHTML =
+            '<div class="empty">グラフデータが見つかりませんでした (id が空または null)</div>';
+          return;
+        }
+
+        cy = cytoscape({
+          container: graphCanvas,
+          elements: [...nodes.values(), ...edges],
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "#5aa9ff",
+                label: "data(label)",
+                color: "#e6e8ec",
+                "font-size": "11px",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-outline-color": "#0f1115",
+                "text-outline-width": 2,
+                width: 36,
+                height: 36,
+              },
+            },
+            {
+              selector: "edge",
+              style: {
+                width: 2,
+                "line-color": "#4a8ad8",
+                "target-arrow-color": "#4a8ad8",
+                "target-arrow-shape": "triangle",
+                "curve-style": "bezier",
+                label: "data(label)",
+                "font-size": "10px",
+                color: "#8a93a6",
+                "text-rotation": "autorotate",
+                "text-margin-y": -8,
+              },
+            },
+          ],
+          layout: { name: "cose", animate: false, fit: true, padding: 30 },
+        });
+      }
+
+      function detectNodeGroups(columns) {
+        const groups = new Set();
+        for (const c of columns) {
+          const m = c.match(/^([A-Za-z_][A-Za-z0-9_]*)\.id$/);
+          if (m) groups.add(m[1]);
+        }
+        return [...groups];
+      }
+
+      function pickEdgeLabel(row, columns) {
+        for (const c of columns) {
+          if (/\.(type|label|name)$/.test(c) && !/^([A-Za-z_][A-Za-z0-9_]*)\.id$/.test(c)) {
+            const v = stripQuotes(row[c]);
+            // ノード側ではないエッジっぽい列名を採用 (簡易ヒューリスティック)
+            if (v && (c.startsWith("r.") || c.startsWith("rel.") || c.includes("edge"))) {
+              return v;
+            }
+          }
+        }
+        return "";
+      }
+
+      function stripQuotes(v) {
+        if (v === null || v === undefined) return v;
+        const s = String(v);
+        if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+          return s.slice(1, -1);
+        }
+        return s;
       }
 
       function escapeHtml(s) {
