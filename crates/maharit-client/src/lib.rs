@@ -713,6 +713,12 @@ impl Client {
         self.session_token.as_deref()
     }
 
+    /// 既存トークンを使い回す形でセッショントークンを設定する。
+    /// `Client::login()` を経由しない経路（HTTP middleware 等）で使う。
+    pub fn set_session_token(&mut self, token: Option<String>) {
+        self.session_token = token;
+    }
+
     /// Execute a query and return the result
     pub async fn query(&mut self, query: &str) -> Result<QueryResult> {
         self.query_in_tx(query, None).await
