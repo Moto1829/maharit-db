@@ -241,11 +241,16 @@ pub const DEFAULT_CHUNK_SIZE: usize = 100;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum Request {
+    #[serde(rename = "login")]
+    Login { username: String, password: String },
+
     #[serde(rename = "query")]
     Query {
         query: String,
         #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
         tx_id: Option<TxId>,
+        #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
 
     #[serde(rename = "streamQuery")]
@@ -255,6 +260,8 @@ enum Request {
         tx_id: Option<TxId>,
         #[serde(rename = "chunkSize")]
         chunk_size: usize,
+        #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
 
     #[serde(rename = "ping")]
@@ -270,18 +277,24 @@ enum Request {
     BeginTransaction {
         #[serde(rename = "readOnly")]
         read_only: bool,
+        #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
 
     #[serde(rename = "commit")]
     Commit {
         #[serde(rename = "txId")]
         tx_id: TxId,
+        #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
 
     #[serde(rename = "rollback")]
     Rollback {
         #[serde(rename = "txId")]
         tx_id: TxId,
+        #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
     },
 }
 
@@ -354,6 +367,18 @@ enum Response {
         #[serde(rename = "totalRows")]
         total_rows: usize,
     },
+
+    #[serde(rename = "loggedIn")]
+    LoggedIn {
+        #[serde(rename = "sessionToken")]
+        session_token: String,
+        role: String,
+        #[serde(rename = "expiresAt")]
+        expires_at: u64,
+    },
+
+    #[serde(rename = "authError")]
+    AuthError { message: String },
 }
 
 /// Stream ID type
@@ -478,12 +503,25 @@ pub struct ServerStats {
     pub edges: usize,
 }
 
+/// Login response information returned by `Client::login()`.
+#[derive(Debug, Clone)]
+pub struct LoginInfo {
+    /// Session token to be carried in subsequent requests
+    pub session_token: String,
+    /// User role: "admin" / "read_write" / "read_only"
+    pub role: String,
+    /// Unix epoch seconds when this session expires
+    pub expires_at: u64,
+}
+
 /// MaharitDB client
 pub struct Client {
     stream: ConnectionStream,
     config: ClientConfig,
     buffer: BytesMut,
     addr: String,
+    /// 認証成功後に保持するセッショントークン。`None` のときはトークン無しで送信。
+    session_token: Option<String>,
 }
 
 impl Client {
@@ -504,6 +542,7 @@ impl Client {
             config,
             buffer: BytesMut::with_capacity(4096),
             addr: addr.to_string(),
+            session_token: None,
         })
     }
 
@@ -585,6 +624,7 @@ impl Client {
             config: client_config,
             buffer: BytesMut::with_capacity(4096),
             addr: addr.to_string(),
+            session_token: None,
         })
     }
 
@@ -631,6 +671,48 @@ impl Client {
         )
     }
 
+    /// サーバーに `Login` リクエストを送り、認証成功時はセッショントークンを
+    /// クライアントに保存して以降のリクエストに自動付与する。
+    ///
+    /// 認証エラーの場合は `ClientError::Server` で失敗する。
+    pub async fn login(&mut self, username: &str, password: &str) -> Result<LoginInfo> {
+        let request = Request::Login {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
+        self.send_request(&request).await?;
+        match self.receive_response().await? {
+            Response::LoggedIn {
+                session_token,
+                role,
+                expires_at,
+            } => {
+                self.session_token = Some(session_token.clone());
+                Ok(LoginInfo {
+                    session_token,
+                    role,
+                    expires_at,
+                })
+            }
+            Response::AuthError { message } => Err(ClientError::Server(message)),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol(
+                "unexpected response type for login".to_string(),
+            )),
+        }
+    }
+
+    /// 現在のセッショントークンを破棄する。サーバーに通知はしない
+    /// （セッション失効はサーバー側のタイムアウトで自然に行われる）。
+    pub fn logout(&mut self) {
+        self.session_token = None;
+    }
+
+    /// クライアントに保持されているセッショントークンを返す（テスト用途）。
+    pub fn session_token(&self) -> Option<&str> {
+        self.session_token.as_deref()
+    }
+
     /// Execute a query and return the result
     pub async fn query(&mut self, query: &str) -> Result<QueryResult> {
         self.query_in_tx(query, None).await
@@ -656,7 +738,7 @@ impl Client {
     async fn query_internal(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
         let request = Request::Query {
             query: query.to_string(),
-            tx_id,
+            tx_id, session_token: self.session_token.clone(),
         };
 
         self.send_request(&request).await?;
@@ -712,7 +794,7 @@ impl Client {
                 DEFAULT_CHUNK_SIZE
             } else {
                 chunk_size
-            },
+            }, session_token: self.session_token.clone(),
         };
 
         self.send_request(&request).await?;
@@ -775,7 +857,7 @@ impl Client {
 
     /// Begin a transaction with options
     async fn begin_with_options(&mut self, read_only: bool) -> Result<TxId> {
-        let request = Request::BeginTransaction { read_only };
+        let request = Request::BeginTransaction { read_only, session_token: self.session_token.clone() };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -789,7 +871,7 @@ impl Client {
 
     /// Commit a transaction
     pub async fn commit(&mut self, tx_id: TxId) -> Result<()> {
-        let request = Request::Commit { tx_id };
+        let request = Request::Commit { tx_id, session_token: self.session_token.clone() };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -803,7 +885,7 @@ impl Client {
 
     /// Rollback a transaction
     pub async fn rollback(&mut self, tx_id: TxId) -> Result<()> {
-        let request = Request::Rollback { tx_id };
+        let request = Request::Rollback { tx_id, session_token: self.session_token.clone() };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -1260,7 +1342,7 @@ mod tests {
     fn test_request_serialization() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
-            tx_id: None,
+            tx_id: None, session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1273,7 +1355,7 @@ mod tests {
     fn test_request_serialization_with_tx_id() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
-            tx_id: Some(42),
+            tx_id: Some(42), session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1282,7 +1364,7 @@ mod tests {
 
     #[test]
     fn test_begin_transaction_request() {
-        let request = Request::BeginTransaction { read_only: false };
+        let request = Request::BeginTransaction { read_only: false, session_token: None };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"begin\""));
         assert!(json.contains("\"readOnly\":false"));
@@ -1290,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_commit_request() {
-        let request = Request::Commit { tx_id: 123 };
+        let request = Request::Commit { tx_id: 123, session_token: None };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"commit\""));
         assert!(json.contains("\"txId\":123"));
@@ -1298,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_rollback_request() {
-        let request = Request::Rollback { tx_id: 456 };
+        let request = Request::Rollback { tx_id: 456, session_token: None };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"rollback\""));
         assert!(json.contains("\"txId\":456"));
@@ -1461,7 +1543,7 @@ mod tests {
         let request = Request::StreamQuery {
             query: "MATCH (n) RETURN n".to_string(),
             tx_id: None,
-            chunk_size: 100,
+            chunk_size: 100, session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"streamQuery\""));
@@ -1518,6 +1600,71 @@ mod tests {
                 assert_eq!(total_rows, 100);
             }
             _ => panic!("Expected StreamEnd response"),
+        }
+    }
+
+    #[test]
+    fn test_login_request_serialization() {
+        let request = Request::Login {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"login\""));
+        assert!(json.contains("\"username\":\"alice\""));
+        assert!(json.contains("\"password\":\"secret\""));
+    }
+
+    #[test]
+    fn test_query_with_session_token_serialization() {
+        let request = Request::Query {
+            query: "MATCH (n) RETURN n".to_string(),
+            tx_id: None,
+            session_token: Some("abc-xyz".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"sessionToken\":\"abc-xyz\""));
+    }
+
+    #[test]
+    fn test_query_without_session_token_omits_field() {
+        let request = Request::Query {
+            query: "MATCH (n) RETURN n".to_string(),
+            tx_id: None,
+            session_token: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        // skip_serializing_if により sessionToken はシリアライズされない
+        assert!(!json.contains("sessionToken"));
+    }
+
+    #[test]
+    fn test_logged_in_response_deserialization() {
+        let json = r#"{"type":"loggedIn","sessionToken":"tok-1","role":"admin","expiresAt":1700000000}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::LoggedIn {
+                session_token,
+                role,
+                expires_at,
+            } => {
+                assert_eq!(session_token, "tok-1");
+                assert_eq!(role, "admin");
+                assert_eq!(expires_at, 1_700_000_000);
+            }
+            _ => panic!("Expected LoggedIn response"),
+        }
+    }
+
+    #[test]
+    fn test_auth_error_response_deserialization() {
+        let json = r#"{"type":"authError","message":"missing sessionToken"}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::AuthError { message } => {
+                assert_eq!(message, "missing sessionToken");
+            }
+            _ => panic!("Expected AuthError response"),
         }
     }
 }

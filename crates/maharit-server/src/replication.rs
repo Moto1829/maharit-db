@@ -1354,7 +1354,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Test {name: 'Alice'}) RETURN n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1368,7 +1368,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Test) RETURN n.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1397,7 +1397,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Prop {s: 'hello', i: 99, b: true}) RETURN n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1409,7 +1409,7 @@ mod tests {
         // String property
         let resp = repl_send_recv(
             &mut fconn,
-            &Request::Query { query: "MATCH (n:Prop) RETURN n.s".to_string(), tx_id: None },
+            &Request::Query { query: "MATCH (n:Prop) RETURN n.s".to_string(), tx_id: None, session_token: None },
         ).await;
         match resp {
             Response::Result { rows } => {
@@ -1422,7 +1422,7 @@ mod tests {
         // Integer property
         let resp = repl_send_recv(
             &mut fconn,
-            &Request::Query { query: "MATCH (n:Prop) RETURN n.i".to_string(), tx_id: None },
+            &Request::Query { query: "MATCH (n:Prop) RETURN n.i".to_string(), tx_id: None, session_token: None },
         ).await;
         match resp {
             Response::Result { rows } => {
@@ -1449,7 +1449,7 @@ mod tests {
             "CREATE (n:Dst {name: 'dst'})",
             "MATCH (a:Src {name: 'src'}), (b:Dst {name: 'dst'}) CREATE (a)-[:LINK]->(b)",
         ] {
-            repl_send_recv(&mut lconn, &Request::Query { query: q.to_string(), tx_id: None }).await;
+            repl_send_recv(&mut lconn, &Request::Query { query: q.to_string(), tx_id: None, session_token: None }).await;
         }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1460,7 +1460,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (a:Src)-[:LINK]->(b:Dst) RETURN b.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1489,7 +1489,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Del {name: 'gone'}) RETURN n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1499,7 +1499,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "MATCH (n:Del {name: 'gone'}) DETACH DELETE n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1512,7 +1512,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Del) RETURN n.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;

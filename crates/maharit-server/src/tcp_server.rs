@@ -36,6 +36,9 @@ pub struct ServerConfig {
     pub read_timeout: Duration,
     /// Write timeout for client connections
     pub write_timeout: Duration,
+    /// 認証を必須にするかどうか。デフォルトは `false`（互換性のため）。
+    /// `true` のとき、`Login` 以外のリクエストは有効な `sessionToken` を要求する。
+    pub require_auth: bool,
 }
 
 impl Default for ServerConfig {
@@ -45,6 +48,7 @@ impl Default for ServerConfig {
             max_connections: 100,
             read_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
+            require_auth: false,
         }
     }
 }
@@ -52,10 +56,60 @@ impl Default for ServerConfig {
 /// Default chunk size for streaming results
 pub const DEFAULT_CHUNK_SIZE: usize = 100;
 
+/// セッションタイムアウト（秒）。`AuthManager` の `session_timeout` (30 分) と
+/// 揃える。クライアントに返す expires_at の算出に使う。
+pub const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 30 * 60;
+
+/// 認証ロールをワイヤ表現の文字列にする。
+fn role_label(role: &crate::auth::Role) -> String {
+    match role {
+        crate::auth::Role::Admin => "admin".to_string(),
+        crate::auth::Role::ReadWrite => "read_write".to_string(),
+        crate::auth::Role::ReadOnly => "read_only".to_string(),
+    }
+}
+
+/// `require_auth = true` のとき、リクエストの `sessionToken` を検証する。
+///
+/// - 認証が無効なら何もせず `None`
+/// - トークン無し → `AuthError`
+/// - トークンが無効/期限切れ → `AuthError`
+/// - 有効 → `None`（呼び出し側はそのまま処理を続行）
+fn check_session(
+    require_auth: bool,
+    auth: &Arc<Mutex<crate::auth::AuthManager>>,
+    token: &Option<String>,
+) -> Option<Response> {
+    if !require_auth {
+        return None;
+    }
+    let token_str = match token {
+        Some(t) if !t.is_empty() => t.as_str(),
+        _ => {
+            return Some(Response::AuthError {
+                message: "authentication required: missing sessionToken".to_string(),
+            });
+        }
+    };
+    let mut mgr = auth.lock().unwrap();
+    match mgr.validate_session(token_str) {
+        Ok(_) => None,
+        Err(e) => Some(Response::AuthError {
+            message: format!("invalid session: {}", e),
+        }),
+    }
+}
+
 /// Request message from client
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Authenticate with username/password. Returns a session token to use
+    /// in subsequent requests via `sessionToken`. Always permitted regardless
+    /// of `ServerConfig::require_auth`.
+    #[serde(rename = "login")]
+    Login { username: String, password: String },
+
     /// Execute a query
     #[serde(rename = "query")]
     Query {
@@ -63,6 +117,9 @@ pub enum Request {
         /// Optional transaction ID for executing within a transaction
         #[serde(rename = "txId")]
         tx_id: Option<u64>,
+        /// Optional session token (required when server has `require_auth=true`)
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
 
     /// Execute a query with streaming results
@@ -75,6 +132,9 @@ pub enum Request {
         /// Number of rows per chunk (default: 100)
         #[serde(rename = "chunkSize", default = "default_chunk_size")]
         chunk_size: usize,
+        /// Optional session token (required when server has `require_auth=true`)
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
 
     /// Ping to check server health
@@ -95,6 +155,9 @@ pub enum Request {
         /// If true, the transaction is read-only
         #[serde(rename = "readOnly", default)]
         read_only: bool,
+        /// Optional session token (required when server has `require_auth=true`)
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
 
     /// Commit a transaction
@@ -102,6 +165,8 @@ pub enum Request {
     Commit {
         #[serde(rename = "txId")]
         tx_id: u64,
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
 
     /// Rollback a transaction
@@ -109,6 +174,8 @@ pub enum Request {
     Rollback {
         #[serde(rename = "txId")]
         tx_id: u64,
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
 }
 
@@ -200,6 +267,22 @@ pub enum Response {
         #[serde(rename = "totalRows")]
         total_rows: usize,
     },
+
+    /// Successful login. Subsequent requests can carry `sessionToken`.
+    #[serde(rename = "loggedIn")]
+    LoggedIn {
+        #[serde(rename = "sessionToken")]
+        session_token: String,
+        /// User role: "admin" / "read_write" / "read_only"
+        role: String,
+        /// Unix epoch seconds when this session expires
+        #[serde(rename = "expiresAt")]
+        expires_at: u64,
+    },
+
+    /// Authentication error (missing/expired/invalid token, or wrong credentials)
+    #[serde(rename = "authError")]
+    AuthError { message: String },
 }
 
 /// Statistics for the server
@@ -232,6 +315,8 @@ pub struct TcpServer {
     /// Optional leader replication manager: when set, write operations are
     /// automatically replicated to followers via WAL entries.
     replication: Option<Arc<LeaderReplicationManager>>,
+    /// Authentication manager. Only enforced when `config.require_auth = true`.
+    auth: Arc<Mutex<crate::auth::AuthManager>>,
 }
 
 impl TcpServer {
@@ -246,6 +331,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
         }
     }
 
@@ -260,6 +346,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
         }
     }
 
@@ -274,6 +361,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
         }
     }
 
@@ -298,6 +386,16 @@ impl TcpServer {
         let listener = TcpListener::bind(&self.config.bind_address).await?;
         tracing::info!(address = %self.config.bind_address, "Server listening");
         println!("Server listening on {}", self.config.bind_address);
+
+        // 認証無効時に警告を出す（運用者が見落とさないよう WARN レベル）
+        if !self.config.require_auth {
+            tracing::warn!(
+                "maharit-server authentication is DISABLED. All requests are accepted without sessionToken. Set ServerConfig::require_auth=true to enforce login."
+            );
+            eprintln!(
+                "WARN: maharit-server authentication is DISABLED. All requests are accepted without sessionToken."
+            );
+        }
 
         self.start_with_listener(listener).await
     }
@@ -343,6 +441,7 @@ impl TcpServer {
                     let fulltext = Arc::clone(&self.fulltext);
                     let config = self.config.clone();
                     let replication = self.replication.clone();
+                    let auth = Arc::clone(&self.auth);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -356,6 +455,7 @@ impl TcpServer {
                             fulltext,
                             config,
                             replication,
+                            auth,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -406,6 +506,7 @@ async fn handle_connection(
     fulltext: Arc<Mutex<FulltextManager>>,
     config: ServerConfig,
     replication: Option<Arc<LeaderReplicationManager>>,
+    auth: Arc<Mutex<crate::auth::AuthManager>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
@@ -451,56 +552,93 @@ async fn handle_connection(
 
         // Handle request
         let response = match request {
-            Request::Query { query, tx_id } => {
-                stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                let span = tracing::info_span!("query", query = %query);
-                let _enter = span.enter();
-                let start = std::time::Instant::now();
-                let resp = match tx_id {
-                    Some(id) => {
-                        execute_query_with_tx(
-                            &graph,
-                            &query,
-                            id,
-                            &tx_manager,
-                            &constraints,
-                            &fulltext,
-                            replication.as_deref(),
-                        )
-                        .await
+            Request::Login { username, password } => {
+                let mut mgr = auth.lock().unwrap();
+                match mgr.authenticate(&username, &password) {
+                    Ok(token) => {
+                        let role = mgr
+                            .validate_session(&token)
+                            .map(|s| role_label(&s.role))
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let expires_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                            + DEFAULT_SESSION_TIMEOUT_SECS;
+                        Response::LoggedIn {
+                            session_token: token,
+                            role,
+                            expires_at,
+                        }
                     }
-                    None => execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref()).await,
-                };
-                tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
-                resp
+                    Err(e) => Response::AuthError {
+                        message: format!("{}", e),
+                    },
+                }
+            }
+            Request::Query {
+                query,
+                tx_id,
+                session_token,
+            } => {
+                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
+                    resp
+                } else {
+                    stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                    let span = tracing::info_span!("query", query = %query);
+                    let _enter = span.enter();
+                    let start = std::time::Instant::now();
+                    let resp = match tx_id {
+                        Some(id) => {
+                            execute_query_with_tx(
+                                &graph,
+                                &query,
+                                id,
+                                &tx_manager,
+                                &constraints,
+                                &fulltext,
+                                replication.as_deref(),
+                            )
+                            .await
+                        }
+                        None => execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref()).await,
+                    };
+                    tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
+                    resp
+                }
             }
             Request::StreamQuery {
                 query,
                 tx_id: _,
                 chunk_size,
+                session_token,
             } => {
-                stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                tracing::info!(query = %query, "streaming query");
-                // Execute streaming query
-                if let Err(e) = execute_streaming_query(
-                    &mut socket,
-                    &graph,
-                    &stats,
-                    &query,
-                    chunk_size,
-                    config.write_timeout,
-                    &constraints,
-                    &fulltext,
-                    replication.as_deref(),
-                )
-                .await
-                {
-                    Response::Error {
-                        message: format!("Streaming error: {}", e),
-                    }
+                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
+                    resp
                 } else {
-                    // Streaming responses already sent, continue to next request
-                    continue;
+                    stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                    tracing::info!(query = %query, "streaming query");
+                    // Execute streaming query
+                    if let Err(e) = execute_streaming_query(
+                        &mut socket,
+                        &graph,
+                        &stats,
+                        &query,
+                        chunk_size,
+                        config.write_timeout,
+                        &constraints,
+                        &fulltext,
+                        replication.as_deref(),
+                    )
+                    .await
+                    {
+                        Response::Error {
+                            message: format!("Streaming error: {}", e),
+                        }
+                    } else {
+                        // Streaming responses already sent, continue to next request
+                        continue;
+                    }
                 }
             }
             Request::Ping => Response::Pong,
@@ -514,26 +652,49 @@ async fn handle_connection(
                 send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
                 break;
             }
-            Request::BeginTransaction { read_only } => {
-                let tx_id = if read_only {
-                    tx_manager.begin_read_only()
+            Request::BeginTransaction {
+                read_only,
+                session_token,
+            } => {
+                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
+                    resp
                 } else {
-                    tx_manager.begin()
-                };
-                Response::TransactionBegun { tx_id }
+                    let tx_id = if read_only {
+                        tx_manager.begin_read_only()
+                    } else {
+                        tx_manager.begin()
+                    };
+                    Response::TransactionBegun { tx_id }
+                }
             }
-            Request::Commit { tx_id } => match tx_manager.commit(tx_id) {
-                Ok(()) => Response::Committed { tx_id },
-                Err(e) => Response::Error {
-                    message: format!("Commit failed: {}", e),
-                },
-            },
-            Request::Rollback { tx_id } => {
-                match tx_manager.rollback_concurrent(tx_id, &graph) {
-                    Ok(()) => Response::RolledBack { tx_id },
-                    Err(e) => Response::Error {
-                        message: format!("Rollback failed: {}", e),
-                    },
+            Request::Commit {
+                tx_id,
+                session_token,
+            } => {
+                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
+                    resp
+                } else {
+                    match tx_manager.commit(tx_id) {
+                        Ok(()) => Response::Committed { tx_id },
+                        Err(e) => Response::Error {
+                            message: format!("Commit failed: {}", e),
+                        },
+                    }
+                }
+            }
+            Request::Rollback {
+                tx_id,
+                session_token,
+            } => {
+                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
+                    resp
+                } else {
+                    match tx_manager.rollback_concurrent(tx_id, &graph) {
+                        Ok(()) => Response::RolledBack { tx_id },
+                        Err(e) => Response::Error {
+                            message: format!("Rollback failed: {}", e),
+                        },
+                    }
                 }
             }
         };
@@ -1105,7 +1266,7 @@ mod tests {
         let json = r#"{"type": "query", "query": "MATCH (n) RETURN n"}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::Query { query, tx_id } => {
+            Request::Query { query, tx_id, .. } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert!(tx_id.is_none());
             }
@@ -1118,7 +1279,7 @@ mod tests {
         let json = r#"{"type": "query", "query": "MATCH (n) RETURN n", "txId": 42}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::Query { query, tx_id } => {
+            Request::Query { query, tx_id, .. } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert_eq!(tx_id, Some(42));
             }
@@ -1131,7 +1292,7 @@ mod tests {
         let json = r#"{"type": "begin"}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::BeginTransaction { read_only } => {
+            Request::BeginTransaction { read_only, .. } => {
                 assert!(!read_only);
             }
             _ => panic!("Expected BeginTransaction request"),
@@ -1143,7 +1304,7 @@ mod tests {
         let json = r#"{"type": "begin", "readOnly": true}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::BeginTransaction { read_only } => {
+            Request::BeginTransaction { read_only, .. } => {
                 assert!(read_only);
             }
             _ => panic!("Expected BeginTransaction request"),
@@ -1155,7 +1316,7 @@ mod tests {
         let json = r#"{"type": "commit", "txId": 123}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::Commit { tx_id } => {
+            Request::Commit { tx_id, .. } => {
                 assert_eq!(tx_id, 123);
             }
             _ => panic!("Expected Commit request"),
@@ -1167,11 +1328,94 @@ mod tests {
         let json = r#"{"type": "rollback", "txId": 456}"#;
         let request: Request = serde_json::from_str(json).unwrap();
         match request {
-            Request::Rollback { tx_id } => {
+            Request::Rollback { tx_id, .. } => {
                 assert_eq!(tx_id, 456);
             }
             _ => panic!("Expected Rollback request"),
         }
+    }
+
+    #[test]
+    fn test_login_request_parsing() {
+        let json = r#"{"type": "login", "username": "admin", "password": "admin"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Login { username, password } => {
+                assert_eq!(username, "admin");
+                assert_eq!(password, "admin");
+            }
+            _ => panic!("Expected Login request"),
+        }
+    }
+
+    #[test]
+    fn test_query_with_session_token_parsing() {
+        let json = r#"{"type": "query", "query": "MATCH (n) RETURN n", "sessionToken": "abc-123"}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        match request {
+            Request::Query {
+                query,
+                tx_id,
+                session_token,
+            } => {
+                assert_eq!(query, "MATCH (n) RETURN n");
+                assert!(tx_id.is_none());
+                assert_eq!(session_token.as_deref(), Some("abc-123"));
+            }
+            _ => panic!("Expected Query request"),
+        }
+    }
+
+    #[test]
+    fn test_check_session_when_auth_disabled() {
+        let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
+        // require_auth=false ならトークン無しでも None を返す
+        assert!(check_session(false, &auth, &None).is_none());
+        assert!(check_session(false, &auth, &Some("garbage".to_string())).is_none());
+    }
+
+    #[test]
+    fn test_check_session_when_auth_enabled() {
+        let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
+
+        // require_auth=true でトークン無し → AuthError
+        let resp = check_session(true, &auth, &None);
+        assert!(matches!(resp, Some(Response::AuthError { .. })));
+
+        // require_auth=true で無効なトークン → AuthError
+        let resp = check_session(true, &auth, &Some("garbage".to_string()));
+        assert!(matches!(resp, Some(Response::AuthError { .. })));
+
+        // 正規ログイン後のトークンなら通る
+        let token = {
+            let mut mgr = auth.lock().unwrap();
+            mgr.authenticate("admin", "admin").unwrap()
+        };
+        assert!(check_session(true, &auth, &Some(token)).is_none());
+    }
+
+    #[test]
+    fn test_auth_error_response_serialization() {
+        let resp = Response::AuthError {
+            message: "missing sessionToken".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"authError\""));
+        assert!(json.contains("missing sessionToken"));
+    }
+
+    #[test]
+    fn test_logged_in_response_serialization() {
+        let resp = Response::LoggedIn {
+            session_token: "tok-1".to_string(),
+            role: "admin".to_string(),
+            expires_at: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"loggedIn\""));
+        assert!(json.contains("\"sessionToken\":\"tok-1\""));
+        assert!(json.contains("\"role\":\"admin\""));
+        assert!(json.contains("\"expiresAt\":1700000000"));
     }
 
     #[test]
@@ -1254,7 +1498,7 @@ mod tests {
             Request::StreamQuery {
                 query,
                 tx_id,
-                chunk_size,
+                chunk_size, session_token: None,
             } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert!(tx_id.is_none());
@@ -1430,7 +1674,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Person {name: 'Alice'}) RETURN n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1441,7 +1685,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1465,7 +1709,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Item {s: 'hello', i: 42, f: 3.14, b: true}) RETURN n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1482,7 +1726,7 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("MATCH (n:Item) RETURN {}", col),
-                    tx_id: None,
+                    tx_id: None, session_token: None,
                 },
             )
             .await;
@@ -1505,7 +1749,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Item) RETURN n.f".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1531,7 +1775,7 @@ mod tests {
         ] {
             let resp = send_recv(
                 &mut stream,
-                &Request::Query { query: q.to_string(), tx_id: None },
+                &Request::Query { query: q.to_string(), tx_id: None, session_token: None },
             )
             .await;
             assert!(
@@ -1545,7 +1789,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (a:A)-[:LINK]->(b:B) RETURN b.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1567,7 +1811,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "THIS IS NOT VALID CYPHER !!!".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1604,7 +1848,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:TmpNode {name: 'delete_me'})".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1614,7 +1858,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) DETACH DELETE n".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1625,7 +1869,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) RETURN n.name".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1647,6 +1891,7 @@ mod tests {
             max_connections,
             read_timeout: Duration::from_secs(5),
             write_timeout: Duration::from_secs(5),
+            require_auth: false,
         });
 
         tokio::spawn(async move {
@@ -1670,7 +1915,7 @@ mod tests {
                         &mut stream,
                         &Request::Query {
                             query: format!("CREATE (n:ConcWrite {{id: {i}}}) RETURN n"),
-                            tx_id: None,
+                            tx_id: None, session_token: None,
                         },
                     )
                     .await;
@@ -1692,7 +1937,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:ConcWrite) RETURN n.id".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1715,7 +1960,7 @@ mod tests {
             &mut setup,
             &Request::Query {
                 query: "CREATE (n:ReadTarget {val: 1})".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1730,7 +1975,7 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: format!("CREATE (n:RWWrite {{id: {i}}}) RETURN n"),
-                        tx_id: None,
+                        tx_id: None, session_token: None,
                     },
                 )
                 .await;
@@ -1749,7 +1994,7 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: "MATCH (n:ReadTarget) RETURN n.val".to_string(),
-                        tx_id: None,
+                        tx_id: None, session_token: None,
                     },
                 )
                 .await;
@@ -1819,14 +2064,14 @@ mod tests {
         let mut client_b = TcpStream::connect(addr).await.unwrap();
 
         // クライアントA: トランザクション開始
-        let resp_a = send_recv(&mut client_a, &Request::BeginTransaction { read_only: false }).await;
+        let resp_a = send_recv(&mut client_a, &Request::BeginTransaction { read_only: false, session_token: None }).await;
         let tx_a = match resp_a {
             Response::TransactionBegun { tx_id } => tx_id,
             other => panic!("client A expected TransactionBegun, got {other:?}"),
         };
 
         // クライアントB: トランザクション開始
-        let resp_b = send_recv(&mut client_b, &Request::BeginTransaction { read_only: false }).await;
+        let resp_b = send_recv(&mut client_b, &Request::BeginTransaction { read_only: false, session_token: None }).await;
         let tx_b = match resp_b {
             Response::TransactionBegun { tx_id } => tx_id,
             other => panic!("client B expected TransactionBegun, got {other:?}"),
@@ -1837,7 +2082,7 @@ mod tests {
             &mut client_a,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'A'}) RETURN n".to_string(),
-                tx_id: Some(tx_a),
+                tx_id: Some(tx_a), session_token: None,
             },
         )
         .await;
@@ -1848,18 +2093,18 @@ mod tests {
             &mut client_b,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'B'}) RETURN n".to_string(),
-                tx_id: Some(tx_b),
+                tx_id: Some(tx_b), session_token: None,
             },
         )
         .await;
         assert!(matches!(resp, Response::Result { .. }), "tx B CREATE failed: {resp:?}");
 
         // クライアントA: コミット
-        let resp = send_recv(&mut client_a, &Request::Commit { tx_id: tx_a }).await;
+        let resp = send_recv(&mut client_a, &Request::Commit { tx_id: tx_a, session_token: None }).await;
         assert!(matches!(resp, Response::Committed { .. }), "tx A commit failed: {resp:?}");
 
         // クライアントB: ロールバック（Bの変更は取り消される）
-        let resp = send_recv(&mut client_b, &Request::Rollback { tx_id: tx_b }).await;
+        let resp = send_recv(&mut client_b, &Request::Rollback { tx_id: tx_b, session_token: None }).await;
         assert!(matches!(resp, Response::RolledBack { .. }), "tx B rollback failed: {resp:?}");
 
         // 確認: A のノードのみ残り、B のノードはロールバックされている
@@ -1868,7 +2113,7 @@ mod tests {
             &mut checker,
             &Request::Query {
                 query: "MATCH (n:TxIsolate) RETURN n.owner".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1900,7 +2145,7 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("CREATE (n:Pipeline {{idx: {}}}) RETURN n", i),
-                    tx_id: None,
+                    tx_id: None, session_token: None,
                 },
             )
             .await;
@@ -1915,7 +2160,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline) RETURN n.idx".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1935,7 +2180,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline {idx: 5}) RETURN n.idx".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1959,7 +2204,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE CONSTRAINT unique_test_id FOR (n:TestItem) REQUIRE n.id IS UNIQUE".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1970,7 +2215,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1981,7 +2226,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -1996,7 +2241,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "SHOW CONSTRAINTS".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -2019,7 +2264,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE FULLTEXT INDEX ft_test_body FOR (a:Article) ON (a.body)".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
@@ -2030,7 +2275,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "DROP FULLTEXT INDEX ft_test_body".to_string(),
-                tx_id: None,
+                tx_id: None, session_token: None,
             },
         )
         .await;
