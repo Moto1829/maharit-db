@@ -28,20 +28,25 @@ maharit-server とは別プロセス/コンテナとして動作する可視化 
 - [x] `src/bin/viz.rs`: エントリーポイント（CLI 引数 `--bind` / `--server` / `--assets`）
 - [x] 補助 API: `GET /api/info`（サーバー情報）/ `GET /api/health`
 
-### フロントエンド（仮置き / 後続フェーズで本格化）
+### フロントエンド ✅ Phase 2 完了 (2026-06-14)
 
-- [x] `assets/index.html`: 仮置きの単一ページ UI
+- [x] `assets/index.html`: 本格版の単一ページ UI
   - [x] クエリエディタ（textarea + Ctrl/⌘+Enter 実行）
-  - [x] 基本テーブル表示
   - [x] エラー表示
-  - [ ] Tabulator 統合（カラムフィルタ・ソート・ページネーション）
-  - [ ] タブ切り替え（Table / Graph）
-  - [ ] cytoscape.js によるネットワークグラフ表示
+  - [x] Tabulator 統合（CDN 6.3.0 / カラムフィルタ・ソート・ページネーション）
+  - [x] タブ切り替え（Table / Graph / Raw JSON）
+  - [x] cytoscape.js によるネットワークグラフ表示（CDN 3.30.4）
+    - `<prefix>.id` 列からノードグループを自動検出
+    - 同一行で複数グループ → エッジ生成
+    - ラベル候補: `.name` / `.title` / `.label`
+    - cose レイアウト + ベジェ曲線エッジ + ダークテーマ
 
-### インフラ（後続フェーズ）
+### インフラ ✅ Phase 3 完了 (2026-06-14)
 
-- [ ] `Dockerfile.viz`: maharit-viz 用 Dockerfile
-- [ ] `docker-compose.yml` に `viz` サービスを追記
+- [x] `Dockerfile.viz`: maharit-viz 用 Dockerfile（assets 同梱、ヘルスチェック付き）
+- [x] `docker-compose.yml` に `maharit-viz` サービスを追記
+  - `depends_on.maharit-server.condition: service_healthy`
+  - server コンテナ名解決: `maharit-server:7687`
 
 ## APIインターフェース
 
@@ -75,3 +80,26 @@ GET /
 | `GET /` | `index.html` を 200 で配信 |
 
 ユニットテスト: `cargo test -p maharit-viz` → **23/23 PASS**（既存 20 + Phase 1 新規 3）
+
+## Phase 2 検証ログ (2026-06-14)
+
+Python urllib でデータ投入 + クエリを実行し、API レスポンスから
+ノードグループ検出 / エッジ生成のロジックが正しく駆動することを確認:
+
+- 投入: Person(alice, bob), City(tokyo) と (alice)-[:LIVES_IN]->(tokyo),
+  (alice)-[:KNOWS]->(bob)
+- `MATCH (a)-[]->(b) RETURN a.id, a.name, b.id, b.name`
+  → ノードグループ `a`, `b` 検出 OK、2 行 → 2 エッジ生成
+- index.html 配信時に CDN scripts (`tabulator-tables@6.3.0`, `cytoscape@3.30.4`) を確認
+
+## Phase 3 検証ログ (2026-06-14)
+
+- `Dockerfile.viz` を新規作成 (rust:1.88-slim-bookworm → debian:bookworm-slim)
+- `docker-compose.yml` に `maharit-viz` サービスを追加、port 8080 を expose
+- `docker compose config` で構文検証 OK
+- maharit-server に port 9090 (metrics/health) を expose する変更も併せて実施
+
+## 完了
+
+全フェーズ完了。`docker compose up -d` で server + viz が起動し、
+ブラウザから http://localhost:8080 でクエリ実行 / テーブル / グラフ表示が利用可能。

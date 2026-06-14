@@ -26,6 +26,22 @@ services:
       - MAHARIT_DATA=/data/maharit.db
     ports:
       - "7687:7687"
+      - "9090:9090"
+
+  # Visualization Web app (HTTP frontend over maharit-server)
+  maharit-viz:
+    build:
+      context: .
+      dockerfile: Dockerfile.viz
+    container_name: maharit-db-viz
+    command: ["/app/maharit-viz", "--bind", "0.0.0.0:8080", "--server", "maharit-server:7687", "--assets", "/app/assets"]
+    depends_on:
+      maharit-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
 
 volumes:
   maharit-data:

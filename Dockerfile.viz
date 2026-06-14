@@ -1,0 +1,43 @@
+# Build stage
+FROM rust:1.88-slim-bookworm AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Build the viz binary
+RUN cargo build --release --package maharit-viz --bin maharit-viz
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r maharit && useradd -r -g maharit maharit
+
+WORKDIR /app
+
+# Copy the viz binary and static assets
+COPY --from=builder /app/target/release/maharit-viz /app/maharit-viz
+COPY --from=builder /app/crates/maharit-viz/assets /app/assets
+
+RUN chown -R maharit:maharit /app
+
+USER maharit
+
+EXPOSE 8080
+
+# ヘルスチェック: /api/health
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://localhost:8080/api/health || exit 1
+
+# Default command: bind 0.0.0.0:8080, server addr is configurable via args
+CMD ["/app/maharit-viz", "--bind", "0.0.0.0:8080", "--server", "maharit-server:7687", "--assets", "/app/assets"]
