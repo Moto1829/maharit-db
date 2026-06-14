@@ -261,3 +261,72 @@ XSS 対策のため **localStorage には保存しない**。
 ## 優先度
 
 MEDIUM（本番利用前に必須、開発専用なら後回し可）
+
+## 解決済み (2026-06-15)
+
+全 4 フェーズを段階的に実装。デフォルトは両方無効、起動時 WARN ログで通知。
+
+### Phase 1: server/client TCP プロトコル拡張 (commit 641c95c5)
+
+- `ServerConfig::require_auth: bool` (default false)
+- `Request::Login { username, password }` + 既存に `session_token: Option<String>`
+- `Response::LoggedIn` / `Response::AuthError`
+- `TcpServer` に `AuthManager` 統合 + `check_session()` ヘルパー
+- `Client::login` / `logout` / `session_token()` / `set_session_token()`
+- WARN: `maharit-server authentication is DISABLED. ...`
+- 検証: workspace 全体 1068 件 PASS
+
+### Phase 2 + 4: maharit-viz の認証 + TLS (commit 952f009e)
+
+- `VizConfig::require_auth: bool` (default false)
+- `VizConfig::tls: Option<TlsConfig>` (default None)
+- CLI: `--auth` / `--tls-cert <PATH> --tls-key <PATH>`
+- 環境変数: `MAHARIT_VIZ_AUTH=true` / `MAHARIT_VIZ_TLS_CERT/KEY`
+- 認証無効時は `/api/login` / `/api/logout` ルートを登録しない
+- 認証有効時: HttpOnly Cookie `maharit_viz_session` で認証
+  + middleware `auth_gate` で Cookie 検証
+- TLS 有効時は `axum_server::bind_rustls` で HTTPS
+- WARN: 認証無効 / TLS 無効 / 認証情報の HTTP 送信 を 3 種類区別
+
+### Phase 3: フロントエンド UI (commit a2630dc5)
+
+- `index.html` にログイン modal + ロールバッジ + ログアウトボタン
+- `styles.css` にダークテーマの認証 UI スタイル
+- `modules/api.js` に `login()` / `logout()`
+- `modules/auth.js` 新規: `init(els, callback)` で `/api/info` の `auth_enabled` に応じて UI 切替
+- `app.js` で 401 検知 → 自動再ログイン誘導
+
+### 動作検証 (Docker)
+
+```
+$ curl -s http://localhost:8080/api/info
+{"auth_enabled":false,"tls_enabled":false,...}
+
+$ curl http://localhost:8080/api/login -d ...
+HTTP 405  (route not registered)
+
+$ docker logs maharit-viz
+WARN: maharit-viz authentication is DISABLED. ...
+WARN: maharit-viz is serving over plain HTTP (no TLS). ...
+```
+
+`--auth` フラグを付けた viz では:
+
+```
+$ curl -X POST .../api/login -d '{"username":"admin","password":"admin"}'
+HTTP 200 + Set-Cookie: maharit_viz_session=...; HttpOnly; SameSite=Lax
+
+$ curl --cookie ... .../api/query -d '{"query":"MATCH (n) RETURN COUNT(n) AS c"}'
+HTTP 200 + {"columns":["c"],"rows":[{"c":"0"}]}
+
+$ curl -X POST .../api/logout
+HTTP 204
+```
+
+### スコープ外 (将来検討)
+
+- OAuth / OIDC
+- LDAP / AD 連携
+- MFA
+- 同時セッション数制限
+- フロントの ReadOnly 警告（`auth.isWriteQuery` ヘルパーは追加済み、UI 連携は未）
