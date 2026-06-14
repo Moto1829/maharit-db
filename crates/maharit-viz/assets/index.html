@@ -289,6 +289,9 @@
         tabulator = new Tabulator(tableHost, {
           data: rows,
           columns: tabCols,
+          // 列名 "n.id" の "." をネストパスとして解釈させない
+          // (Cypher の RETURN n.id は文字通り "n.id" というキー名で返る)
+          nestedFieldSeparator: false,
           layout: "fitDataStretch",
           pagination: true,
           paginationSize: 50,
