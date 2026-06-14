@@ -108,10 +108,13 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 
 ### maharit-viz
 
-グラフの可視化機能を提供します。
+グラフの可視化機能と Web フロントエンドを提供します。
 
 - **DOT 出力**: Graphviz の DOT 言語形式でエクスポート
 - **SVG エクスポート**: 力学モデルレイアウトによる SVG 生成
+- **ASCII レンダラー**: ターミナル向けのテキスト可視化
+- **Web アプリ** (`maharit-viz` バイナリ): axum ベースの HTTP サーバー
+  + Tabulator (テーブル) / cytoscape.js (グラフ) によるブラウザ可視化
 
 ## データフロー
 
@@ -148,7 +151,8 @@ maharit-io
   └── maharit-core
 
 maharit-viz
-  └── maharit-core
+  ├── maharit-core
+  └── maharit-client（Web アプリのみ）
 ```
 
 ## メモリモデル

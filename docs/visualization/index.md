@@ -12,5 +12,6 @@ has_children: true
 
 | 機能 | クレートモジュール | 説明 |
 |-----|-----------------|------|
+| [Web アプリ](web-app.md) | `maharit_viz::web` (バイナリ `maharit-viz`) | ブラウザからクエリ実行・テーブル表示・グラフ表示が可能な HTTP サーバー |
 | [DOT / SVG エクスポート](export.md) | `maharit_viz::dot`, `maharit_viz::svg` | Graphviz DOT 形式および SVG ファイルへのエクスポート |
 | [ASCII テキスト可視化](ascii.md) | `maharit_viz::ascii` | ターミナルで読めるテキスト形式の可視化（DFS / BFS） |
