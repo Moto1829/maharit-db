@@ -4,6 +4,104 @@ use std::str::Chars;
 
 use thiserror::Error;
 
+/// キーワードの単一テーブル: `(大文字スペル, TokenKind バリアント, 小文字名)` のタプルを宣言する。
+///
+/// このマクロから以下の 3 関数が生成され、キーワード追加時の更新箇所がここ 1 箇所だけになる:
+/// - `lookup_keyword(upper: &str) -> Option<TokenKind>`: lexer のキーワード認識
+/// - `keyword_display(&TokenKind) -> Option<&'static str>`: エラーメッセージ用の大文字スペル
+/// - `keyword_as_ident(&TokenKind) -> Option<&'static str>`:
+///   コンテキストで識別子として再解釈する際の小文字名（プロパティキー / プロパティアクセス等）
+macro_rules! define_keywords {
+    ($($upper:literal => $variant:ident => $lower:literal),* $(,)?) => {
+        fn lookup_keyword(upper: &str) -> Option<TokenKind> {
+            match upper {
+                $($upper => Some(TokenKind::$variant),)*
+                _ => None,
+            }
+        }
+
+        fn keyword_display(kind: &TokenKind) -> Option<&'static str> {
+            match kind {
+                $(TokenKind::$variant => Some($upper),)*
+                _ => None,
+            }
+        }
+
+        /// プロパティキー / プロパティアクセス位置で、キーワードトークンを
+        /// 識別子（小文字）として再解釈する。識別子・記号・数値リテラルなど
+        /// キーワード以外の TokenKind には `None` を返す。
+        pub fn keyword_as_ident(kind: &TokenKind) -> Option<&'static str> {
+            match kind {
+                $(TokenKind::$variant => Some($lower),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+define_keywords! {
+    "CREATE"     => Create     => "create",
+    "MATCH"      => Match      => "match",
+    "WHERE"      => Where      => "where",
+    "RETURN"     => Return     => "return",
+    "DELETE"     => Delete     => "delete",
+    "SET"        => Set        => "set",
+    "DETACH"     => Detach     => "detach",
+    "AND"        => And        => "and",
+    "OR"         => Or         => "or",
+    "NOT"        => Not        => "not",
+    "TRUE"       => True       => "true",
+    "FALSE"      => False      => "false",
+    "NULL"       => Null       => "null",
+    "ORDER"      => Order      => "order",
+    "BY"         => By         => "by",
+    "ASC"        => Asc        => "asc",
+    "DESC"       => Desc       => "desc",
+    "LIMIT"      => Limit      => "limit",
+    "SKIP"       => Skip       => "skip",
+    "DISTINCT"   => Distinct   => "distinct",
+    "NULLS"      => Nulls      => "nulls",
+    "FIRST"      => First      => "first",
+    "LAST"       => Last       => "last",
+    "OPTIONAL"   => Optional   => "optional",
+    "WITH"       => With       => "with",
+    "AS"         => As         => "as",
+    "CASE"       => Case       => "case",
+    "WHEN"       => When       => "when",
+    "THEN"       => Then       => "then",
+    "ELSE"       => Else       => "else",
+    "END"        => End        => "end",
+    "UNION"      => Union      => "union",
+    "ALL"        => All        => "all",
+    "MERGE"      => Merge      => "merge",
+    "REMOVE"     => Remove     => "remove",
+    "UNWIND"     => Unwind     => "unwind",
+    "ON"         => On         => "on",
+    "CONSTRAINT" => Constraint => "constraint",
+    "REQUIRE"    => Require    => "require",
+    "UNIQUE"     => Unique     => "unique",
+    "SHOW"       => Show       => "show",
+    "DROP"       => Drop       => "drop",
+    "FOR"        => For        => "for",
+    "FOREACH"    => Foreach    => "foreach",
+    "IS"         => Is         => "is",
+    "EXPLAIN"    => Explain    => "explain",
+    "PROFILE"    => Profile    => "profile",
+    "CONTAINS"   => Contains   => "contains",
+    "FULLTEXT"   => Fulltext   => "fulltext",
+    "INDEX"      => Index      => "index",
+    "USER"       => User       => "user",
+    "PASSWORD"   => Password   => "password",
+    "ROLE"       => Role       => "role",
+    "ALTER"      => Alter      => "alter",
+    "STARTS"     => Starts     => "starts",
+    "ENDS"       => Ends       => "ends",
+    "NORMALIZED" => Normalized => "normalized",
+    "IN"         => In         => "in",
+    "CALL"       => Call       => "call",
+    "YIELD"      => Yield      => "yield",
+}
+
 /// ソースコード上の位置
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -148,67 +246,18 @@ pub enum TokenKind {
 
 impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // bool / null リテラルは小文字表記
         match self {
-            TokenKind::Create => write!(f, "CREATE"),
-            TokenKind::Match => write!(f, "MATCH"),
-            TokenKind::Where => write!(f, "WHERE"),
-            TokenKind::Return => write!(f, "RETURN"),
-            TokenKind::Delete => write!(f, "DELETE"),
-            TokenKind::Set => write!(f, "SET"),
-            TokenKind::Detach => write!(f, "DETACH"),
-            TokenKind::And => write!(f, "AND"),
-            TokenKind::Or => write!(f, "OR"),
-            TokenKind::Not => write!(f, "NOT"),
-            TokenKind::True => write!(f, "true"),
-            TokenKind::False => write!(f, "false"),
-            TokenKind::Null => write!(f, "null"),
-            TokenKind::Order => write!(f, "ORDER"),
-            TokenKind::By => write!(f, "BY"),
-            TokenKind::Asc => write!(f, "ASC"),
-            TokenKind::Desc => write!(f, "DESC"),
-            TokenKind::Limit => write!(f, "LIMIT"),
-            TokenKind::Skip => write!(f, "SKIP"),
-            TokenKind::Distinct => write!(f, "DISTINCT"),
-            TokenKind::Nulls => write!(f, "NULLS"),
-            TokenKind::First => write!(f, "FIRST"),
-            TokenKind::Last => write!(f, "LAST"),
-            TokenKind::Optional => write!(f, "OPTIONAL"),
-            TokenKind::With => write!(f, "WITH"),
-            TokenKind::As => write!(f, "AS"),
-            TokenKind::Case => write!(f, "CASE"),
-            TokenKind::When => write!(f, "WHEN"),
-            TokenKind::Then => write!(f, "THEN"),
-            TokenKind::Else => write!(f, "ELSE"),
-            TokenKind::End => write!(f, "END"),
-            TokenKind::Union => write!(f, "UNION"),
-            TokenKind::All => write!(f, "ALL"),
-            TokenKind::Merge => write!(f, "MERGE"),
-            TokenKind::Remove => write!(f, "REMOVE"),
-            TokenKind::Unwind => write!(f, "UNWIND"),
-            TokenKind::On => write!(f, "ON"),
-            TokenKind::Constraint => write!(f, "CONSTRAINT"),
-            TokenKind::Require => write!(f, "REQUIRE"),
-            TokenKind::Unique => write!(f, "UNIQUE"),
-            TokenKind::Show => write!(f, "SHOW"),
-            TokenKind::Drop => write!(f, "DROP"),
-            TokenKind::For => write!(f, "FOR"),
-            TokenKind::Foreach => write!(f, "FOREACH"),
-            TokenKind::Is => write!(f, "IS"),
-            TokenKind::Explain => write!(f, "EXPLAIN"),
-            TokenKind::Profile => write!(f, "PROFILE"),
-            TokenKind::Contains => write!(f, "CONTAINS"),
-            TokenKind::Fulltext => write!(f, "FULLTEXT"),
-            TokenKind::Index => write!(f, "INDEX"),
-            TokenKind::User => write!(f, "USER"),
-            TokenKind::Password => write!(f, "PASSWORD"),
-            TokenKind::Role => write!(f, "ROLE"),
-            TokenKind::Alter => write!(f, "ALTER"),
-            TokenKind::Starts => write!(f, "STARTS"),
-            TokenKind::Ends => write!(f, "ENDS"),
-            TokenKind::Normalized => write!(f, "NORMALIZED"),
-            TokenKind::In => write!(f, "IN"),
-            TokenKind::Call => write!(f, "CALL"),
-            TokenKind::Yield => write!(f, "YIELD"),
+            TokenKind::True => return write!(f, "true"),
+            TokenKind::False => return write!(f, "false"),
+            TokenKind::Null => return write!(f, "null"),
+            _ => {}
+        }
+        // それ以外のキーワードは大文字スペルでまとめて出力
+        if let Some(s) = keyword_display(self) {
+            return write!(f, "{}", s);
+        }
+        match self {
             TokenKind::Parameter(name) => write!(f, "${}", name),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Int(n) => write!(f, "{}", n),
@@ -240,6 +289,8 @@ impl fmt::Display for TokenKind {
             TokenKind::ArrowLeft => write!(f, "<-"),
             TokenKind::Dash => write!(f, "-"),
             TokenKind::Eof => write!(f, "EOF"),
+            // キーワードは上の keyword_display 分岐で処理済み
+            _ => unreachable!("keyword TokenKind should be handled by keyword_display"),
         }
     }
 }
@@ -493,68 +544,9 @@ impl<'a> Lexer<'a> {
         let ident = &self.input[start..self.pos];
 
         // キーワードのチェック（大文字小文字を区別しない）
-        match ident.to_uppercase().as_str() {
-            "CREATE" => TokenKind::Create,
-            "MATCH" => TokenKind::Match,
-            "WHERE" => TokenKind::Where,
-            "RETURN" => TokenKind::Return,
-            "DELETE" => TokenKind::Delete,
-            "SET" => TokenKind::Set,
-            "DETACH" => TokenKind::Detach,
-            "AND" => TokenKind::And,
-            "OR" => TokenKind::Or,
-            "NOT" => TokenKind::Not,
-            "TRUE" => TokenKind::True,
-            "FALSE" => TokenKind::False,
-            "NULL" => TokenKind::Null,
-            "ORDER" => TokenKind::Order,
-            "BY" => TokenKind::By,
-            "ASC" => TokenKind::Asc,
-            "DESC" => TokenKind::Desc,
-            "LIMIT" => TokenKind::Limit,
-            "SKIP" => TokenKind::Skip,
-            "DISTINCT" => TokenKind::Distinct,
-            "NULLS" => TokenKind::Nulls,
-            "FIRST" => TokenKind::First,
-            "LAST" => TokenKind::Last,
-            "OPTIONAL" => TokenKind::Optional,
-            "WITH" => TokenKind::With,
-            "AS" => TokenKind::As,
-            "CASE" => TokenKind::Case,
-            "WHEN" => TokenKind::When,
-            "THEN" => TokenKind::Then,
-            "ELSE" => TokenKind::Else,
-            "END" => TokenKind::End,
-            "UNION" => TokenKind::Union,
-            "ALL" => TokenKind::All,
-            "MERGE" => TokenKind::Merge,
-            "REMOVE" => TokenKind::Remove,
-            "UNWIND" => TokenKind::Unwind,
-            "ON" => TokenKind::On,
-            "CONSTRAINT" => TokenKind::Constraint,
-            "REQUIRE" => TokenKind::Require,
-            "UNIQUE" => TokenKind::Unique,
-            "SHOW" => TokenKind::Show,
-            "DROP" => TokenKind::Drop,
-            "FOR" => TokenKind::For,
-            "FOREACH" => TokenKind::Foreach,
-            "IS" => TokenKind::Is,
-            "EXPLAIN" => TokenKind::Explain,
-            "PROFILE" => TokenKind::Profile,
-            "CONTAINS" => TokenKind::Contains,
-            "FULLTEXT" => TokenKind::Fulltext,
-            "INDEX" => TokenKind::Index,
-            "USER" => TokenKind::User,
-            "PASSWORD" => TokenKind::Password,
-            "ROLE" => TokenKind::Role,
-            "ALTER" => TokenKind::Alter,
-            "STARTS" => TokenKind::Starts,
-            "ENDS" => TokenKind::Ends,
-            "NORMALIZED" => TokenKind::Normalized,
-            "IN" => TokenKind::In,
-            "CALL" => TokenKind::Call,
-            "YIELD" => TokenKind::Yield,
-            _ => TokenKind::Ident(ident.to_string()),
+        match lookup_keyword(ident.to_uppercase().as_str()) {
+            Some(kw) => kw,
+            None => TokenKind::Ident(ident.to_string()),
         }
     }
 
@@ -656,82 +648,6 @@ impl<'a> Lexer<'a> {
 
         Ok(TokenKind::String(value))
     }
-}
-
-/// キーワードトークンを識別子として再解釈する際の名前を返す。
-///
-/// プロパティキー / エイリアス / リレーションシップタイプなど、
-/// コンテキスト上は識別子として扱える位置でキーワードトークン
-/// （例: `role`, `name`, `type`, `user`）が現れたときに利用する。
-///
-/// Cypher の慣習に従い、すべて小文字で返す（元の入力ケースは lexer
-/// 段階で失われているため復元不可）。
-///
-/// 識別子・文字列リテラル・数値・記号など、キーワード以外には `None` を返す。
-pub fn keyword_as_ident(kind: &TokenKind) -> Option<&'static str> {
-    Some(match kind {
-        TokenKind::Create => "create",
-        TokenKind::Match => "match",
-        TokenKind::Where => "where",
-        TokenKind::Return => "return",
-        TokenKind::Delete => "delete",
-        TokenKind::Set => "set",
-        TokenKind::Detach => "detach",
-        TokenKind::And => "and",
-        TokenKind::Or => "or",
-        TokenKind::Not => "not",
-        TokenKind::True => "true",
-        TokenKind::False => "false",
-        TokenKind::Null => "null",
-        TokenKind::Order => "order",
-        TokenKind::By => "by",
-        TokenKind::Asc => "asc",
-        TokenKind::Desc => "desc",
-        TokenKind::Limit => "limit",
-        TokenKind::Skip => "skip",
-        TokenKind::Distinct => "distinct",
-        TokenKind::Nulls => "nulls",
-        TokenKind::First => "first",
-        TokenKind::Last => "last",
-        TokenKind::Optional => "optional",
-        TokenKind::With => "with",
-        TokenKind::As => "as",
-        TokenKind::Case => "case",
-        TokenKind::When => "when",
-        TokenKind::Then => "then",
-        TokenKind::Else => "else",
-        TokenKind::End => "end",
-        TokenKind::Union => "union",
-        TokenKind::All => "all",
-        TokenKind::Merge => "merge",
-        TokenKind::Remove => "remove",
-        TokenKind::Unwind => "unwind",
-        TokenKind::On => "on",
-        TokenKind::Constraint => "constraint",
-        TokenKind::Require => "require",
-        TokenKind::Unique => "unique",
-        TokenKind::Show => "show",
-        TokenKind::Drop => "drop",
-        TokenKind::For => "for",
-        TokenKind::Foreach => "foreach",
-        TokenKind::Is => "is",
-        TokenKind::Explain => "explain",
-        TokenKind::Profile => "profile",
-        TokenKind::Contains => "contains",
-        TokenKind::Fulltext => "fulltext",
-        TokenKind::Index => "index",
-        TokenKind::User => "user",
-        TokenKind::Password => "password",
-        TokenKind::Role => "role",
-        TokenKind::Alter => "alter",
-        TokenKind::Starts => "starts",
-        TokenKind::Ends => "ends",
-        TokenKind::Normalized => "normalized",
-        TokenKind::In => "in",
-        TokenKind::Call => "call",
-        TokenKind::Yield => "yield",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

@@ -84,3 +84,34 @@ LOW（保守性向上、現状動作には問題なし）
 ## 関連ファイル
 
 - `crates/maharit-query/src/lexer.rs`
+
+## 解決済み (2026-06-14)
+
+### 実装内容
+
+**案 A（マクロ展開）** を採用。`define_keywords!` マクロでキーワードテーブルを
+単一定義し、以下 3 関数を自動生成:
+
+- `lookup_keyword(upper: &str) -> Option<TokenKind>` — lexer のキーワード認識
+- `keyword_display(&TokenKind) -> Option<&'static str>` — Display 用大文字
+- `keyword_as_ident(&TokenKind) -> Option<&'static str>` — 識別子位置の小文字
+
+```rust
+define_keywords! {
+    "CREATE" => Create => "create",
+    "MATCH"  => Match  => "match",
+    // ...
+}
+```
+
+### 変更点
+
+- `read_ident()`: 60 行の巨大 match → `lookup_keyword()` 呼び出し 1 行に短縮
+- `impl Display for TokenKind`: 60 行のキーワード分岐 → `keyword_display()`
+  + bool/null リテラルだけ個別 override + 記号/ペイロードバリアントの match に集約
+- 旧 `keyword_as_ident()` 関数（70 行）を削除（マクロ生成版で代替）
+
+### 検証
+
+- `cargo test -p maharit-query` → **487/487 PASS** (Task 98 で追加した 5 件含む)
+- マクロ展開なのでランタイムコスト・コード生成サイズは現状と同等
