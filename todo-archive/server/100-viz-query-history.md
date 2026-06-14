@@ -64,3 +64,36 @@ MEDIUM
 ## 関連ファイル
 
 - `crates/maharit-viz/assets/index.html` (フロントエンドのみで完結)
+
+## 解決済み (2026-06-14)
+
+### 実装内容
+
+`crates/maharit-viz/assets/index.html` のみ修正:
+
+1. **CSS**: History ボタン + `#history-dropdown` ドロップダウン
+   （min-width 360px / max-height 320px / 縦スクロール）
+2. **マークアップ**: controls 行に「History ▾」ボタンと折りたたみ式リストを追加
+3. **JS**:
+   - `loadHistory()` / `saveHistory()`: `localStorage["maharit-viz:query-history"]`
+     から JSON 配列を読み書き、失敗時は無視
+   - `pushHistory(q)`: `runQuery` 成功時のみ呼ぶ。同一クエリは古い方を削除して
+     先頭に移動、上限 10 件超は古いものから捨てる
+   - `clearHistory()`: 確認ダイアログ → `localStorage.removeItem`
+   - `renderHistory()`: クエリプレビュー（先頭 80 文字、改行は半角空白）+
+     経過時間（秒/分/時/日前の相対表記）でリスト描画
+   - クリックで textarea に復元（実行はしない、ユーザーが Run query を押す）
+   - 外側クリック / ドロップダウン外側で自動的に閉じる
+
+### 動作
+
+- パースエラー等のクエリは履歴に残らない（成功時のみ追加）
+- 同じクエリを連続実行しても履歴は膨らまない（重複排除 + 先頭移動）
+- 11 件目を実行すると最も古いものが削除される
+- リロード後も履歴は localStorage に残る
+- 「履歴クリア」リンクは履歴がないときは disabled
+
+### 反映方法
+
+`docker cp ./crates/maharit-viz/assets/index.html maharit-db-viz:/app/assets/index.html`
+で hot-patch。Docker イメージ再ビルド時も assets コピーで反映される。
