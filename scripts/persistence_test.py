@@ -12,89 +12,18 @@ MaharitDB 永続化ラウンドトリップテスト
 """
 
 import argparse
-import json
 import os
 import shutil
 import signal
-import socket
-import struct
 import subprocess
 import sys
 import tempfile
 import time
 
-# ── ANSI カラー ───────────────────────────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
-
-# ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
-
-class MaharitClient:
-    def __init__(self, host: str, port: int, timeout: float = 10.0):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-
-    def send(self, request: dict) -> dict:
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        payload = self._recv_exactly(length)
-        return json.loads(payload)
-
-    def query(self, cypher: str) -> dict:
-        return self.send({"type": "query", "query": cypher})
-
-    def ping(self) -> bool:
-        try:
-            resp = self.send({"type": "ping"})
-            return resp.get("type") == "pong"
-        except Exception:
-            return False
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-
-
-# ── テストヘルパー ────────────────────────────────────────────────────────────
-
-passed = 0
-failed = 0
-
-
-def check(name: str, condition: bool, detail: str = ""):
-    global passed, failed
-    if condition:
-        passed += 1
-        print(f"  {GREEN}✓{RESET} {name}")
-    else:
-        failed += 1
-        detail_str = f" — {detail}" if detail else ""
-        print(f"  {RED}✗{RESET} {name}{detail_str}")
-
-
-def section(title: str):
-    print(f"\n{CYAN}{BOLD}▶ {title}{RESET}")
+from lib.client import MaharitClient  # noqa: E402
+from lib.reporting import check, section, summarize  # noqa: E402
 
 
 def find_binary() -> str:
@@ -329,15 +258,7 @@ def main():
         if use_tmpdir and tmpdir and os.path.isdir(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # ── 結果サマリー ──────────────────────────────────────────────────────
-    total = passed + failed
-    print(f"\n{BOLD}{'─' * 50}{RESET}")
-    if failed == 0:
-        print(f"{GREEN}{BOLD}✓ 全 {total} 件通過{RESET}")
-    else:
-        print(f"{RED}{BOLD}✗ {failed} 件失敗 / {total} 件中{RESET}")
-
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(summarize())
 
 
 if __name__ == "__main__":

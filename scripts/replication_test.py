@@ -12,75 +12,33 @@ docker-compose.replication.yml で起動したコンテナ群に対して
 """
 
 import argparse
-import json
-import socket
-import struct
+import os
 import subprocess
 import sys
 import time
 
-# ── ANSI カラー ──────────────────────────────────────────────────────────────
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
+from lib.client import MaharitClient as _BaseClient  # noqa: E402
+from lib.reporting import (  # noqa: E402
+    BOLD,
+    CYAN,
+    GREEN,
+    RED,
+    RESET,
+    YELLOW,
+    check,
+    section,
+    summarize,
+)
 
-class MaharitClient:
+
+class MaharitClient(_BaseClient):
+    """replication テスト用に addr 属性を保持する。"""
+
     def __init__(self, host: str, port: int, timeout: float = 10.0):
+        super().__init__(host, port, timeout)
         self.addr = f"{host}:{port}"
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-
-    def send(self, request: dict) -> dict:
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        payload = self._recv_exactly(length)
-        return json.loads(payload)
-
-    def query(self, cypher: str) -> dict:
-        return self.send({"type": "query", "query": cypher})
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        self.sock.close()
-
-
-# ── テストヘルパー ────────────────────────────────────────────────────────────
-
-passed = 0
-failed = 0
-
-
-def check(name: str, condition: bool, detail: str = ""):
-    global passed, failed
-    if condition:
-        passed += 1
-        print(f"  {GREEN}✓{RESET} {name}")
-    else:
-        failed += 1
-        detail_str = f" — {detail}" if detail else ""
-        print(f"  {RED}✗{RESET} {name}{detail_str}")
-
-
-def section(title: str):
-    print(f"\n{CYAN}{BOLD}▶ {title}{RESET}")
 
 
 def connect(host: str, port: int, label: str) -> MaharitClient | None:
@@ -334,15 +292,7 @@ def main():
             if f:
                 f.close()
 
-    print(f"\n{'─' * 50}")
-    print(f"{BOLD}結果: {GREEN}{passed} passed{RESET}", end="")
-    if failed:
-        print(f", {RED}{failed} failed{RESET}")
-    else:
-        print()
-    print()
-
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(summarize())
 
 
 if __name__ == "__main__":

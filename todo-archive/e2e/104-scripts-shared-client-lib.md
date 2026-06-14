@@ -84,3 +84,39 @@ LOW（CI 化 / E2E 拡充の準備として効いてくる）
 
 - `scripts/*.py` 全 9 ファイル
 - Task 77 (CI/CD E2E パイプライン) と組み合わせると効果倍増
+
+## 解決済み (2026-06-14)
+
+### 実装内容
+
+`scripts/lib/` パッケージを新規作成:
+
+- `scripts/lib/__init__.py`
+- `scripts/lib/client.py` — `MaharitClient`
+  - `query` / `stream_query` / `ping` / `iter_stream` / `send` / `close`
+  - context manager 対応 (`with MaharitClient(...) as c:`)
+- `scripts/lib/reporting.py` — `Reporter` クラス + モジュールレベル互換 API
+  - ANSI 定数 (`GREEN` / `RED` / `YELLOW` / `CYAN` / `BOLD` / `RESET`)
+  - `check(name, condition, detail)` / `section(title)` / `summarize() -> int`
+
+### 移行したスクリプト (9 ファイル)
+
+| スクリプト | 形態 | 補足 |
+|-----------|------|------|
+| `smoke_test.py` | 完全移行 | 動作確認 32/32 PASS |
+| `persistence_test.py` | 完全移行 | 動作確認 17/17 PASS |
+| `constraint_test.py` | 完全移行 | `errors` リスト保持 + `check` ラップ |
+| `auth_test.py` | 完全移行 | `check_skip` をラッパとして残す |
+| `concurrent_test.py` | サブクラス移行 | `TxClient` (begin/commit/rollback) + `_lock` 付き `check` ラッパ |
+| `query_feature_test.py` | 完全移行 | `errors` リスト保持 |
+| `failover_test.py` | サブクラス移行 | `addr` 属性を継承で追加 |
+| `replication_test.py` | サブクラス移行 | `addr` 属性を継承で追加 |
+| `benchmark.py` | 完全移行 | プロトコル部のみ置換、計測ロジックは維持 |
+
+すべて `python3 -c "import <script>"` でロード確認。
+
+### 効果
+
+- プロトコル変更時の修正箇所が 9 → 1 ファイルに
+- ANSI 定数・`check`/`section`/サマリ表示が 9 → 1 に集約
+- 各スクリプトで 50〜90 行の冗長コードを削減

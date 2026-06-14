@@ -9,90 +9,26 @@ MaharitDB Smoke Test
 """
 
 import argparse
-import json
-import socket
-import struct
+import os
 import subprocess
 import sys
 import time
 
-# ── ANSI カラー ──────────────────────────────────────────────────────────────
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
+# scripts/ を import path に追加して lib モジュールを使えるようにする
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
-# ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
-
-class MaharitClient:
-    def __init__(self, host: str, port: int, timeout: float = 10.0):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-
-    def send(self, request: dict) -> dict | list[dict]:
-        """リクエストを送信し、レスポンスを返す。ストリーミングの場合はリストで返す。"""
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-
-        resp_type = request.get("type")
-        if resp_type == "streamQuery":
-            return self._recv_stream()
-        return self._recv_one()
-
-    def _recv_one(self) -> dict:
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        payload = self._recv_exactly(length)
-        return json.loads(payload)
-
-    def _recv_stream(self) -> list[dict]:
-        """StreamStart → StreamChunk* → StreamEnd をまとめて受信する。"""
-        messages = []
-        while True:
-            msg = self._recv_one()
-            messages.append(msg)
-            if msg.get("type") in ("streamEnd", "error"):
-                break
-        return messages
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        self.sock.close()
-
-
-# ── テストヘルパー ────────────────────────────────────────────────────────────
-
-passed = 0
-failed = 0
-
-
-def check(name: str, condition: bool, detail: str = ""):
-    global passed, failed
-    if condition:
-        passed += 1
-        print(f"  {GREEN}✓{RESET} {name}")
-    else:
-        failed += 1
-        detail_str = f" — {detail}" if detail else ""
-        print(f"  {RED}✗{RESET} {name}{detail_str}")
-
-
-def section(title: str):
-    print(f"\n{CYAN}{BOLD}▶ {title}{RESET}")
+from lib.client import MaharitClient  # noqa: E402
+from lib.reporting import (  # noqa: E402
+    BOLD,
+    CYAN,
+    GREEN,
+    RED,
+    RESET,
+    YELLOW,
+    check,
+    section,
+    summarize,
+)
 
 
 def run_query(client: MaharitClient, query: str) -> dict:
@@ -353,14 +289,7 @@ def main():
     finally:
         client.close()
 
-    print(f"\n{'─' * 40}")
-    print(f"{BOLD}結果: {GREEN}{passed} passed{RESET}", end="")
-    if failed:
-        print(f", {RED}{failed} failed{RESET}")
-    else:
-        print()
-
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(summarize())
 
 
 if __name__ == "__main__":

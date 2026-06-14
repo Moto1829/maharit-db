@@ -25,13 +25,10 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# ── ANSI カラー ───────────────────────────────────────────────────────────────
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-RED    = "\033[91m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from lib.client import MaharitClient  # noqa: E402
+from lib.reporting import BOLD, CYAN, GREEN, RED, RESET, YELLOW  # noqa: E402
 
 NAMES   = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi",
            "Ivan", "Judy", "Karl", "Laura", "Mallory", "Niaj", "Olivia", "Peggy"]
@@ -39,53 +36,6 @@ CITIES  = ["Tokyo", "Osaka", "Nagoya", "Sapporo", "Fukuoka", "Kyoto",
            "Yokohama", "Kobe", "Sendai", "Hiroshima"]
 SKILLS  = ["Rust", "Python", "Go", "Java", "TypeScript", "C++", "Haskell",
            "Scala", "Elixir", "Ruby"]
-
-
-# ── プロトコル実装 ─────────────────────────────────────────────────────────────
-
-class MaharitClient:
-    def __init__(self, host: str, port: int, timeout: float = 60.0):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-
-    def send(self, request: dict) -> dict | list[dict]:
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-        if request.get("type") == "streamQuery":
-            return self._recv_stream()
-        return self._recv_one()
-
-    def query(self, cypher: str) -> dict:
-        return self.send({"type": "query", "query": cypher})
-
-    def _recv_one(self) -> dict:
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        return json.loads(self._recv_exactly(length))
-
-    def _recv_stream(self) -> list[dict]:
-        messages = []
-        while True:
-            msg = self._recv_one()
-            messages.append(msg)
-            if msg.get("type") in ("streamEnd", "error"):
-                break
-        return messages
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        self.sock.close()
 
 
 # ── 繰り返し計測定数 ──────────────────────────────────────────────────────────

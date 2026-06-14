@@ -16,76 +16,33 @@ docker-compose.replication.yml で起動した環境（リーダー1台 + フォ
 """
 
 import argparse
-import json
-import socket
-import struct
+import os
 import subprocess
 import sys
 import time
 
-# ── ANSI カラー ──────────────────────────────────────────────────────────────
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
+from lib.client import MaharitClient as _BaseClient  # noqa: E402
+from lib.reporting import (  # noqa: E402
+    BOLD,
+    CYAN,
+    GREEN,
+    RED,
+    RESET,
+    YELLOW,
+    check,
+    section,
+    summarize,
+)
 
 
-class MaharitClient:
+class MaharitClient(_BaseClient):
+    """failover テスト用に addr 属性を保持する。"""
+
     def __init__(self, host: str, port: int, timeout: float = 10.0):
+        super().__init__(host, port, timeout)
         self.addr = f"{host}:{port}"
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-
-    def send(self, request: dict) -> dict:
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        payload = self._recv_exactly(length)
-        return json.loads(payload)
-
-    def query(self, cypher: str) -> dict:
-        return self.send({"type": "query", "query": cypher})
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        self.sock.close()
-
-
-# ── テストヘルパー ────────────────────────────────────────────────────────────
-
-passed = 0
-failed = 0
-
-
-def check(name: str, condition: bool, detail: str = ""):
-    global passed, failed
-    if condition:
-        passed += 1
-        print(f"  {GREEN}✓{RESET} {name}")
-    else:
-        failed += 1
-        detail_str = f" — {detail}" if detail else ""
-        print(f"  {RED}✗{RESET} {name}{detail_str}")
-
-
-def section(title: str):
-    print(f"\n{CYAN}{BOLD}▶ {title}{RESET}")
 
 
 def connect(host: str, port: int, label: str, timeout: float = 10.0):
@@ -405,16 +362,7 @@ def main():
     # フェーズ6: フォロワー2のハートビートタイムアウト確認
     phase6_verify_follower2(args.follower2_port, args.hb_timeout_wait)
 
-    # 結果サマリー
-    total = passed + failed
-    print(f"\n{BOLD}{'=' * 60}{RESET}")
-    if failed == 0:
-        print(f"{GREEN}{BOLD} 全テスト合格: {passed}/{total}{RESET}")
-    else:
-        print(f"{RED}{BOLD} テスト失敗: {failed}/{total}{RESET}")
-    print(f"{BOLD}{'=' * 60}{RESET}\n")
-
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(summarize())
 
 
 if __name__ == "__main__":

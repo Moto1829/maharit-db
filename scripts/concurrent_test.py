@@ -11,40 +11,40 @@ MaharitDB 同時接続テスト (E2E)
 """
 
 import argparse
-import json
-import socket
-import struct
+import os
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ── ANSI カラー ──────────────────────────────────────────────────────────────
-GREEN = "\033[92m"
-RED   = "\033[91m"
-CYAN  = "\033[96m"
-YELLOW = "\033[93m"
-BOLD  = "\033[1m"
-RESET = "\033[0m"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lib.reporting as reporting  # noqa: E402
+from lib.client import MaharitClient as _BaseClient  # noqa: E402
+from lib.reporting import (  # noqa: E402
+    BOLD,
+    CYAN,
+    GREEN,
+    RED,
+    RESET,
+    YELLOW,
+    section,
+    summarize,
+)
+
 
 HOST = "localhost"
 PORT = 7687
 
-# ── プロトコル実装（4バイト長プレフィックス + JSON） ─────────────────────────
 
-class MaharitClient:
-    """スレッドセーフではないので、スレッドごとに生成すること。"""
+class MaharitClient(_BaseClient):
+    """スレッドセーフではないので、スレッドごとに生成すること。
 
-    def __init__(self, host: str, port: int, timeout: float = 10.0):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
+    共通 lib.client.MaharitClient を継承し、トランザクション系の補助 API を追加する。
+    """
 
-    def send(self, request: dict) -> dict:
-        data = json.dumps(request).encode()
-        self.sock.sendall(struct.pack(">I", len(data)) + data)
-        return self._recv_one()
-
-    def query(self, q: str, tx_id: int | None = None) -> dict:
+    def query(self, q: str, tx_id: int | None = None) -> dict:  # type: ignore[override]
         req: dict = {"type": "query", "query": q}
         if tx_id is not None:
             req["txId"] = tx_id
@@ -66,28 +66,6 @@ class MaharitClient:
         if resp.get("type") != "rolledBack":
             raise RuntimeError(f"ROLLBACK failed: {resp}")
 
-    def _recv_one(self) -> dict:
-        raw_len = self._recv_exactly(4)
-        length = struct.unpack(">I", raw_len)[0]
-        payload = self._recv_exactly(length)
-        return json.loads(payload)
-
-    def _recv_exactly(self, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self.send({"type": "disconnect"})
-        except Exception:
-            pass
-        self.sock.close()
-
 
 def new_client() -> MaharitClient:
     return MaharitClient(HOST, PORT)
@@ -95,25 +73,12 @@ def new_client() -> MaharitClient:
 
 # ── テストヘルパー ────────────────────────────────────────────────────────────
 
-passed = 0
-failed = 0
 _lock = threading.Lock()
 
 
 def check(name: str, condition: bool, detail: str = ""):
-    global passed, failed
     with _lock:
-        if condition:
-            passed += 1
-            print(f"  {GREEN}✓{RESET} {name}")
-        else:
-            failed += 1
-            detail_str = f" — {detail}" if detail else ""
-            print(f"  {RED}✗{RESET} {name}{detail_str}")
-
-
-def section(title: str):
-    print(f"\n{CYAN}{BOLD}▶ {title}{RESET}")
+        reporting.check(name, condition, detail)
 
 
 # ── テストスイート ────────────────────────────────────────────────────────────
@@ -381,14 +346,7 @@ def main():
     finally:
         cleanup()
 
-    print(f"\n{'─' * 40}")
-    print(f"{BOLD}結果: {GREEN}{passed} passed{RESET}", end="")
-    if failed:
-        print(f", {RED}{failed} failed{RESET}")
-    else:
-        print()
-
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(summarize())
 
 
 if __name__ == "__main__":
