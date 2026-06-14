@@ -181,7 +181,31 @@ let result = client.query_with_params(
 ).await?;
 ```
 
-## 6. Docker で起動する
+## 6. Web UI (`maharit-viz`) で可視化する
+
+`maharit-viz` は `maharit-server` のフロントエンドとして動作する
+HTTP サーバーで、ブラウザからクエリ実行 / テーブル表示 / グラフ表示を行えます。
+
+```bash
+# サーバーを起動 (port 7687)
+./target/release/maharit server --data /tmp/maharit.db
+
+# 別ターミナルで maharit-viz を起動 (port 8080)
+cargo run --release -p maharit-viz -- \
+  --bind 127.0.0.1:8080 \
+  --server 127.0.0.1:7687
+```
+
+ブラウザで <http://localhost:8080> を開きます。
+
+- **Table** タブ: Tabulator によるフィルタ・ソート・ページネーション
+- **Graph** タブ: cytoscape.js によるネットワークグラフ表示
+  （クエリで `<prefix>.id` 列を返すと自動で可視化）
+- **Raw JSON** タブ: API レスポンスを生 JSON で確認
+
+詳細は [Web アプリのドキュメント](./visualization/web-app.md) を参照してください。
+
+## 7. Docker で起動する
 
 Docker を使用する場合は、別途 Docker のインストールが必要です。
 
@@ -199,9 +223,21 @@ docker run -p 7687:7687 maharit-db server --host 0.0.0.0 --port 7687
 docker run -v maharit-data:/data -p 7687:7687 maharit-db server --host 0.0.0.0
 ```
 
+### docker-compose で server + Web UI を同時起動
+
+リポジトリの `docker-compose.yml` には `maharit-server` (port 7687) と
+`maharit-viz` (port 8080) のサービスがあらかじめ定義されています。
+
+```bash
+docker compose up -d
+
+# ブラウザで http://localhost:8080 にアクセス
+```
+
 ## 次のステップ
 
 - [アーキテクチャ概要](./architecture.md) でクレート構成を理解する
 - [Cypher 基本構文](./cypher/basics.md) でクエリ言語を学ぶ
 - [関数リファレンス](./functions/string.md) で利用可能な関数を確認する
 - [サーバー設定](./operations/server-config.md) で本番環境向けの設定を行う
+- [Web アプリ](./visualization/web-app.md) でブラウザからの可視化方法を確認する
