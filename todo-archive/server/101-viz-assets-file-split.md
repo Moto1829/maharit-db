@@ -50,3 +50,25 @@ LOW（バグではない / 触る頻度の高いファイルなので効果は�
 ## 関連ファイル
 
 - `crates/maharit-viz/assets/index.html`
+
+## 解決済み (2026-06-14)
+
+Task 105 と同時実施。`crates/maharit-viz/assets/` を以下に分割:
+
+```
+assets/
+  index.html          # 75 行 (タグのみ + CDN + module 読み込み)
+  styles.css          # 全 CSS をここに集約
+  app.js              # エントリポイント (DOM 配線 + Run query フロー)
+  modules/
+    api.js / table_view.js / graph_view.js / history.js / tabs.js / util.js
+```
+
+ServeDir はディレクトリ全体を再帰的に配信するため変更不要。Dockerfile.viz の
+`COPY ... /app/assets` も同様に変更なし。
+
+### 検証
+
+- `curl -sI http://localhost:8080/{styles.css,app.js,modules/api.js}` → 200 OK / 正しい MIME
+- `/api/query` の動作も継続して問題なし
+- index.html は 875 行 → 75 行へ大幅縮小

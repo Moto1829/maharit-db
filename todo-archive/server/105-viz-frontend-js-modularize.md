@@ -97,3 +97,31 @@ LOW（保守性向上、機能追加の頻度が下がってきたら実施）
 ## 関連ファイル
 
 - `crates/maharit-viz/assets/index.html`
+
+## 解決済み (2026-06-14)
+
+Task 101 と同時実施。`<script type="module" src="/app.js">` でロードする
+ES Modules 構成に置き換えた。
+
+### モジュール構成
+
+| ファイル | 役割 |
+|---------|------|
+| `modules/util.js` | `escapeHtml` / `stripQuotes` / `formatRelativeTime` |
+| `modules/api.js` | `info` / `health` / `query` (戻り値 `{ ok, ...body }`) |
+| `modules/tabs.js` | タブ切替 (DOM 配線 + `onSwitch` コールバック) |
+| `modules/table_view.js` | Tabulator 描画 + `nestedFieldSeparator: false` 維持 |
+| `modules/graph_view.js` | cytoscape 描画 + 詳細パネル (`init` / `render` / `clearOnError` / `resize`) |
+| `modules/history.js` | localStorage 履歴 (`attach` / `push` / `clear`) |
+| `app.js` | DOM 参照を 1 箇所に集めて配線、`runQuery` フローを束ねる |
+
+### 効果
+
+- グローバル変数を排除（`tabulator`/`cy`/`detailPanel` などはモジュール内の局所変数）
+- 関心ごとに 30〜200 行の小ファイルに分割
+- 機能追加時の影響範囲が該当モジュールに局在化
+
+### 検証
+
+- 全 6 モジュール + `app.js` + `styles.css` が 200 OK で配信
+- ブラウザでの動作確認は Task 101 と同時（クエリ実行・タブ切替・詳細パネル・履歴）

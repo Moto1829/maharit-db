@@ -2,3 +2,5 @@
 /benchmark_reports/
 
 .claude/agent-memory/
+__pycache__/
+*.pyc
