@@ -384,6 +384,11 @@ async fn run_query(
 }
 
 /// `Vec<HashMap<String,String>>` を JSON 用に正規化する。
+///
+/// maharit-server は `Value::String("alice")` を `"alice"` という
+/// 外側ダブルクォート付き文字列として返してくるため、そのまま JSON 化すると
+/// `"\"alice\""` のように二重エスケープに見える。viz の API レイヤーで
+/// 外側クォートを剥がして、Raw JSON タブでも素直に `"alice"` と表示されるようにする。
 fn build_columns_and_rows(
     rows: Vec<std::collections::HashMap<String, String>>,
 ) -> (
@@ -405,7 +410,7 @@ fn build_columns_and_rows(
             for c in &cols {
                 let v = row
                     .get(c)
-                    .map(|s| serde_json::Value::String(s.clone()))
+                    .map(|s| normalize_value(s))
                     .unwrap_or(serde_json::Value::Null);
                 m.insert(c.clone(), v);
             }
@@ -414,6 +419,22 @@ fn build_columns_and_rows(
         .collect();
 
     (cols, normalized)
+}
+
+/// server の文字列値を JSON 用に正規化する:
+/// - `"alice"` (外側ダブルクォート付き) → JSON 文字列 `"alice"`
+/// - `null`   → JSON null
+/// - `123` 等 (数値リテラル文字列) はそのまま String として返す
+///   (Cypher の RETURN n.age は厳密には Number だが、現状の server は
+///    全部 String で返すので JSON 上の型は維持する方が混乱が少ない)
+fn normalize_value(s: &str) -> serde_json::Value {
+    if s == "null" {
+        return serde_json::Value::Null;
+    }
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        return serde_json::Value::String(s[1..s.len() - 1].to_string());
+    }
+    serde_json::Value::String(s.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -464,6 +485,58 @@ mod tests {
         assert!(cfg.server_addr.contains("7687"));
         assert!(!cfg.require_auth, "auth must default to disabled");
         assert!(cfg.tls.is_none(), "tls must default to disabled");
+    }
+
+    #[test]
+    fn normalize_strips_outer_double_quotes() {
+        // server から `"alice"` が来ても JSON 上は素のまま `"alice"` になる
+        assert_eq!(
+            normalize_value("\"alice\""),
+            serde_json::Value::String("alice".to_string())
+        );
+        assert_eq!(
+            normalize_value("\"\""),
+            serde_json::Value::String("".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_passes_through_numbers_and_other_values() {
+        // 数値や bool 文字列はクォート無しで来るのでそのまま String 維持
+        assert_eq!(
+            normalize_value("30"),
+            serde_json::Value::String("30".to_string())
+        );
+        assert_eq!(
+            normalize_value("true"),
+            serde_json::Value::String("true".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_converts_null_string_to_json_null() {
+        assert_eq!(normalize_value("null"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_columns_strips_quotes_for_string_values() {
+        let row: HashMap<String, String> = [
+            ("n.id".to_string(), "\"alice\"".to_string()),
+            ("n.age".to_string(), "30".to_string()),
+            ("n.opt".to_string(), "null".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let (_, rows) = build_columns_and_rows(vec![row]);
+        assert_eq!(
+            rows[0].get("n.id"),
+            Some(&serde_json::Value::String("alice".to_string()))
+        );
+        assert_eq!(
+            rows[0].get("n.age"),
+            Some(&serde_json::Value::String("30".to_string()))
+        );
+        assert_eq!(rows[0].get("n.opt"), Some(&serde_json::Value::Null));
     }
 
     #[test]
