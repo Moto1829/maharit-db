@@ -79,6 +79,13 @@ graph.init({
   title: els.detailTitle,
   body: els.detailBody,
   closeBtn: els.detailClose,
+  legend: $("graph-legend"),
+  zoom: {
+    root: $("graph-zoom"),
+    zoomIn: $("zoom-in"),
+    zoomOut: $("zoom-out"),
+    zoomFit: $("zoom-fit"),
+  },
 });
 
 // ── 履歴ドロップダウン ────────────────────────────────────────────────────

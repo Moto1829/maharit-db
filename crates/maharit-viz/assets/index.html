@@ -13,6 +13,10 @@
 
     <script src="https://unpkg.com/tabulator-tables@6.3.0/dist/js/tabulator.min.js"></script>
     <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+    <!-- fcose レイアウト: cose より重なり/交差が少なくクラスタが見やすい -->
+    <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+    <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+    <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
     <script type="module" src="/app.js"></script>
   </head>
   <body>
@@ -74,6 +78,12 @@
       </div>
       <div id="graph-panel" class="panel">
         <div id="graph-canvas"></div>
+        <aside id="graph-legend" class="graph-legend" hidden></aside>
+        <div id="graph-zoom" class="graph-zoom" hidden>
+          <button id="zoom-in" type="button" aria-label="zoom in">+</button>
+          <button id="zoom-out" type="button" aria-label="zoom out">−</button>
+          <button id="zoom-fit" type="button" aria-label="fit to view">⛶</button>
+        </div>
         <aside id="graph-detail" aria-hidden="true">
           <header class="detail-header">
             <span class="detail-kind" id="detail-kind">NODE</span>
