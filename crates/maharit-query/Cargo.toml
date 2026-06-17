@@ -11,3 +11,4 @@ thiserror.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
 rayon = "1.10"
+serde_json.workspace = true

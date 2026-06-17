@@ -126,7 +126,7 @@ def test_set(client: MaharitClient):
     resp = run_query(client, "MATCH (n:Person {name: 'Bob'}) RETURN n.age")
     rows = resp.get("rows", [])
     age_val = rows[0].get("n.age") if rows else None
-    check("更新後の age が 26", age_val == "26", f"age={age_val}")
+    check("更新後の age が 26", age_val == 26, f"age={age_val}")
 
 
 def test_delete(client: MaharitClient):

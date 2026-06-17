@@ -303,7 +303,7 @@ enum Request {
 #[serde(tag = "type")]
 enum Response {
     #[serde(rename = "result")]
-    Result { rows: Vec<HashMap<String, String>> },
+    Result { rows: Vec<HashMap<String, serde_json::Value>> },
 
     #[serde(rename = "error")]
     Error { message: String },
@@ -357,7 +357,7 @@ enum Response {
         #[serde(rename = "chunkIndex")]
         #[allow(dead_code)]
         chunk_index: usize,
-        rows: Vec<HashMap<String, String>>,
+        rows: Vec<HashMap<String, serde_json::Value>>,
     },
 
     #[serde(rename = "streamEnd")]
@@ -415,7 +415,7 @@ impl<'a> StreamingResult<'a> {
     }
 
     /// Get the next chunk of rows
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<HashMap<String, String>>>> {
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<HashMap<String, serde_json::Value>>>> {
         if self.finished {
             return Ok(None);
         }
@@ -457,7 +457,7 @@ impl<'a> StreamingResult<'a> {
     }
 
     /// Collect all remaining rows into a single vector
-    pub async fn collect_all(mut self) -> Result<Vec<HashMap<String, String>>> {
+    pub async fn collect_all(mut self) -> Result<Vec<HashMap<String, serde_json::Value>>> {
         let mut all_rows = Vec::new();
         while let Some(chunk) = self.next_chunk().await? {
             all_rows.extend(chunk);
@@ -470,7 +470,7 @@ impl<'a> StreamingResult<'a> {
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     /// Result rows
-    pub rows: Vec<HashMap<String, String>>,
+    pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
 impl QueryResult {
@@ -485,7 +485,7 @@ impl QueryResult {
     }
 
     /// Get a single value from the first row
-    pub fn get_single(&self, column: &str) -> Option<&String> {
+    pub fn get_single(&self, column: &str) -> Option<&serde_json::Value> {
         self.rows.first().and_then(|row| row.get(column))
     }
 }
@@ -1315,15 +1315,18 @@ mod tests {
     #[test]
     fn test_query_result() {
         let mut row = HashMap::new();
-        row.insert("name".to_string(), "Alice".to_string());
-        row.insert("age".to_string(), "30".to_string());
+        row.insert(
+            "name".to_string(),
+            serde_json::Value::String("Alice".to_string()),
+        );
+        row.insert("age".to_string(), serde_json::json!(30));
 
         let result = QueryResult { rows: vec![row] };
 
         assert_eq!(result.row_count(), 1);
         assert!(!result.is_empty());
-        assert_eq!(result.get_single("name"), Some(&"Alice".to_string()));
-        assert_eq!(result.get_single("age"), Some(&"30".to_string()));
+        assert_eq!(result.get_single("name"), Some(&serde_json::json!("Alice")));
+        assert_eq!(result.get_single("age"), Some(&serde_json::json!(30)));
         assert_eq!(result.get_single("unknown"), None);
     }
 
@@ -1429,7 +1432,7 @@ mod tests {
         match response {
             Response::Result { rows } => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].get("name"), Some(&"Alice".to_string()));
+                assert_eq!(rows[0].get("name"), Some(&serde_json::json!("Alice")));
             }
             _ => panic!("Expected Result response"),
         }
@@ -1587,7 +1590,7 @@ mod tests {
                 assert_eq!(stream_id, 1);
                 assert_eq!(chunk_index, 0);
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].get("name"), Some(&"Alice".to_string()));
+                assert_eq!(rows[0].get("name"), Some(&serde_json::json!("Alice")));
             }
             _ => panic!("Expected StreamChunk response"),
         }

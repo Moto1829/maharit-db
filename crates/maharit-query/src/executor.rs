@@ -186,6 +186,52 @@ impl std::fmt::Display for Value {
     }
 }
 
+impl Value {
+    /// Cypher 値を `serde_json::Value` に変換する。
+    ///
+    /// プリミティブ (Null/Bool/Int/Float/String) は対応する JSON 型を維持。
+    /// List/Map は再帰的に変換、Date/DateTime/Duration/Node/NodeData/Path 等は
+    /// 既存の Display 文字列表現で JSON 文字列として返す（型を区別したい場合は
+    /// 専用のオブジェクト表現に変更可能だが現状はシンプル化を優先）。
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Int(n) => serde_json::Value::Number((*n).into()),
+            Value::Float(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::String(s) => serde_json::Value::String(s.clone()),
+            Value::List(items) => {
+                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+            }
+            Value::Map(map) => {
+                let obj: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .collect();
+                serde_json::Value::Object(obj)
+            }
+            // 非プリミティブ型は Display 文字列で表現（後方互換、UI で読み取り可能）
+            Value::Node(_)
+            | Value::NodeData { .. }
+            | Value::Path { .. }
+            | Value::Date(_)
+            | Value::DateTime(_)
+            | Value::Duration { .. } => serde_json::Value::String(self.to_string_unquoted()),
+        }
+    }
+
+    /// Display と違って文字列値の外側ダブルクォートを付けない文字列化。
+    /// JSON 化用途以外でも、ログ・診断メッセージで素のままを欲しい場面で使う。
+    pub fn to_string_unquoted(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            _ => self.to_string(),
+        }
+    }
+}
+
 impl From<&PropertyValue> for Value {
     fn from(pv: &PropertyValue) -> Self {
         match pv {
@@ -5500,6 +5546,66 @@ mod tests {
     fn execute_with(executor: &mut Executor<'_>, query: &str) -> Result<ResultSet, ExecuteError> {
         let stmt = Parser::new(query).unwrap().parse().unwrap();
         executor.execute(stmt)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Value::to_json (型情報を保ったまま JSON 表現に変換)
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn value_to_json_preserves_primitive_types() {
+        assert_eq!(Value::Null.to_json(), serde_json::Value::Null);
+        assert_eq!(Value::Bool(true).to_json(), serde_json::Value::Bool(true));
+        assert_eq!(
+            Value::Int(30).to_json(),
+            serde_json::Value::Number(30.into())
+        );
+        assert_eq!(
+            Value::String("alice".to_string()).to_json(),
+            serde_json::Value::String("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn value_to_json_float_preserved() {
+        let v = Value::Float(3.14).to_json();
+        assert_eq!(v.as_f64(), Some(3.14));
+    }
+
+    #[test]
+    fn value_to_json_list_is_array() {
+        let v = Value::List(vec![
+            Value::Int(1),
+            Value::String("two".to_string()),
+            Value::Null,
+        ])
+        .to_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0], serde_json::json!(1));
+        assert_eq!(arr[1], serde_json::Value::String("two".to_string()));
+        assert_eq!(arr[2], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn value_to_json_map_is_object() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("name".to_string(), Value::String("Alice".to_string()));
+        map.insert("age".to_string(), Value::Int(30));
+        let v = Value::Map(map).to_json();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("name"), Some(&serde_json::json!("Alice")));
+        assert_eq!(obj.get("age"), Some(&serde_json::json!(30)));
+    }
+
+    #[test]
+    fn value_to_string_unquoted_skips_outer_quotes() {
+        assert_eq!(
+            Value::String("alice".to_string()).to_string_unquoted(),
+            "alice"
+        );
+        assert_eq!(Value::Int(30).to_string_unquoted(), "30");
+        assert_eq!(Value::Null.to_string_unquoted(), "null");
     }
 
     #[test]

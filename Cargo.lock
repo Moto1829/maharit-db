@@ -1376,6 +1376,7 @@ dependencies = [
  "maharit-core",
  "rayon",
  "regex",
+ "serde_json",
  "thiserror 2.0.18",
  "unicode-normalization",
 ]

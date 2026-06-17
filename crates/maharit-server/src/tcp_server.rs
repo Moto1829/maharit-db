@@ -189,7 +189,12 @@ fn default_chunk_size() -> usize {
 pub enum Response {
     /// Query result
     #[serde(rename = "result")]
-    Result { rows: Vec<HashMap<String, String>> },
+    /// クエリ結果。各行は列名 → JSON 値のマップ。
+    /// 値は Cypher の型情報を保持する: 文字列は JSON String, 数値は JSON Number,
+    /// bool は JSON Boolean, null は JSON Null, リスト/マップは JSON Array/Object。
+    Result {
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    },
 
     /// Error response
     #[serde(rename = "error")]
@@ -254,7 +259,7 @@ pub enum Response {
         #[serde(rename = "chunkIndex")]
         chunk_index: usize,
         /// Rows in this chunk
-        rows: Vec<HashMap<String, String>>,
+        rows: Vec<HashMap<String, serde_json::Value>>,
     },
 
     /// End of streaming response
@@ -844,8 +849,8 @@ async fn execute_streaming_query(
             emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
         }
 
-    // Convert rows to HashMap format
-    let all_rows: Vec<HashMap<String, String>> = result
+    // Convert rows to HashMap<String, serde_json::Value> 型情報維持
+    let all_rows: Vec<HashMap<String, serde_json::Value>> = result
         .rows
         .into_iter()
         .map(|row| {
@@ -853,7 +858,7 @@ async fn execute_streaming_query(
                 .columns
                 .iter()
                 .zip(row.columns.iter())
-                .map(|(col, val)| (col.clone(), val.to_string()))
+                .map(|(col, val)| (col.clone(), val.to_json()))
                 .collect()
         })
         .collect();
@@ -1059,7 +1064,7 @@ async fn execute_query_with_tx(
                 emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
             }
 
-            let rows = result
+            let rows: Vec<HashMap<String, serde_json::Value>> = result
                 .rows
                 .into_iter()
                 .map(|row| {
@@ -1067,7 +1072,7 @@ async fn execute_query_with_tx(
                         .columns
                         .iter()
                         .zip(row.columns.iter())
-                        .map(|(col, val)| (col.clone(), val.to_string()))
+                        .map(|(col, val)| (col.clone(), val.to_json()))
                         .collect()
                 })
                 .collect();
@@ -1142,7 +1147,7 @@ async fn execute_query(
 
     match exec_result {
         Ok(result) => {
-            let rows: Vec<HashMap<String, String>> = result
+            let rows: Vec<HashMap<String, serde_json::Value>> = result
                 .rows
                 .into_iter()
                 .map(|row| {
@@ -1150,7 +1155,7 @@ async fn execute_query(
                         .columns
                         .iter()
                         .zip(row.columns.iter())
-                        .map(|(col, val)| (col.clone(), val.to_string()))
+                        .map(|(col, val)| (col.clone(), val.to_json()))
                         .collect()
                 })
                 .collect();
@@ -1459,7 +1464,7 @@ mod tests {
     #[test]
     fn test_result_response() {
         let mut row = HashMap::new();
-        row.insert("name".to_string(), "Alice".to_string());
+        row.insert("name".to_string(), serde_json::json!("Alice"));
         let response = Response::Result { rows: vec![row] };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"type\":\"result\""));
@@ -1535,7 +1540,7 @@ mod tests {
     #[test]
     fn test_stream_chunk_response() {
         let mut row = HashMap::new();
-        row.insert("name".to_string(), "Alice".to_string());
+        row.insert("name".to_string(), serde_json::json!("Alice"));
         let response = Response::StreamChunk {
             stream_id: 1,
             chunk_index: 0,
@@ -1693,7 +1698,7 @@ mod tests {
             Response::Result { rows } => {
                 assert!(!rows.is_empty(), "expected at least one row");
                 // String values are returned as JSON-quoted strings (e.g. `"Alice"`)
-                assert_eq!(rows[0].get("n.name").map(String::as_str), Some("\"Alice\""));
+                assert_eq!(rows[0].get("n.name").and_then(|v| v.as_str()), Some("Alice"));
             }
             other => panic!("expected Result, got {:?}", other),
         }
@@ -1716,11 +1721,11 @@ mod tests {
         assert!(matches!(resp, Response::Result { .. }), "CREATE failed: {:?}", resp);
 
         // MATCH each property individually
-        // String values are JSON-quoted; numeric/bool values are plain
+        // Server returns typed JSON values: String/Number/Boolean.
         for (col, expected) in [
-            ("n.s", "\"hello\""),
-            ("n.i", "42"),
-            ("n.b", "true"),
+            ("n.s", serde_json::json!("hello")),
+            ("n.i", serde_json::json!(42)),
+            ("n.b", serde_json::json!(true)),
         ] {
             let resp = send_recv(
                 &mut stream,
@@ -1734,8 +1739,8 @@ mod tests {
                 Response::Result { rows } => {
                     assert!(!rows.is_empty(), "no rows for {}", col);
                     assert_eq!(
-                        rows[0].get(col).map(String::as_str),
-                        Some(expected),
+                        rows[0].get(col),
+                        Some(&expected),
                         "mismatch for {}",
                         col
                     );
@@ -1755,7 +1760,7 @@ mod tests {
         .await;
         match resp {
             Response::Result { rows } => {
-                let val: f64 = rows[0]["n.f"].parse().expect("n.f should be a float");
+                let val = rows[0]["n.f"].as_f64().expect("n.f should be a float");
                 assert!((val - 3.14).abs() < 0.01);
             }
             other => panic!("expected Result for n.f, got {:?}", other),
@@ -1796,7 +1801,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty(), "traversal returned no rows");
-                assert_eq!(rows[0].get("b.name").map(String::as_str), Some("\"dst\""));
+                assert_eq!(rows[0].get("b.name").and_then(|v| v.as_str()), Some("dst"));
             }
             other => panic!("expected Result, got {:?}", other),
         }
@@ -2121,11 +2126,11 @@ mod tests {
             Response::Result { rows } => {
                 // A がコミット済みなので少なくとも1件、B はロールバック済みなので "B" は含まれない
                 assert!(
-                    rows.iter().any(|r| r.get("n.owner").map(|s| s.as_str()) == Some("\"A\"")),
+                    rows.iter().any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("A")),
                     "A's committed node should exist"
                 );
                 assert!(
-                    !rows.iter().any(|r| r.get("n.owner").map(|s| s.as_str()) == Some("\"B\"")),
+                    !rows.iter().any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("B")),
                     "B's rolled-back node should not exist"
                 );
             }
@@ -2187,7 +2192,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].get("n.idx").map(String::as_str), Some("5"));
+                assert_eq!(rows[0].get("n.idx").and_then(|v| v.as_i64()), Some(5));
             }
             other => panic!("expected Result, got {:?}", other),
         }

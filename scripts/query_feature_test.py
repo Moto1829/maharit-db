@@ -182,7 +182,7 @@ def test_return_expressions(client: MaharitClient):
     )
     check(
         "n.age が 30",
-        rows[0].get("n.age") == "30" if rows else False,
+        rows[0].get("n.age") == 30 if rows else False,
         str(rows),
     )
 
@@ -214,20 +214,20 @@ def test_aggregation(client: MaharitClient):
     resp = run_query(client, "MATCH (n:Person) RETURN COUNT(*) AS cnt")
     rows = resp.get("rows", [])
     cnt = rows[0].get("cnt") if rows else None
-    check("COUNT(*) が 4 を返す", cnt == "4", f"cnt={cnt}")
+    check("COUNT(*) が 4 を返す", cnt == 4, f"cnt={cnt}")
 
     # COUNT(n)
     resp = run_query(client, "MATCH (n:Person) RETURN COUNT(n) AS cnt")
     rows = resp.get("rows", [])
     cnt = rows[0].get("cnt") if rows else None
-    check("COUNT(n) が 4 を返す", cnt == "4", f"cnt={cnt}")
+    check("COUNT(n) が 4 を返す", cnt == 4, f"cnt={cnt}")
 
     # SUM
     resp = run_query(client, "MATCH (n:Person) RETURN SUM(n.age) AS total")
     rows = resp.get("rows", [])
     total = rows[0].get("total") if rows else None
     # 30 + 25 + 35 + 20 = 110
-    check("SUM(n.age) が 110", total == "110", f"total={total}")
+    check("SUM(n.age) が 110", total == 110, f"total={total}")
 
     # AVG
     resp = run_query(client, "MATCH (n:Person) RETURN AVG(n.age) AS avg_age")
@@ -241,8 +241,8 @@ def test_aggregation(client: MaharitClient):
     rows = resp.get("rows", [])
     min_age = rows[0].get("min_age") if rows else None
     max_age = rows[0].get("max_age") if rows else None
-    check("MIN(n.age) が 20", min_age == "20", f"min_age={min_age}")
-    check("MAX(n.age) が 35", max_age == "35", f"max_age={max_age}")
+    check("MIN(n.age) が 20", min_age == 20, f"min_age={min_age}")
+    check("MAX(n.age) が 35", max_age == 35, f"max_age={max_age}")
 
     # COLLECT
     resp = run_query(client, "MATCH (n:Person) RETURN COLLECT(n.name) AS names")
@@ -375,7 +375,7 @@ def test_match_set(client: MaharitClient):
     rows = resp.get("rows", [])
     check(
         "更新後の age が 21",
-        rows[0].get("n.age") == "21" if rows else False,
+        rows[0].get("n.age") == 21 if rows else False,
         str(rows),
     )
 
@@ -448,7 +448,7 @@ def test_merge(client: MaharitClient):
     rows = resp.get("rows", [])
     check(
         "ON CREATE SET で age が 28",
-        rows[0].get("n.age") == "28" if rows else False,
+        rows[0].get("n.age") == 28 if rows else False,
         str(rows),
     )
 
@@ -461,7 +461,7 @@ def test_merge(client: MaharitClient):
     rows = resp.get("rows", [])
     check(
         "ON MATCH SET で age が 29",
-        rows[0].get("n.age") == "29" if rows else False,
+        rows[0].get("n.age") == 29 if rows else False,
         str(rows),
     )
 
@@ -477,7 +477,7 @@ def test_unwind(client: MaharitClient):
     rows = resp.get("rows", [])
     check("UNWIND [1,2,3] で 3 件返る", len(rows) == 3, f"rows={len(rows)}")
     xs = [r.get("x") for r in rows]
-    check("UNWIND の値が 1, 2, 3", set(xs) == {"1", "2", "3"}, f"xs={xs}")
+    check("UNWIND の値が 1, 2, 3", set(xs) == {1, 2, 3}, f"xs={xs}")
 
     # UNWIND + CREATE
     resp = run_query(
@@ -522,7 +522,7 @@ def test_with_pipeline(client: MaharitClient):
     tokyo_cnt = tokyo_row.get("cnt") if tokyo_row else None
     check(
         "Tokyo の cnt が 2（WITH グループ集計）",
-        tokyo_cnt == "2",
+        tokyo_cnt == 2,
         f"tokyo_row={tokyo_row} (cnt={tokyo_cnt}; null の場合は WITH 集計バグ: todo/bug 参照)",
     )
 

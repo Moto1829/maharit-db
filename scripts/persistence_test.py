@@ -157,7 +157,7 @@ def test_sigterm_roundtrip(binary: str, port: int, data_path: str):
     rows = resp.get("rows", [])
     check(
         "Alice.age プロパティが復元",
-        rows and rows[0].get("n.age") == "30",
+        rows and rows[0].get("n.age") == 30,
         str(rows),
     )
 

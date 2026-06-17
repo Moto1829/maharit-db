@@ -1376,7 +1376,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty(), "follower should have the node created on leader");
-                assert_eq!(rows[0].get("n.name").map(String::as_str), Some("\"Alice\""));
+                assert_eq!(rows[0].get("n.name").and_then(|v| v.as_str()), Some("Alice"));
             }
             other => panic!("expected Result from follower, got {:?}", other),
         }
@@ -1414,7 +1414,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty());
-                assert_eq!(rows[0].get("n.s").map(String::as_str), Some("\"hello\""));
+                assert_eq!(rows[0].get("n.s").and_then(|v| v.as_str()), Some("hello"));
             }
             other => panic!("string property: {:?}", other),
         }
@@ -1427,7 +1427,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty());
-                assert_eq!(rows[0].get("n.i").map(String::as_str), Some("99"));
+                assert_eq!(rows[0].get("n.i").and_then(|v| v.as_i64()), Some(99));
             }
             other => panic!("integer property: {:?}", other),
         }
@@ -1467,7 +1467,7 @@ mod tests {
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty(), "follower should see the edge traversal");
-                assert_eq!(rows[0].get("b.name").map(String::as_str), Some("\"dst\""));
+                assert_eq!(rows[0].get("b.name").and_then(|v| v.as_str()), Some("dst"));
             }
             other => panic!("expected Result for edge traversal, got {:?}", other),
         }
