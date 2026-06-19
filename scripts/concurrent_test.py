@@ -237,8 +237,8 @@ def test_transaction_isolation():
     checker.close()
 
     owners = [row.get("n.owner", "") for row in resp.get("rows", [])]
-    check('A のノードが存在する ("A"がある)', '"A"' in owners, f"owners={owners}")
-    check('B のノードが消えている ("B"がない)', '"B"' not in owners, f"owners={owners}")
+    check('A のノードが存在する ("A"がある)', "A" in owners, f"owners={owners}")
+    check('B のノードが消えている ("B"がない)', "B" not in owners, f"owners={owners}")
 
 
 def test_concurrent_transactions():
