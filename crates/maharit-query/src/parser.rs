@@ -650,7 +650,7 @@ impl Parser {
         } else if self.check(TokenKind::Colon) {
             // n:NewLabel1:NewLabel2:...
             self.advance(); // consume :
-            let label = self.expect_ident()?;
+            let label = self.expect_ident_or_keyword()?;
             // Only one label per AddLabel; additional colons parsed as separate items
             Ok(SetItem::AddLabel(variable, label))
         } else {
@@ -1431,9 +1431,9 @@ impl Parser {
             // REMOVE n.prop
             Ok(RemoveItem::Property(variable, property))
         } else if self.check(TokenKind::Colon) {
-            // REMOVE n:Label
+            // REMOVE n:Label (Task 108: キーワードもラベル名として許容)
             self.advance();
-            let label = self.expect_ident()?;
+            let label = self.expect_ident_or_keyword()?;
             Ok(RemoveItem::Label(variable, label))
         } else {
             Err(self.unexpected_token(". or :"))
@@ -1634,7 +1634,7 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let variable = self.expect_ident()?;
         self.expect(TokenKind::Colon)?;
-        let label = self.expect_ident()?;
+        let label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
 
         // Check if this is an edge pattern: (s:SLabel)-[r:EType]->(t:TLabel)
@@ -1673,7 +1673,7 @@ impl Parser {
                 });
             }
             self.expect(TokenKind::Colon)?;
-            let required_label = self.expect_ident()?;
+            let required_label = self.expect_ident_or_keyword()?;
 
             return Ok(Statement::CreateConstraint(CreateConstraintStatement {
                 name,
@@ -1800,7 +1800,7 @@ impl Parser {
         };
 
         self.expect(TokenKind::Colon)?;
-        let edge_type = self.expect_ident()?;
+        let edge_type = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RBracket)?;
 
         // consume `->` or `-`
@@ -1826,7 +1826,7 @@ impl Parser {
         };
 
         self.expect(TokenKind::Colon)?;
-        let target_label = self.expect_ident()?;
+        let target_label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
 
         Ok(Statement::CreateConstraint(CreateConstraintStatement {
@@ -1902,7 +1902,7 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let variable = self.expect_ident()?;
         self.expect(TokenKind::Colon)?;
-        let label = self.expect_ident()?;
+        let label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
 
         self.expect(TokenKind::On)?;
@@ -1959,9 +1959,9 @@ impl Parser {
         self.expect(TokenKind::Index)?;
         self.expect(TokenKind::On)?;
         self.expect(TokenKind::Colon)?;
-        let label = self.expect_ident()?;
+        let label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::LParen)?;
-        let property = self.expect_ident()?;
+        let property = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
         Ok(Statement::CreateIndex(CreateIndexStatement { label, property }))
     }
@@ -1972,9 +1972,9 @@ impl Parser {
         self.expect(TokenKind::Index)?;
         self.expect(TokenKind::On)?;
         self.expect(TokenKind::Colon)?;
-        let label = self.expect_ident()?;
+        let label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::LParen)?;
-        let property = self.expect_ident()?;
+        let property = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
         Ok(Statement::DropIndex(DropIndexStatement { label, property }))
     }
@@ -2297,9 +2297,11 @@ impl Parser {
         }
 
         // Labels (optional, multiple allowed: :Label1:Label2)
+        // Cypher 標準ではキーワードはコンテキスト依存に識別子扱いするので、
+        // ラベル位置でも `User`/`Role`/`Index` などのキーワードを受け入れる (Task 108)。
         while self.check(TokenKind::Colon) {
             self.advance();
-            labels.push(self.expect_ident()?);
+            labels.push(self.expect_ident_or_keyword()?);
         }
 
         // Properties (optional)
@@ -2348,10 +2350,10 @@ impl Parser {
                 variable = Some(self.expect_ident()?);
             }
 
-            // Type (optional)
+            // Type (optional) — リレーション型もラベル同様キーワードを許容 (Task 108)
             if self.check(TokenKind::Colon) {
                 self.advance();
-                edge_type = Some(self.expect_ident()?);
+                edge_type = Some(self.expect_ident_or_keyword()?);
             }
 
             // Variable-length path: *min..max (optional)
@@ -4156,6 +4158,72 @@ mod tests {
                 q,
                 stmt
             );
+        }
+    }
+
+    #[test]
+    fn test_parse_label_keyword_in_node_pattern() {
+        // Task 108: ノードラベル位置でキーワードを許容
+        for q in [
+            "CREATE (:User {email: 'a'})",
+            "CREATE (:Role {name: 'admin'})",
+            "CREATE (:Index {name: 'idx1'})",
+            "MATCH (u:User) RETURN u",
+            "MATCH (u:User:Role) RETURN u",
+        ] {
+            let stmt = parse(q);
+            assert!(stmt.is_ok(), "Failed to parse keyword label: {}\n  err: {:?}", q, stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_keyword_in_relationship_type() {
+        // Task 108: リレーション型位置でキーワードを許容
+        for q in [
+            "MATCH (a)-[:Role]->(b) RETURN a, b",
+            "MATCH (a)-[r:User]->(b) RETURN r",
+            "MATCH (a) CREATE (a)-[:Constraint]->(b)",
+        ] {
+            let stmt = parse(q);
+            assert!(stmt.is_ok(), "Failed to parse keyword rel type: {}\n  err: {:?}", q, stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_with_keyword_label() {
+        // Task 108: CREATE CONSTRAINT の FOR (var:Label) でキーワードラベル
+        for q in [
+            "CREATE CONSTRAINT c1 FOR (u:User) REQUIRE u.email IS UNIQUE",
+            "CREATE CONSTRAINT c2 FOR (u:User) REQUIRE u.email IS NOT NULL",
+            "CREATE CONSTRAINT c3 FOR (r:Role) REQUIRE (r.name, r.scope) IS UNIQUE",
+        ] {
+            let stmt = parse(q);
+            assert!(stmt.is_ok(), "Failed to parse: {}\n  err: {:?}", q, stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_with_keyword_label() {
+        // Task 108: CREATE INDEX / FULLTEXT INDEX でキーワードラベル
+        for q in [
+            "CREATE INDEX ON :User(email)",
+            "DROP INDEX ON :Role(name)",
+            "CREATE FULLTEXT INDEX ft_user FOR (u:User) ON (u.bio)",
+        ] {
+            let stmt = parse(q);
+            assert!(stmt.is_ok(), "Failed to parse: {}\n  err: {:?}", q, stmt);
+        }
+    }
+
+    #[test]
+    fn test_parse_set_remove_label_keyword() {
+        // Task 108: SET / REMOVE のラベル位置でキーワード
+        for q in [
+            "MATCH (n) SET n:User",
+            "MATCH (n) REMOVE n:Role",
+        ] {
+            let stmt = parse(q);
+            assert!(stmt.is_ok(), "Failed to parse: {}\n  err: {:?}", q, stmt);
         }
     }
 

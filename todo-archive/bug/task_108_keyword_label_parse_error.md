@@ -103,3 +103,48 @@ MEDIUM（既存スクリプトの一部で実害があるが、回避策があ�
 - `crates/maharit-query/src/parser.rs`
 - `scripts/constraint_test.py` (現在 `User` ラベルを使用)
 - `crates/maharit-server/src/auth.rs` (CREATE USER 構文の分岐参照)
+
+## 解決済み (2026-06-19)
+
+### 実装内容
+
+`crates/maharit-query/src/parser.rs` の以下 8 箇所で `expect_ident()?` を
+`expect_ident_or_keyword()?` に置き換え:
+
+| 箇所 | 構文 |
+|------|------|
+| `parse_node_pattern` | `(n:Label1:Label2)` のラベル列 |
+| `parse_edge_pattern` | `-[r:TYPE]->` のリレーション型 |
+| `parse_set_item` (Colon 分岐) | `SET n:NewLabel` |
+| `parse_remove_item` (Colon 分岐) | `REMOVE n:Label` |
+| `parse_create_constraint` | `FOR (var:Label) REQUIRE ...` |
+| `parse_create_constraint` (RequiredLabel) | `REQUIRE var:RequiredLabel` |
+| `parse_endpoint_label_constraint` (2 箇所) | `[:EdgeType]` と target の `(t:TLabel)` |
+| `parse_create_fulltext_index` | `FOR (var:Label) ON ...` |
+| `parse_create_index` / `parse_drop_index` | `ON :Label(property)` |
+
+プロパティキー / プロパティアクセスは Task 98 で対応済みのため、
+今回はラベル / 型 / インデックス対象の指定箇所のみ。
+
+### 検証
+
+- `cargo test -p maharit-query`: **497/497 PASS**（既存 492 + 新規 5）
+- 新規テスト:
+  - `test_parse_label_keyword_in_node_pattern`
+  - `test_parse_keyword_in_relationship_type`
+  - `test_parse_create_constraint_with_keyword_label`
+  - `test_parse_create_index_with_keyword_label`
+  - `test_parse_set_remove_label_keyword`
+- workspace 全体: 1079 件 PASS（WAL の 2 件は既知 flaky）
+- E2E: `python3 scripts/constraint_test.py` で `User` ラベルが正常動作
+  - SHOW CONSTRAINTS で正しく行が返る
+  - UNIQUE / NOT NULL 制約違反検出が動作
+
+### 既知の挙動（仕様）
+
+`keyword_as_ident()` はキーワードの小文字表現を返すため、`User` でも `USER` でも
+SHOW CONSTRAINTS では `label: "user"` として表示される。これは Task 98 と同じ
+制約で、lexer 段階でキーワードのケースが失われるため。
+
+実用上は問題ない（同一クエリ内で大文字小文字どちらで書いても同一の label として
+扱われる）。
