@@ -4,3 +4,6 @@
 .claude/agent-memory/
 __pycache__/
 *.pyc
+
+# macOS Finder metadata
+.DS_Store
