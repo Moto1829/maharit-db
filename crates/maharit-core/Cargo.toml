@@ -5,8 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# japanese: 日本語形態素解析(lindera + 埋め込み IPADIC 辞書 約15MB)を有効化。
+# 辞書がバイナリに丸ごと埋め込まれサイズが激増するため、既定では off。
+# 日本語全文検索が必要なビルドのみ `--features maharit-core/japanese` で有効化する。
 [features]
-default = ["japanese"]
+default = []
 japanese = ["dep:lindera"]
 
 [dependencies]

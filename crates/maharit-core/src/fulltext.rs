@@ -42,6 +42,7 @@ impl SearchResult {
 /// Returns `true` when the text contains at least one hiragana, katakana, or CJK character.
 ///
 /// Used to decide whether to route text through the lindera Japanese morphological analyser.
+#[cfg(feature = "japanese")]
 fn contains_japanese(text: &str) -> bool {
     text.chars().any(|c| {
         let cp = c as u32;

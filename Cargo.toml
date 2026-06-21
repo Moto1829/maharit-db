@@ -11,6 +11,15 @@ members = [
     "crates/maharit-cluster",
 ]
 
+# 配布バイナリ(maharit)のサイズ削減: strip + LTO + サイズ優先最適化 + panic=abort
+# catch_unwind/panic hook は未使用のため panic="abort" は安全。
+[profile.release]
+strip = true
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
 [workspace.package]
 version = "0.2.0"
 edition = "2024"

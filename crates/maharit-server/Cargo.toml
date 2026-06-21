@@ -9,6 +9,13 @@ license.workspace = true
 name = "maharit"
 path = "src/main.rs"
 
+# japanese: 日本語形態素解析(埋め込み IPADIC 辞書 約15MB)を同梱する。
+# 既定 off。日本語全文検索が必要なリリースのみ
+# `cargo build --release -p maharit-server --features japanese` で有効化する。
+[features]
+default = []
+japanese = ["maharit-core/japanese"]
+
 [dependencies]
 maharit-core.workspace = true
 maharit-storage.workspace = true
