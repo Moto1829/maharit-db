@@ -96,15 +96,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## クレート構成
 
+MaharitDB は 8 個のクレートからなる Cargo workspace です。`maharit-core` を基盤に各クレートが構築されています。
+
 | クレート | 説明 |
 |---------|------|
 | `maharit-core` | グラフデータ構造・アルゴリズム・全文検索エンジン |
 | `maharit-query` | Cypher クエリパーサー・エグゼキュータ・プランナー |
 | `maharit-storage` | WAL・永続化・トランザクション・バックアップ |
+| `maharit-cluster` | シャーディング・ルーティング戦略 |
 | `maharit-server` | TCP サーバー・認証・メトリクス・レプリケーション |
 | `maharit-client` | 非同期/同期クライアント・コネクションプール |
 | `maharit-io` | CSV / JSON / GraphML インポート・エクスポート |
 | `maharit-viz` | DOT / SVG 可視化・WebSocket リアルタイム表示 |
+
+### クレート依存関係
+
+```mermaid
+graph TD
+    server[maharit-server]
+    query[maharit-query]
+    storage[maharit-storage]
+    cluster[maharit-cluster]
+    io[maharit-io]
+    viz[maharit-viz]
+    client[maharit-client]
+    core[maharit-core]
+
+    server --> query
+    server --> storage
+    server --> cluster
+    query --> core
+    storage --> core
+    cluster --> core
+    io --> core
+    viz --> core
+    viz --> client
+
+    classDef foundation fill:#f9d71c,stroke:#333,color:#000;
+    class core foundation;
+```
+
+- `maharit-core` は他のどのクレートにも依存しない基盤クレートです。
+- `maharit-client` は独立した tokio TCP クライアントで、`maharit-core` には依存しません（`maharit-viz` からのみ利用）。
+- `maharit-server` はバイナリ `maharit` を生成するエントリポイントで、`query` / `storage` / `cluster` を統合します。
 
 ## グラフアルゴリズム（Rust API）
 

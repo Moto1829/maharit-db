@@ -67,12 +67,13 @@ python3 scripts/failover_test.py
 ### クレート依存関係
 
 ```
-maharit-server  ──┬─→ maharit-query ──→ maharit-core
-                  ├─→ maharit-storage ─→ maharit-core
-                  ├─→ maharit-cluster ─→ maharit-core
-                  └─→ maharit-io      ─→ maharit-core
-maharit-client（独立: tokio TCP クライアント）
-maharit-viz    ──→ maharit-core
+maharit-server  ──┬─→ maharit-query   ─→ maharit-core
+                  ├─→ maharit-storage  ─→ maharit-core
+                  └─→ maharit-cluster  ─→ maharit-core
+maharit-io      ──→ maharit-core
+maharit-viz     ──┬─→ maharit-core
+                  └─→ maharit-client
+maharit-client（独立: tokio TCP クライアント。maharit-core にも依存しない）
 ```
 
 ### maharit-query: クエリパイプライン
