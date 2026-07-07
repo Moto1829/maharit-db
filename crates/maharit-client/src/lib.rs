@@ -586,7 +586,12 @@ impl Client {
 
         // Build TLS config
         let mut rustls_config = if tls_config.skip_verify {
-            // Create a dangerous config that skips verification
+            // Create a dangerous config that skips verification.
+            // 証明書検証を無効化すると中間者攻撃に対して無防備になるため警告する。
+            eprintln!(
+                "WARN: TLS certificate verification is DISABLED (skip_verify). \
+                 Connections are vulnerable to man-in-the-middle attacks; use only for testing."
+            );
             rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))

@@ -518,7 +518,18 @@ pub fn build_client_config(
     skip_verify: bool,
 ) -> Result<Arc<rustls::ClientConfig>, TlsError> {
     if skip_verify {
-        // INSECURE: Skip certificate verification (for testing only)
+        // INSECURE: Skip certificate verification (for testing only).
+        // これは中間者攻撃を許してしまうため、運用者が誤って有効化しないよう
+        // 明確な警告を出す。
+        tracing::warn!(
+            "TLS certificate verification is DISABLED (skip_verify=true). \
+             The connection is vulnerable to man-in-the-middle attacks. \
+             Use this only for testing."
+        );
+        eprintln!(
+            "WARN: TLS certificate verification is DISABLED (skip_verify). \
+             Connections are vulnerable to man-in-the-middle attacks; use only for testing."
+        );
         let config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
