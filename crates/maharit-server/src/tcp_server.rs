@@ -75,33 +75,62 @@ fn role_label(role: &crate::auth::Role) -> String {
     }
 }
 
-/// `require_auth = true` のとき、リクエストの `sessionToken` を検証する。
+/// `require_auth = true` のとき、リクエストの `sessionToken` を検証し、
+/// 認証済みセッションのロールを返す。
 ///
-/// - 認証が無効なら何もせず `None`
-/// - トークン無し → `AuthError`
-/// - トークンが無効/期限切れ → `AuthError`
-/// - 有効 → `None`（呼び出し側はそのまま処理を続行）
+/// - 認証が無効なら検証せず `Ok(Role::Admin)`（後段の権限チェックも実質無効化）
+/// - トークン無し → `Err(AuthError レスポンス)`
+/// - トークンが無効/期限切れ → `Err(AuthError レスポンス)`
+/// - 有効 → `Ok(role)`
 fn check_session(
     require_auth: bool,
     auth: &Arc<Mutex<crate::auth::AuthManager>>,
     token: &Option<String>,
-) -> Option<Response> {
+) -> Result<crate::auth::Role, Response> {
     if !require_auth {
-        return None;
+        return Ok(crate::auth::Role::Admin);
     }
     let token_str = match token {
         Some(t) if !t.is_empty() => t.as_str(),
         _ => {
-            return Some(Response::AuthError {
+            return Err(Response::AuthError {
                 message: "authentication required: missing sessionToken".to_string(),
             });
         }
     };
     let mut mgr = auth.lock().unwrap();
     match mgr.validate_session(token_str) {
-        Ok(_) => None,
-        Err(e) => Some(Response::AuthError {
+        Ok(session) => Ok(session.role),
+        Err(e) => Err(Response::AuthError {
             message: format!("invalid session: {}", e),
+        }),
+    }
+}
+
+/// 認証済みロールが対象クエリを実行できるかを RBAC で検証する。
+///
+/// 書き込みを伴うクエリ（CREATE/SET/DELETE/MERGE/REMOVE/制約作成など）を
+/// `ReadOnly` ロールが実行しようとした場合に拒否レスポンスを返す。
+/// パースに失敗するクエリは権限判定をスキップし、実行側でパースエラーを返させる。
+fn authorize_query(role: crate::auth::Role, query: &str) -> Option<Response> {
+    let stmt = match Parser::new(query) {
+        Ok(mut parser) => match parser.parse() {
+            Ok(s) => s,
+            Err(_) => return None,
+        },
+        Err(_) => return None,
+    };
+
+    let operation = if is_read_only(&stmt) {
+        crate::auth::Operation::Read
+    } else {
+        crate::auth::Operation::Write
+    };
+
+    match crate::auth::AuthManager::check_role_permission(role, operation) {
+        Ok(()) => None,
+        Err(e) => Some(Response::AuthError {
+            message: format!("permission denied: {}", e),
         }),
     }
 }
@@ -381,6 +410,13 @@ impl TcpServer {
         Arc::clone(&self.graph)
     }
 
+    /// Replace the authentication manager (e.g. to set a non-default admin
+    /// password before enabling `require_auth`).
+    pub fn with_auth(mut self, auth: crate::auth::AuthManager) -> Self {
+        self.auth = Arc::new(Mutex::new(auth));
+        self
+    }
+
     /// Attach a leader replication manager.  Once attached, every successful
     /// write query automatically appends WAL entries to the manager, which
     /// broadcasts them to all connected followers.
@@ -591,42 +627,50 @@ async fn handle_connection(
                 query,
                 tx_id,
                 session_token,
-            } => {
-                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
-                    resp
-                } else {
-                    stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                    let span = tracing::info_span!("query", query = %query);
-                    let _enter = span.enter();
-                    let start = std::time::Instant::now();
-                    let resp = match tx_id {
-                        Some(id) => {
-                            execute_query_with_tx(
-                                &graph,
-                                &query,
-                                id,
-                                &tx_manager,
-                                &constraints,
-                                &fulltext,
-                                replication.as_deref(),
-                            )
-                            .await
-                        }
-                        None => execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref()).await,
-                    };
-                    tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
-                    resp
+            } => match check_session(config.require_auth, &auth, &session_token) {
+                Err(resp) => resp,
+                Ok(role) => {
+                    if let Some(resp) = authorize_query(role, &query) {
+                        resp
+                    } else {
+                        stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                        let span = tracing::info_span!("query", query = %query);
+                        let _enter = span.enter();
+                        let start = std::time::Instant::now();
+                        let resp = match tx_id {
+                            Some(id) => {
+                                execute_query_with_tx(
+                                    &graph,
+                                    &query,
+                                    id,
+                                    &tx_manager,
+                                    &constraints,
+                                    &fulltext,
+                                    replication.as_deref(),
+                                )
+                                .await
+                            }
+                            None => {
+                                execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref())
+                                    .await
+                            }
+                        };
+                        tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
+                        resp
+                    }
                 }
-            }
+            },
             Request::StreamQuery {
                 query,
                 tx_id: _,
                 chunk_size,
                 session_token,
-            } => {
-                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
-                    resp
-                } else {
+            } => match check_session(config.require_auth, &auth, &session_token) {
+                Err(resp) => resp,
+                Ok(role) if authorize_query(role, &query).is_some() => {
+                    authorize_query(role, &query).unwrap()
+                }
+                Ok(_) => {
                     stats.total_queries.fetch_add(1, Ordering::SeqCst);
                     tracing::info!(query = %query, "streaming query");
                     // Execute streaming query
@@ -666,48 +710,55 @@ async fn handle_connection(
             Request::BeginTransaction {
                 read_only,
                 session_token,
-            } => {
-                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
-                    resp
-                } else {
-                    let tx_id = if read_only {
-                        tx_manager.begin_read_only()
+            } => match check_session(config.require_auth, &auth, &session_token) {
+                Err(resp) => resp,
+                Ok(role) => {
+                    // 書き込みトランザクションの開始には Write 権限を要求する。
+                    if !read_only
+                        && crate::auth::AuthManager::check_role_permission(
+                            role,
+                            crate::auth::Operation::Write,
+                        )
+                        .is_err()
+                    {
+                        Response::AuthError {
+                            message: "permission denied: role cannot begin a write transaction"
+                                .to_string(),
+                        }
                     } else {
-                        tx_manager.begin()
-                    };
-                    Response::TransactionBegun { tx_id }
+                        let tx_id = if read_only {
+                            tx_manager.begin_read_only()
+                        } else {
+                            tx_manager.begin()
+                        };
+                        Response::TransactionBegun { tx_id }
+                    }
                 }
-            }
+            },
             Request::Commit {
                 tx_id,
                 session_token,
-            } => {
-                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
-                    resp
-                } else {
-                    match tx_manager.commit(tx_id) {
-                        Ok(()) => Response::Committed { tx_id },
-                        Err(e) => Response::Error {
-                            message: format!("Commit failed: {}", e),
-                        },
-                    }
-                }
-            }
+            } => match check_session(config.require_auth, &auth, &session_token) {
+                Err(resp) => resp,
+                Ok(_) => match tx_manager.commit(tx_id) {
+                    Ok(()) => Response::Committed { tx_id },
+                    Err(e) => Response::Error {
+                        message: format!("Commit failed: {}", e),
+                    },
+                },
+            },
             Request::Rollback {
                 tx_id,
                 session_token,
-            } => {
-                if let Some(resp) = check_session(config.require_auth, &auth, &session_token) {
-                    resp
-                } else {
-                    match tx_manager.rollback_concurrent(tx_id, &graph) {
-                        Ok(()) => Response::RolledBack { tx_id },
-                        Err(e) => Response::Error {
-                            message: format!("Rollback failed: {}", e),
-                        },
-                    }
-                }
-            }
+            } => match check_session(config.require_auth, &auth, &session_token) {
+                Err(resp) => resp,
+                Ok(_) => match tx_manager.rollback_concurrent(tx_id, &graph) {
+                    Ok(()) => Response::RolledBack { tx_id },
+                    Err(e) => Response::Error {
+                        message: format!("Rollback failed: {}", e),
+                    },
+                },
+            },
         };
 
         send_response(&mut socket, &response, config.write_timeout).await?;
@@ -1284,6 +1335,51 @@ async fn emit_wal_diff(
 mod tests {
     use super::*;
 
+    use crate::auth::Role;
+
+    #[test]
+    fn test_authorize_query_readonly_allows_read() {
+        // 読み取りクエリは ReadOnly ロールで許可される。
+        assert!(authorize_query(Role::ReadOnly, "MATCH (n) RETURN n").is_none());
+    }
+
+    #[test]
+    fn test_authorize_query_readonly_denies_write() {
+        // 書き込みクエリは ReadOnly ロールでは拒否される。
+        let resp = authorize_query(Role::ReadOnly, "CREATE (n:Person {name: 'x'})");
+        assert!(matches!(resp, Some(Response::AuthError { .. })));
+    }
+
+    #[test]
+    fn test_authorize_query_readwrite_allows_write() {
+        assert!(authorize_query(Role::ReadWrite, "CREATE (n:Person {name: 'x'})").is_none());
+    }
+
+    #[test]
+    fn test_authorize_query_admin_allows_write() {
+        assert!(authorize_query(Role::Admin, "CREATE (n:Person {name: 'x'})").is_none());
+    }
+
+    #[test]
+    fn test_authorize_query_unparseable_skips_check() {
+        // パース不能なクエリは権限判定をスキップ（実行側でパースエラーを返す）。
+        assert!(authorize_query(Role::ReadOnly, "NOT A VALID QUERY @#$").is_none());
+    }
+
+    #[test]
+    fn test_check_session_disabled_returns_admin() {
+        let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
+        // require_auth=false のときは常に Admin 相当で通す。
+        assert!(matches!(check_session(false, &auth, &None), Ok(Role::Admin)));
+    }
+
+    #[test]
+    fn test_check_session_enabled_missing_token() {
+        let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
+        let result = check_session(true, &auth, &None);
+        assert!(matches!(result, Err(Response::AuthError { .. })));
+    }
+
     #[test]
     fn test_request_parsing() {
         let json = r#"{"type": "query", "query": "MATCH (n) RETURN n"}"#;
@@ -1392,9 +1488,9 @@ mod tests {
     #[test]
     fn test_check_session_when_auth_disabled() {
         let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
-        // require_auth=false ならトークン無しでも None を返す
-        assert!(check_session(false, &auth, &None).is_none());
-        assert!(check_session(false, &auth, &Some("garbage".to_string())).is_none());
+        // require_auth=false ならトークン無しでも Ok(Admin) を返す
+        assert!(check_session(false, &auth, &None).is_ok());
+        assert!(check_session(false, &auth, &Some("garbage".to_string())).is_ok());
     }
 
     #[test]
@@ -1403,18 +1499,18 @@ mod tests {
 
         // require_auth=true でトークン無し → AuthError
         let resp = check_session(true, &auth, &None);
-        assert!(matches!(resp, Some(Response::AuthError { .. })));
+        assert!(matches!(resp, Err(Response::AuthError { .. })));
 
         // require_auth=true で無効なトークン → AuthError
         let resp = check_session(true, &auth, &Some("garbage".to_string()));
-        assert!(matches!(resp, Some(Response::AuthError { .. })));
+        assert!(matches!(resp, Err(Response::AuthError { .. })));
 
-        // 正規ログイン後のトークンなら通る
+        // 正規ログイン後のトークンなら通り、Admin ロールが返る
         let token = {
             let mut mgr = auth.lock().unwrap();
             mgr.authenticate("admin", "admin").unwrap()
         };
-        assert!(check_session(true, &auth, &Some(token)).is_none());
+        assert!(matches!(check_session(true, &auth, &Some(token)), Ok(Role::Admin)));
     }
 
     #[test]

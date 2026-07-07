@@ -215,6 +215,23 @@ impl AuthManager {
         manager
     }
 
+    /// Create a new AuthManager whose default `admin` user has the given
+    /// password instead of the insecure default `"admin"`.
+    ///
+    /// Use this when enabling authentication so that the network-reachable
+    /// admin account is not protected by well-known credentials.
+    pub fn with_admin_password(password: &str) -> Self {
+        let mut manager = Self {
+            users: HashMap::new(),
+            sessions: HashMap::new(),
+            session_timeout: Duration::from_secs(30 * 60),
+            save_path: None,
+        };
+        let admin = User::new("admin".to_string(), password, Role::Admin);
+        manager.users.insert("admin".to_string(), admin);
+        manager
+    }
+
     /// Create a new AuthManager with custom session timeout
     pub fn with_session_timeout(timeout: Duration) -> Self {
         let mut manager = Self::new();
@@ -426,6 +443,13 @@ impl AuthManager {
 
     /// Check if a role has permission for an operation
     pub fn check_permission(&self, role: Role, operation: Operation) -> Result<(), AuthError> {
+        Self::check_role_permission(role, operation)
+    }
+
+    /// Check whether `role` may perform `operation`, without needing an
+    /// `AuthManager` instance.  Used by the network layer to enforce RBAC on
+    /// every request.
+    pub fn check_role_permission(role: Role, operation: Operation) -> Result<(), AuthError> {
         let allowed = match role {
             Role::Admin => true,
             Role::ReadWrite => matches!(

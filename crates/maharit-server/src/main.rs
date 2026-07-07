@@ -65,6 +65,9 @@ fn run_server(args: &[String]) {
     // Persistence option
     let mut data_path: Option<String> = None;
 
+    // Authentication options
+    let mut admin_password: Option<String> = None;
+
     // Sharding options
     let mut shard_mode = false;
     let mut shard_id: Option<u32> = None;
@@ -103,6 +106,15 @@ fn run_server(args: &[String]) {
             "--data" | "-d" => {
                 if i + 1 < args.len() {
                     data_path = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--require-auth" => {
+                config.require_auth = true;
+            }
+            "--admin-password" => {
+                if i + 1 < args.len() {
+                    admin_password = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -249,6 +261,28 @@ fn run_server(args: &[String]) {
         maharit_core::ConcurrentGraph::new()
     };
 
+    // 認証を有効化する場合は管理者パスワードを解決する。
+    // デフォルトの admin/admin をネットワークに公開しないよう、
+    // パスワード未指定なら起動を拒否する。
+    let mut auth_manager: Option<crate::auth::AuthManager> = if config.require_auth {
+        let pw = admin_password
+            .or_else(|| std::env::var("MAHARIT_ADMIN_PASSWORD").ok())
+            .filter(|p| !p.is_empty());
+        match pw {
+            Some(p) => Some(crate::auth::AuthManager::with_admin_password(&p)),
+            None => {
+                eprintln!(
+                    "Error: --require-auth requires an admin password. \
+                     Set --admin-password <PW> or the MAHARIT_ADMIN_PASSWORD env var \
+                     (the default admin/admin credentials are refused when auth is enabled)."
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let graph_arc = Arc::new(graph);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
 
@@ -264,8 +298,11 @@ fn run_server(args: &[String]) {
             };
             let leader = Arc::new(LeaderReplicationManager::new(repl_config));
             let leader_clone = Arc::clone(&leader);
-            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
+            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
                 .with_replication(Arc::clone(&leader));
+            if let Some(a) = auth_manager.take() {
+                server = server.with_auth(a);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
@@ -305,7 +342,10 @@ fn run_server(args: &[String]) {
                 Arc::clone(&graph_arc),
             ));
             let follower_clone = Arc::clone(&follower);
-            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            if let Some(a) = auth_manager.take() {
+                server = server.with_auth(a);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
@@ -327,7 +367,10 @@ fn run_server(args: &[String]) {
             std::process::exit(1);
         }
         None => {
-            let server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            if let Some(a) = auth_manager.take() {
+                server = server.with_auth(a);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
@@ -775,6 +818,8 @@ fn print_server_help() {
     println!("    -h, --host <HOST>                Host to bind to (default: 127.0.0.1)");
     println!("    -p, --port <PORT>                Port to listen on (default: 7687)");
     println!("    -c, --max-connections <N>        Maximum concurrent connections (default: 100)");
+    println!("    --require-auth                   Require a valid session token for all requests (enforces RBAC)");
+    println!("    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth");
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
     println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
