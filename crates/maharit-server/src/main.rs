@@ -67,6 +67,7 @@ fn run_server(args: &[String]) {
 
     // Authentication options
     let mut admin_password: Option<String> = None;
+    let mut replication_secret: Option<String> = None;
 
     // Sharding options
     let mut shard_mode = false;
@@ -115,6 +116,12 @@ fn run_server(args: &[String]) {
             "--admin-password" => {
                 if i + 1 < args.len() {
                     admin_password = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--replication-secret" => {
+                if i + 1 < args.len() {
+                    replication_secret = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -283,6 +290,12 @@ fn run_server(args: &[String]) {
         None
     };
 
+    // レプリケーションチャネルの共有シークレット（--replication-secret / 環境変数）。
+    // 設定するとリーダーはシークレットを提示しないフォロワーを拒否する。
+    let replication_secret = replication_secret
+        .or_else(|| std::env::var("MAHARIT_REPLICATION_SECRET").ok())
+        .filter(|s| !s.is_empty());
+
     let graph_arc = Arc::new(graph);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
 
@@ -294,6 +307,7 @@ fn run_server(args: &[String]) {
                 role: NodeRole::Leader,
                 replication_bind_address: bind,
                 leader_address: None,
+                shared_secret: replication_secret.clone(),
                 ..Default::default()
             };
             let leader = Arc::new(LeaderReplicationManager::new(repl_config));
@@ -333,6 +347,7 @@ fn run_server(args: &[String]) {
                 role: NodeRole::Follower,
                 replication_bind_address: bind,
                 leader_address: Some(la),
+                shared_secret: replication_secret.clone(),
                 ..Default::default()
             };
             // graph_arc を follower と TcpServer で共有することで、
@@ -822,6 +837,7 @@ fn print_server_help() {
     println!("    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth");
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
     println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
+    println!("    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)");
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
     println!("    --shard                          Start as a shard node (normal TcpServer with shard-id logged)");
     println!("    --shard-id <ID>                  Shard identifier for this node (used with --shard)");

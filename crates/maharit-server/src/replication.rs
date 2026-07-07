@@ -58,6 +58,13 @@ pub struct ReplicationConfig {
     pub heartbeat_interval_secs: u64,
     /// How long before a follower considers the leader dead, in seconds
     pub heartbeat_timeout_secs: u64,
+    /// Shared secret authenticating the replication channel.
+    ///
+    /// When `Some`, the leader rejects any follower whose handshake does not
+    /// present the same secret, and followers include it in their handshake.
+    /// When `None`, the channel is unauthenticated (any peer that can reach
+    /// the port may replicate) — only safe on a fully trusted network.
+    pub shared_secret: Option<String>,
 }
 
 impl Default for ReplicationConfig {
@@ -69,6 +76,7 @@ impl Default for ReplicationConfig {
             leader_address: None,
             heartbeat_interval_secs: 1,
             heartbeat_timeout_secs: 5,
+            shared_secret: None,
         }
     }
 }
@@ -107,9 +115,15 @@ pub enum ReplicationMessage {
         follower_id: String,
         #[serde(default)]
         current_lsn: u64,
+        /// Shared secret proving the follower is authorized to replicate.
+        /// `None` when the channel is configured without authentication.
+        #[serde(default)]
+        auth_token: Option<String>,
     },
     /// Leader -> Follower: acknowledge the handshake
     HandshakeAck { leader_id: String },
+    /// Leader -> Follower: the handshake was rejected (e.g. bad shared secret).
+    Unauthorized { reason: String },
     /// Leader -> Follower: periodic liveness signal
     Heartbeat {
         leader_id: String,
@@ -174,6 +188,14 @@ async fn send_message<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Upper bound on a single replication message (bytes).  Guards against a
+/// peer declaring a huge length prefix to force a multi-gigabyte allocation.
+///
+/// Set generously because a new follower receives the entire graph as one
+/// `Snapshot` message; the cap only blocks the extreme (up to ~4 GiB) values
+/// an attacker could put in the u32 length prefix.
+const MAX_REPLICATION_MESSAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+
 /// Read a length-prefixed JSON message from an async reader
 async fn recv_message<R: AsyncReadExt + Unpin>(
     reader: &mut R,
@@ -181,6 +203,12 @@ async fn recv_message<R: AsyncReadExt + Unpin>(
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_REPLICATION_MESSAGE_SIZE {
+        return Err(ReplicationError::ConnectionFailed(format!(
+            "replication message length {} exceeds maximum {}",
+            len, MAX_REPLICATION_MESSAGE_SIZE
+        )));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await?;
     Ok(serde_json::from_slice(&buf)?)
@@ -344,6 +372,20 @@ impl LeaderReplicationManager {
     }
 }
 
+/// Constant-time comparison of two replication secrets to avoid leaking the
+/// secret through response timing.
+fn replication_secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Serialize the current graph as a list of WAL entries suitable for snapshot sync.
 async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryData> {
     let g = graph.read().await;
@@ -418,8 +460,12 @@ async fn handle_follower_connection(
 
     // ── Handshake ────────────────────────────────────────────────────────────
     let msg = recv_message(&mut reader).await?;
-    let (follower_id, follower_lsn) = match msg {
-        ReplicationMessage::Handshake { follower_id, current_lsn } => (follower_id, current_lsn),
+    let (follower_id, follower_lsn, auth_token) = match msg {
+        ReplicationMessage::Handshake {
+            follower_id,
+            current_lsn,
+            auth_token,
+        } => (follower_id, current_lsn, auth_token),
         other => {
             return Err(ReplicationError::ConnectionFailed(format!(
                 "Expected Handshake, got {:?}",
@@ -427,6 +473,31 @@ async fn handle_follower_connection(
             )));
         }
     };
+
+    // ── Authenticate the follower ─────────────────────────────────────────────
+    // When a shared secret is configured, reject any follower that does not
+    // present the matching token before disclosing any graph data.  Without
+    // this, any peer reaching the replication port could receive a full
+    // snapshot and the ongoing WAL stream.
+    if let Some(ref expected) = config.shared_secret {
+        let ok = auth_token
+            .as_deref()
+            .map(|t| replication_secret_eq(t, expected))
+            .unwrap_or(false);
+        if !ok {
+            let _ = send_message(
+                &mut writer,
+                &ReplicationMessage::Unauthorized {
+                    reason: "invalid replication secret".to_string(),
+                },
+            )
+            .await;
+            return Err(ReplicationError::ConnectionFailed(format!(
+                "follower {} presented an invalid replication secret",
+                follower_id
+            )));
+        }
+    }
 
     send_message(
         &mut writer,
@@ -752,6 +823,7 @@ async fn run_follower_receive_loop(
         &ReplicationMessage::Handshake {
             follower_id: config.node_id.clone(),
             current_lsn: my_lsn,
+            auth_token: config.shared_secret.clone(),
         },
     )
     .await?;
@@ -762,6 +834,12 @@ async fn run_follower_receive_loop(
             // Connection established; the leader is alive.
             is_leader_alive.store(true, Ordering::SeqCst);
             *last_heartbeat.write().await = Instant::now();
+        }
+        ReplicationMessage::Unauthorized { reason } => {
+            return Err(ReplicationError::ConnectionFailed(format!(
+                "replication handshake rejected by leader: {}",
+                reason
+            )));
         }
         other => {
             return Err(ReplicationError::ConnectionFailed(format!(
@@ -939,6 +1017,7 @@ mod tests {
             ReplicationMessage::Handshake {
                 follower_id: "follower-1".to_string(),
                 current_lsn: 0,
+                auth_token: None,
             },
             ReplicationMessage::HandshakeAck {
                 leader_id: "leader-1".to_string(),
@@ -1154,6 +1233,7 @@ mod tests {
         let msg = ReplicationMessage::Handshake {
             follower_id: "f1".to_string(),
             current_lsn: 42,
+            auth_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ReplicationMessage = serde_json::from_str(&json).unwrap();
@@ -1306,6 +1386,7 @@ mod tests {
             leader_address: None,
             heartbeat_interval_secs: 1,
             heartbeat_timeout_secs: 5,
+            shared_secret: None,
         };
         let manager = Arc::new(LeaderReplicationManager::new(config));
         manager.start_with_listener(repl_listener).await.unwrap();
@@ -1326,6 +1407,7 @@ mod tests {
             leader_address: Some(leader_addr.to_string()),
             heartbeat_interval_secs: 1,
             heartbeat_timeout_secs: 5,
+            shared_secret: None,
         };
         let manager = Arc::new(FollowerReplicationManager::with_concurrent_graph(
             config,
@@ -1334,6 +1416,96 @@ mod tests {
         manager.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         (manager, follower_graph)
+    }
+
+    #[test]
+    fn test_replication_secret_eq() {
+        assert!(replication_secret_eq("s3cr3t", "s3cr3t"));
+        assert!(!replication_secret_eq("s3cr3t", "s3cr3x"));
+        assert!(!replication_secret_eq("short", "longer"));
+    }
+
+    /// Start a leader replication listener with a shared secret.
+    async fn start_leader_with_secret(
+        secret: Option<&str>,
+    ) -> (Arc<LeaderReplicationManager>, std::net::SocketAddr) {
+        let repl_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let repl_addr = repl_listener.local_addr().unwrap();
+        let config = ReplicationConfig {
+            role: NodeRole::Leader,
+            node_id: "leader".to_string(),
+            replication_bind_address: repl_addr.to_string(),
+            leader_address: None,
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+            shared_secret: secret.map(|s| s.to_string()),
+        };
+        let manager = Arc::new(LeaderReplicationManager::new(config));
+        manager.start_with_listener(repl_listener).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        (manager, repl_addr)
+    }
+
+    #[tokio::test]
+    async fn replication_rejects_wrong_secret() {
+        let (_leader, addr) = start_leader_with_secret(Some("correct-horse")).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        send_message(
+            &mut stream,
+            &ReplicationMessage::Handshake {
+                follower_id: "rogue".to_string(),
+                current_lsn: 0,
+                auth_token: Some("wrong".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resp = recv_message(&mut stream).await.unwrap();
+        assert!(
+            matches!(resp, ReplicationMessage::Unauthorized { .. }),
+            "expected Unauthorized, got {:?}",
+            resp
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_rejects_missing_secret() {
+        let (_leader, addr) = start_leader_with_secret(Some("correct-horse")).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        send_message(
+            &mut stream,
+            &ReplicationMessage::Handshake {
+                follower_id: "rogue".to_string(),
+                current_lsn: 0,
+                auth_token: None,
+            },
+        )
+        .await
+        .unwrap();
+        let resp = recv_message(&mut stream).await.unwrap();
+        assert!(matches!(resp, ReplicationMessage::Unauthorized { .. }));
+    }
+
+    #[tokio::test]
+    async fn replication_accepts_correct_secret() {
+        let (_leader, addr) = start_leader_with_secret(Some("correct-horse")).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        send_message(
+            &mut stream,
+            &ReplicationMessage::Handshake {
+                follower_id: "trusted".to_string(),
+                current_lsn: 1, // non-zero so no snapshot is sent; expect a plain ack
+                auth_token: Some("correct-horse".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resp = recv_message(&mut stream).await.unwrap();
+        assert!(
+            matches!(resp, ReplicationMessage::HandshakeAck { .. }),
+            "expected HandshakeAck, got {:?}",
+            resp
+        );
     }
 
     #[tokio::test]
@@ -1536,6 +1708,7 @@ mod tests {
             leader_address: Some("127.0.0.1:1".to_string()), // dummy; not starting
             heartbeat_interval_secs: 1,
             heartbeat_timeout_secs: 5,
+            shared_secret: None,
         };
         let follower_repl = FollowerReplicationManager::with_concurrent_graph(
             config,
@@ -1565,6 +1738,7 @@ mod tests {
                 leader_address: Some(leader_addr.to_string()),
                 heartbeat_interval_secs: 1,
                 heartbeat_timeout_secs: 5,
+                shared_secret: None,
             },
             Arc::new(ConcurrentGraph::new()),
         ));
@@ -1626,6 +1800,7 @@ mod tests {
                 leader_address: Some(leader_addr.to_string()),
                 heartbeat_interval_secs: 1,
                 heartbeat_timeout_secs: timeout_secs,
+                shared_secret: None,
             },
             Arc::new(ConcurrentGraph::new()),
         ));
