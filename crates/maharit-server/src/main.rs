@@ -69,6 +69,9 @@ fn run_server(args: &[String]) {
     let mut admin_password: Option<String> = None;
     let mut replication_secret: Option<String> = None;
 
+    // Monitoring HTTP server bind address (metrics + health)
+    let mut metrics_bind: Option<String> = None;
+
     // Sharding options
     let mut shard_mode = false;
     let mut shard_id: Option<u32> = None;
@@ -122,6 +125,12 @@ fn run_server(args: &[String]) {
             "--replication-secret" => {
                 if i + 1 < args.len() {
                     replication_secret = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--metrics-bind" => {
+                if i + 1 < args.len() {
+                    metrics_bind = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -321,7 +330,7 @@ fn run_server(args: &[String]) {
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
-                spawn_http_server();
+                spawn_http_server(metrics_bind.clone());
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
                         eprintln!("Replication leader error: {}", e);
@@ -365,7 +374,7 @@ fn run_server(args: &[String]) {
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
-                spawn_http_server();
+                spawn_http_server(metrics_bind.clone());
                 tokio::spawn(async move {
                     if let Err(e) = follower_clone.start().await {
                         eprintln!("Replication follower error: {}", e);
@@ -390,7 +399,7 @@ fn run_server(args: &[String]) {
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
                 spawn_shutdown_handler(graph_for_signal, path_for_signal);
-                spawn_http_server();
+                spawn_http_server(metrics_bind.clone());
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
                     std::process::exit(1);
@@ -400,8 +409,11 @@ fn run_server(args: &[String]) {
     }
 }
 
-/// Spawn the HTTP monitoring server (metrics + health) on port 9090 in the background.
-fn spawn_http_server() {
+/// Spawn the HTTP monitoring server (metrics + health) in the background.
+///
+/// Binds to `bind_address` if provided, otherwise the safe default
+/// (`127.0.0.1:9090`, loopback only).
+fn spawn_http_server(bind_address: Option<String>) {
     use crate::http_server::{HealthState, HttpConfig, HttpServer};
     use crate::metrics::Metrics;
     use std::sync::Arc;
@@ -409,7 +421,10 @@ fn spawn_http_server() {
 
     let metrics = Arc::new(Metrics::new());
     let health = Arc::new(HealthState::default());
-    let config = HttpConfig::default(); // binds to 0.0.0.0:9090
+    let config = match bind_address {
+        Some(addr) => HttpConfig { bind_address: addr },
+        None => HttpConfig::default(),
+    };
     let shutdown = Arc::new(AtomicBool::new(false));
     let server = HttpServer::new(config, metrics, health);
     tokio::spawn(async move {
@@ -835,6 +850,7 @@ fn print_server_help() {
     println!("    -c, --max-connections <N>        Maximum concurrent connections (default: 100)");
     println!("    --require-auth                   Require a valid session token for all requests (enforces RBAC)");
     println!("    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth");
+    println!("    --metrics-bind <ADDR>            Monitoring HTTP (metrics/health) bind address (default: 127.0.0.1:9090, loopback only)");
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
     println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
     println!("    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)");

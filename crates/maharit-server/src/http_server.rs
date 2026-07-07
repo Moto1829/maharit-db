@@ -24,8 +24,11 @@ pub struct HttpConfig {
 
 impl Default for HttpConfig {
     fn default() -> Self {
+        // ループバックに限定するのが安全な既定。/metrics は内部統計（ノード数・
+        // クエリ数など）を無認証で公開するため、全インタフェース(0.0.0.0)に
+        // 晒すと情報漏洩になる。外部公開が必要な場合は明示的に上書きする。
         Self {
-            bind_address: "0.0.0.0:9090".to_string(),
+            bind_address: "127.0.0.1:9090".to_string(),
         }
     }
 }
@@ -554,7 +557,8 @@ mod tests {
     #[test]
     fn test_http_config_default() {
         let config = HttpConfig::default();
-        assert_eq!(config.bind_address, "0.0.0.0:9090");
+        // 既定はループバックのみ（無認証の /metrics を全インタフェースに晒さない）。
+        assert_eq!(config.bind_address, "127.0.0.1:9090");
     }
 
     #[test]
