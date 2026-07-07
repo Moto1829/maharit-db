@@ -10,25 +10,36 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use maharit_cluster::{ClusterConfig, Row, RowValue, ShardId};
 use maharit_cluster::shard_client::ShardClient;
+use maharit_cluster::{ClusterConfig, Row, RowValue, ShardId};
+use maharit_query::{Parser, is_read_only};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::auth::{AuthManager, Operation};
+
+/// メッセージ長プレフィックスの上限（バイト）。巨大な長さ宣言による
+/// メモリ枯渇 DoS を防ぐ。`tcp_server::MAX_MESSAGE_SIZE` と同値。
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 // ─── Wire types (mirrors tcp_server) ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum CoordRequest {
+    #[serde(rename = "login")]
+    Login { username: String, password: String },
     #[serde(rename = "query")]
     Query {
         query: String,
         #[serde(rename = "txId")]
         #[allow(dead_code)]
         tx_id: Option<u64>,
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
     },
     #[serde(rename = "ping")]
     Ping,
@@ -49,6 +60,14 @@ enum CoordResponse {
     Error { message: String },
     #[serde(rename = "pong")]
     Pong,
+    #[serde(rename = "loggedIn")]
+    LoggedIn {
+        #[serde(rename = "sessionToken")]
+        session_token: String,
+        role: String,
+    },
+    #[serde(rename = "authError")]
+    AuthError { message: String },
     #[serde(rename = "stats")]
     Stats {
         connections: u64,
@@ -85,6 +104,9 @@ pub struct CoordinatorConfig {
     pub max_connections: usize,
     /// Per-connection read/write timeout.
     pub timeout: Duration,
+    /// Require a valid session token for all requests (except `login`/`ping`).
+    /// Defaults to `false` for backward compatibility.
+    pub require_auth: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -93,6 +115,7 @@ impl Default for CoordinatorConfig {
             bind_address: "127.0.0.1:7690".to_string(),
             max_connections: 100,
             timeout: Duration::from_secs(30),
+            require_auth: false,
         }
     }
 }
@@ -103,6 +126,8 @@ pub struct ShardCoordinatorServer {
     pool: ShardPool,
     shard_ids: Vec<ShardId>,
     shutdown: Arc<AtomicBool>,
+    /// Authentication manager. Only enforced when `coord_config.require_auth = true`.
+    auth: Arc<Mutex<AuthManager>>,
 }
 
 impl ShardCoordinatorServer {
@@ -115,7 +140,15 @@ impl ShardCoordinatorServer {
             pool,
             shard_ids,
             shutdown: Arc::new(AtomicBool::new(false)),
+            auth: Arc::new(Mutex::new(AuthManager::new())),
         }
+    }
+
+    /// Replace the authentication manager (e.g. to set a non-default admin
+    /// password before enabling `require_auth`).
+    pub fn with_auth(mut self, auth: AuthManager) -> Self {
+        self.auth = Arc::new(Mutex::new(auth));
+        self
     }
 
     /// Signal the server to stop accepting new connections.
@@ -170,6 +203,24 @@ impl ShardCoordinatorServer {
 
             let resp = match req {
                 CoordRequest::Ping => CoordResponse::Pong,
+                CoordRequest::Login { username, password } => {
+                    let mut mgr = self.auth.lock().await;
+                    match mgr.authenticate(&username, &password) {
+                        Ok(token) => {
+                            let role = mgr
+                                .validate_session(&token)
+                                .map(|s| role_label(s.role))
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            CoordResponse::LoggedIn {
+                                session_token: token,
+                                role,
+                            }
+                        }
+                        Err(e) => CoordResponse::AuthError {
+                            message: format!("{}", e),
+                        },
+                    }
+                }
                 CoordRequest::Stats => CoordResponse::Stats {
                     connections: 0,
                     total_queries: 0,
@@ -181,14 +232,19 @@ impl ShardCoordinatorServer {
                     let _ = self.write_response(&mut stream, &CoordResponse::Goodbye).await;
                     break;
                 }
-                CoordRequest::Query { query, .. } => {
-                    match self.execute_on_all_shards(&query).await {
+                CoordRequest::Query {
+                    query,
+                    session_token,
+                    ..
+                } => match self.check_query_auth(&session_token, &query).await {
+                    Err(resp) => resp,
+                    Ok(()) => match self.execute_on_all_shards(&query).await {
                         Ok(rows) => CoordResponse::Result {
                             rows: rows_to_wire(rows),
                         },
                         Err(e) => CoordResponse::Error { message: e },
-                    }
-                }
+                    },
+                },
             };
 
             if self.write_response(&mut stream, &resp).await.is_err() {
@@ -196,6 +252,64 @@ impl ShardCoordinatorServer {
             }
         }
         Ok(())
+    }
+
+    // ── Authorization ─────────────────────────────────────────────────────────
+
+    /// Validate the session token (when `require_auth`) and enforce RBAC on the
+    /// query.  Returns `Ok(())` if the request may proceed, or an `AuthError`
+    /// response otherwise.
+    async fn check_query_auth(
+        &self,
+        session_token: &Option<String>,
+        query: &str,
+    ) -> Result<(), CoordResponse> {
+        if !self.coord_config.require_auth {
+            return Ok(());
+        }
+
+        let token = match session_token {
+            Some(t) if !t.is_empty() => t.as_str(),
+            _ => {
+                return Err(CoordResponse::AuthError {
+                    message: "authentication required: missing sessionToken".to_string(),
+                });
+            }
+        };
+
+        let role = {
+            let mut mgr = self.auth.lock().await;
+            match mgr.validate_session(token) {
+                Ok(session) => session.role,
+                Err(e) => {
+                    return Err(CoordResponse::AuthError {
+                        message: format!("invalid session: {}", e),
+                    });
+                }
+            }
+        };
+
+        // RBAC: 書き込みクエリは Write 権限を要求する。パース不能なクエリは
+        // 権限判定をスキップし、シャード側でエラーを返させる。
+        let stmt = match Parser::new(query) {
+            Ok(mut parser) => match parser.parse() {
+                Ok(s) => s,
+                Err(_) => return Ok(()),
+            },
+            Err(_) => return Ok(()),
+        };
+        let operation = if is_read_only(&stmt) {
+            Operation::Read
+        } else {
+            Operation::Write
+        };
+
+        match AuthManager::check_role_permission(role, operation) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(CoordResponse::AuthError {
+                message: format!("permission denied: {}", e),
+            }),
+        }
     }
 
     // ── Query fan-out ─────────────────────────────────────────────────────────
@@ -240,6 +354,12 @@ impl ShardCoordinatorServer {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timeout"))??;
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
+        if msg_len > MAX_MESSAGE_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("message length {} exceeds maximum {}", msg_len, MAX_MESSAGE_SIZE),
+            ));
+        }
         let mut buf = vec![0u8; msg_len];
         timeout(self.coord_config.timeout, stream.read_exact(&mut buf))
             .await
@@ -268,6 +388,15 @@ impl ShardCoordinatorServer {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Wire label for an authentication role.
+fn role_label(role: crate::auth::Role) -> String {
+    match role {
+        crate::auth::Role::Admin => "admin".to_string(),
+        crate::auth::Role::ReadWrite => "read_write".to_string(),
+        crate::auth::Role::ReadOnly => "read_only".to_string(),
+    }
+}
 
 /// Deduplicate and merge rows from multiple shards.
 fn merge_rows(batches: Vec<Vec<Row>>) -> Vec<Row> {
@@ -334,6 +463,87 @@ mod tests {
             replication_factor: 1,
         };
         (cc, cluster)
+    }
+
+    #[test]
+    fn test_role_label() {
+        use crate::auth::Role;
+        assert_eq!(role_label(Role::Admin), "admin");
+        assert_eq!(role_label(Role::ReadWrite), "read_write");
+        assert_eq!(role_label(Role::ReadOnly), "read_only");
+    }
+
+    #[tokio::test]
+    async fn test_check_query_auth_disabled_allows_all() {
+        let (mut cc, cluster) = make_config(1);
+        cc.require_auth = false;
+        let srv = ShardCoordinatorServer::new(cc, cluster);
+        assert!(srv.check_query_auth(&None, "CREATE (n:X)").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_query_auth_missing_token() {
+        let (mut cc, cluster) = make_config(1);
+        cc.require_auth = true;
+        let srv = ShardCoordinatorServer::new(cc, cluster);
+        assert!(
+            srv.check_query_auth(&None, "MATCH (n) RETURN n")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_query_auth_readonly_denies_write() {
+        let (mut cc, cluster) = make_config(1);
+        cc.require_auth = true;
+        let mut mgr = AuthManager::new();
+        mgr.create_user("ro", "pw", crate::auth::Role::ReadOnly)
+            .unwrap();
+        let srv = ShardCoordinatorServer::new(cc, cluster).with_auth(mgr);
+        let token = {
+            let mut m = srv.auth.lock().await;
+            m.authenticate("ro", "pw").unwrap()
+        };
+        // 読み取りは許可、書き込みは拒否される。
+        assert!(
+            srv.check_query_auth(&Some(token.clone()), "MATCH (n) RETURN n")
+                .await
+                .is_ok()
+        );
+        assert!(
+            srv.check_query_auth(&Some(token), "CREATE (n:X)")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_query_auth_admin_allows_write() {
+        let (mut cc, cluster) = make_config(1);
+        cc.require_auth = true;
+        let srv = ShardCoordinatorServer::new(cc, cluster); // 既定 admin/admin
+        let token = {
+            let mut m = srv.auth.lock().await;
+            m.authenticate("admin", "admin").unwrap()
+        };
+        assert!(
+            srv.check_query_auth(&Some(token), "CREATE (n:X)")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_query_auth_invalid_token() {
+        let (mut cc, cluster) = make_config(1);
+        cc.require_auth = true;
+        let srv = ShardCoordinatorServer::new(cc, cluster);
+        assert!(
+            srv.check_query_auth(&Some("bogus".to_string()), "MATCH (n) RETURN n")
+                .await
+                .is_err()
+        );
     }
 
     #[test]

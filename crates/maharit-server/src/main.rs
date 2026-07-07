@@ -46,6 +46,32 @@ fn run_repl() {
     }
 }
 
+/// 認証が有効な場合に管理者パスワードを解決し `AuthManager` を返す。
+/// デフォルトの admin/admin をネットワーク公開しないよう、パスワード未指定なら
+/// エラー終了する。認証無効なら `None`。
+fn resolve_admin_auth(
+    require_auth: bool,
+    admin_password: Option<String>,
+) -> Option<crate::auth::AuthManager> {
+    if !require_auth {
+        return None;
+    }
+    let pw = admin_password
+        .or_else(|| std::env::var("MAHARIT_ADMIN_PASSWORD").ok())
+        .filter(|p| !p.is_empty());
+    match pw {
+        Some(p) => Some(crate::auth::AuthManager::with_admin_password(&p)),
+        None => {
+            eprintln!(
+                "Error: --require-auth requires an admin password. \
+                 Set --admin-password <PW> or the MAHARIT_ADMIN_PASSWORD env var \
+                 (the default admin/admin credentials are refused when auth is enabled)."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_server(args: &[String]) {
     use crate::coordinator::{CoordinatorConfig, ShardCoordinatorServer};
     use crate::replication::{
@@ -235,10 +261,16 @@ fn run_server(args: &[String]) {
 
         let coord_config = CoordinatorConfig {
             bind_address: coord_bind,
+            require_auth: config.require_auth,
             ..CoordinatorConfig::default()
         };
 
-        let srv = Arc::new(ShardCoordinatorServer::new(coord_config, cluster_config));
+        let coord_auth = resolve_admin_auth(config.require_auth, admin_password.take());
+        let mut srv_inner = ShardCoordinatorServer::new(coord_config, cluster_config);
+        if let Some(a) = coord_auth {
+            srv_inner = srv_inner.with_auth(a);
+        }
+        let srv = Arc::new(srv_inner);
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
         rt.block_on(async move {
             if let Err(e) = srv.start().await {
@@ -280,24 +312,7 @@ fn run_server(args: &[String]) {
     // 認証を有効化する場合は管理者パスワードを解決する。
     // デフォルトの admin/admin をネットワークに公開しないよう、
     // パスワード未指定なら起動を拒否する。
-    let mut auth_manager: Option<crate::auth::AuthManager> = if config.require_auth {
-        let pw = admin_password
-            .or_else(|| std::env::var("MAHARIT_ADMIN_PASSWORD").ok())
-            .filter(|p| !p.is_empty());
-        match pw {
-            Some(p) => Some(crate::auth::AuthManager::with_admin_password(&p)),
-            None => {
-                eprintln!(
-                    "Error: --require-auth requires an admin password. \
-                     Set --admin-password <PW> or the MAHARIT_ADMIN_PASSWORD env var \
-                     (the default admin/admin credentials are refused when auth is enabled)."
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
+    let mut auth_manager = resolve_admin_auth(config.require_auth, admin_password.take());
 
     // レプリケーションチャネルの共有シークレット（--replication-secret / 環境変数）。
     // 設定するとリーダーはシークレットを提示しないフォロワーを拒否する。
