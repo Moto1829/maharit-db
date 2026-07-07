@@ -56,6 +56,12 @@ impl Default for ServerConfig {
 /// Default chunk size for streaming results
 pub const DEFAULT_CHUNK_SIZE: usize = 100;
 
+/// メッセージ長プレフィックスの上限（バイト）。
+/// クライアントが宣言する長さがこれを超える場合は接続を切断する。
+/// 悪意あるクライアントが巨大な長さを宣言してサーバーのメモリを枯渇させる
+/// DoS を防ぐためのガード。
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// セッションタイムアウト（秒）。`AuthManager` の `session_timeout` (30 分) と
 /// 揃える。クライアントに返す expires_at の算出に使う。
 pub const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 30 * 60;
@@ -720,6 +726,18 @@ async fn read_message(
         // Check if we have a complete message in the buffer
         if buffer.len() >= 4 {
             let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+            // 宣言された長さが上限を超える場合は、データを蓄積する前に切断する。
+            // これがないと最大約 4 GiB のバッファ確保を強制されメモリ枯渇 DoS になる。
+            if len > MAX_MESSAGE_SIZE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "message length {} exceeds maximum {}",
+                        len, MAX_MESSAGE_SIZE
+                    ),
+                ));
+            }
 
             if buffer.len() >= 4 + len {
                 buffer.advance(4);
