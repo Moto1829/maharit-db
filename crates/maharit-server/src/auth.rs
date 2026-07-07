@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -43,10 +42,11 @@ impl User {
         }
     }
 
-    /// Verify password against stored hash
+    /// Verify password against stored hash using a constant-time comparison
+    /// to avoid leaking hash contents through timing.
     fn verify_password(&self, password: &str) -> bool {
         let computed_hash = hash_password(&self.salt, password);
-        computed_hash == self.password_hash
+        constant_time_eq(computed_hash.as_bytes(), self.password_hash.as_bytes())
     }
 
     /// Update password with new hash and salt
@@ -180,7 +180,9 @@ struct PersistedUsers {
 }
 
 impl PersistedUsers {
-    const CURRENT_VERSION: u32 = 1;
+    // v2: password hashing changed from FNV-1a to PBKDF2-HMAC-SHA256.
+    // Hashes stored by v1 can no longer be verified and must be reset.
+    const CURRENT_VERSION: u32 = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,68 +494,74 @@ impl Default for AuthManager {
 // Crypto helpers
 // ---------------------------------------------------------------------------
 
-static SALT_COUNTER: AtomicU64 = AtomicU64::new(0);
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// PBKDF2 iteration count.  Balances resistance to offline brute-forcing
+/// against per-login CPU cost.
+const PBKDF2_ROUNDS: u32 = 100_000;
+/// Derived key length in bytes (SHA-256 output size).
+const PBKDF2_KEY_LEN: usize = 32;
+/// Salt length in bytes.
+const SALT_LEN: usize = 16;
+/// Session token length in bytes (256 bits of entropy).
+const TOKEN_LEN: usize = 32;
 
-/// Generate a random salt using system time and an atomic counter
+/// Fill `buf` with cryptographically secure random bytes from the OS CSPRNG.
+///
+/// # Panics
+/// Panics if the operating system RNG is unavailable — the process cannot
+/// safely produce credentials without it.
+fn fill_random(buf: &mut [u8]) {
+    getrandom::getrandom(buf).expect("OS CSPRNG unavailable; cannot generate secure credentials");
+}
+
+/// Encode bytes as lowercase hex.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Constant-time byte-slice equality.  Returns `false` immediately on length
+/// mismatch (hash lengths are fixed, so this does not leak secret data).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Generate a cryptographically random salt, hex-encoded.
 fn generate_salt() -> String {
-    let counter = SALT_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    format!("{:x}{:x}", timestamp, counter)
+    let mut bytes = [0u8; SALT_LEN];
+    fill_random(&mut bytes);
+    to_hex(&bytes)
 }
 
-/// Hash password with salt using FNV-1a variant
+/// Hash a password with the given salt using PBKDF2-HMAC-SHA256.
+///
+/// The salt is applied as a key-stretching input; the high iteration count
+/// makes offline brute-forcing of leaked hashes expensive.
 fn hash_password(salt: &str, password: &str) -> String {
-    let input = format!("{}{}", salt, password);
-    let bytes = input.as_bytes();
-
-    // FNV-1a 64-bit hash with multiple rounds for longer output
-    let seeds = [
-        0xcbf29ce484222325u64,
-        0x84222325cbf29ce4u64,
-        0x9ce484222325cbf2u64,
-        0x2325cbf29ce48422u64,
-    ];
-
-    let mut result = String::new();
-    for seed in &seeds {
-        let hash = fnv1a_64(bytes, *seed);
-        result.push_str(&format!("{:016x}", hash));
-    }
-
-    result
+    let mut derived = [0u8; PBKDF2_KEY_LEN];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+        password.as_bytes(),
+        salt.as_bytes(),
+        PBKDF2_ROUNDS,
+        &mut derived,
+    );
+    to_hex(&derived)
 }
 
-/// FNV-1a 64-bit hash function
-fn fnv1a_64(data: &[u8], seed: u64) -> u64 {
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = seed;
-
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-
-    hash
-}
-
-/// Generate a session token
+/// Generate a cryptographically random session token (256 bits), hex-encoded.
 fn generate_token() -> String {
-    let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    let random_part = fnv1a_64(&timestamp.to_le_bytes(), counter);
-
-    format!("{:016x}-{:016x}", random_part, timestamp as u64)
+    let mut bytes = [0u8; TOKEN_LEN];
+    fill_random(&mut bytes);
+    to_hex(&bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +747,40 @@ mod tests {
                 save_path: None,
             }
         }
+    }
+
+    #[test]
+    fn test_salts_are_random_and_unique() {
+        let s1 = generate_salt();
+        let s2 = generate_salt();
+        assert_ne!(s1, s2, "salts must not repeat");
+        assert_eq!(s1.len(), SALT_LEN * 2, "salt must be hex-encoded 16 bytes");
+    }
+
+    #[test]
+    fn test_tokens_are_random_and_high_entropy() {
+        let t1 = generate_token();
+        let t2 = generate_token();
+        assert_ne!(t1, t2, "tokens must not repeat");
+        assert_eq!(t1.len(), TOKEN_LEN * 2, "token must be 32 random bytes hex");
+    }
+
+    #[test]
+    fn test_password_hash_uses_salt() {
+        // Same password, different salts → different hashes.
+        let h1 = hash_password("saltA", "password");
+        let h2 = hash_password("saltB", "password");
+        assert_ne!(h1, h2);
+        // Deterministic for the same salt+password.
+        assert_eq!(hash_password("saltA", "password"), h1);
+        assert_eq!(h1.len(), PBKDF2_KEY_LEN * 2);
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
     }
 
     #[test]
@@ -1079,7 +1121,7 @@ mod tests {
 
         let content = std::fs::read_to_string(path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["version"], 1u32);
+        assert_eq!(value["version"], 2u32);
     }
 
     #[test]

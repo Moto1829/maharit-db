@@ -57,6 +57,9 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+getrandom = "0.2"
+pbkdf2 = "0.12"
+sha2 = "0.10"
 axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }

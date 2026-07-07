@@ -35,3 +35,6 @@ webpki-roots.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+getrandom.workspace = true
+pbkdf2.workspace = true
+sha2.workspace = true
