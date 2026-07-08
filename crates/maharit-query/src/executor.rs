@@ -2817,24 +2817,27 @@ impl<'a> Executor<'a> {
         pattern: &NodePattern,
         bindings: &Bindings,
     ) -> Result<bool, ExecuteError> {
-        let node = match self.graph_ref().get_node(node_id) {
-            Some(n) => n,
-            None => return Ok(false),
-        };
+        let backend = self.graph_ref();
 
-        // Check labels. A node must have ALL labels specified in the pattern (AND condition).
-        for label in &pattern.labels {
-            if !node.has_label(label) {
+        // Check labels without cloning the whole node. A node must have ALL
+        // labels specified in the pattern (AND). When the pattern has labels,
+        // this also confirms the node exists.
+        if !pattern.labels.is_empty() {
+            if !backend.node_has_all_labels(node_id, &pattern.labels) {
                 return Ok(false);
             }
+        } else if pattern.properties.is_empty() && !backend.contains_node(node_id) {
+            // No labels and no properties: still require the node to exist.
+            return Ok(false);
         }
 
-        // Check properties
+        // Check properties, cloning only the individual property values needed
+        // rather than the entire node.
         for (key, expected_expr) in &pattern.properties {
-            match node.get_property(key) {
+            match backend.get_node_property(node_id, key) {
                 Some(actual) => {
                     let expected_val = self.evaluate_expression(expected_expr, bindings)?;
-                    if !self.property_value_matches(actual, &expected_val) {
+                    if !self.property_value_matches(&actual, &expected_val) {
                         return Ok(false);
                     }
                 }

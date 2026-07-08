@@ -32,6 +32,17 @@ pub trait GraphBackend: Send + Sync {
     /// ノードを所有値として取得する（存在しない場合は `None`）。
     fn get_node(&self, id: NodeId) -> Option<Node>;
 
+    /// 指定ノードがパターンの全ラベルを持つかを、ノード全体をクローンせずに判定する。
+    /// ラベルが空スライスの場合は「ノードが存在すれば true」。
+    ///
+    /// MATCH のスキャン・フィルタのホットパスで `get_node`（Node 全体を複製）を
+    /// 避けるための狭い読み取り API。
+    fn node_has_all_labels(&self, id: NodeId, labels: &[String]) -> bool;
+
+    /// 指定ノードの単一プロパティ値をクローンして返す（ノード全体はクローンしない）。
+    /// ノードまたはプロパティが存在しない場合は `None`。
+    fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue>;
+
     /// エッジを所有値として取得する（存在しない場合は `None`）。
     fn get_edge(&self, id: EdgeId) -> Option<Edge>;
 
@@ -109,6 +120,17 @@ impl GraphBackend for Graph {
     fn get_node(&self, id: NodeId) -> Option<Node> {
         // 同名の固有メソッドが &Node を返すのでクローンして所有値にする。
         Graph::get_node(self, id).cloned()
+    }
+
+    fn node_has_all_labels(&self, id: NodeId, labels: &[String]) -> bool {
+        match Graph::get_node(self, id) {
+            Some(n) => labels.iter().all(|l| n.has_label(l)),
+            None => false,
+        }
+    }
+
+    fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
+        Graph::get_node(self, id).and_then(|n| n.get_property(key).cloned())
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
@@ -219,6 +241,15 @@ impl GraphBackend for Graph {
 impl GraphBackend for ConcurrentGraph {
     fn get_node(&self, id: NodeId) -> Option<Node> {
         self.with_node(id, |n| n.clone())
+    }
+
+    fn node_has_all_labels(&self, id: NodeId, labels: &[String]) -> bool {
+        self.with_node(id, |n| labels.iter().all(|l| n.has_label(l)))
+            .unwrap_or(false)
+    }
+
+    fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
+        self.with_node(id, |n| n.get_property(key).cloned()).flatten()
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
