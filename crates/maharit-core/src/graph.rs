@@ -107,11 +107,79 @@ pub struct Graph {
     node_count: usize,
     /// 存在するエッジの数（None スロットを除く）
     edge_count: usize,
+    /// ラベル → そのラベルを持つ NodeId 集合。`MATCH (n:Label)` を全走査せずに
+    /// 該当ノードのみ列挙するための索引。ノード作成/削除/ラベル増減で維持する。
+    /// 永続化はロード時に create 経由で再構築されるためシリアライズ対象外。
+    label_index: HashMap<String, HashSet<NodeId>>,
 }
 
 impl Graph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // ── ラベル索引の維持 ─────────────────────────────────────────────────────
+
+    /// 指定ノードの現在のラベルを索引に登録する（作成時に呼ぶ）。
+    fn label_index_add_node(&mut self, id: NodeId) {
+        let labels: Vec<String> = match self.nodes.get(id as usize).and_then(|s| s.as_ref()) {
+            Some(n) => n.labels.clone(),
+            None => return,
+        };
+        for label in labels {
+            self.label_index.entry(label).or_default().insert(id);
+        }
+    }
+
+    /// 指定ラベルの索引から `id` を除去する。空になったエントリは削除する。
+    fn label_index_remove(&mut self, id: NodeId, label: &str) {
+        if let Some(set) = self.label_index.get_mut(label) {
+            set.remove(&id);
+            if set.is_empty() {
+                self.label_index.remove(label);
+            }
+        }
+    }
+
+    /// 指定ラベルを持つノード ID を返す（索引参照、全走査なし）。
+    pub fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+        self.label_index
+            .get(label)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// ノードにラベルを追加し、索引も更新する。
+    pub fn add_node_label(&mut self, id: NodeId, label: String) {
+        let added = if let Some(Some(node)) = self.nodes.get_mut(id as usize) {
+            if node.has_label(&label) {
+                false
+            } else {
+                node.add_label(label.clone());
+                true
+            }
+        } else {
+            false
+        };
+        if added {
+            self.label_index.entry(label).or_default().insert(id);
+        }
+    }
+
+    /// ノードからラベルを削除し、索引も更新する。
+    pub fn remove_node_label(&mut self, id: NodeId, label: &str) {
+        let removed = if let Some(Some(node)) = self.nodes.get_mut(id as usize) {
+            let had = node.has_label(label);
+            if had {
+                node.remove_label(label);
+            }
+            had
+        } else {
+            false
+        };
+        if removed {
+            self.label_index_remove(id, label);
+        }
     }
 
     /// 新しいノードを作成して追加（単一ラベル版、後方互換のため残す）
@@ -150,6 +218,7 @@ impl Graph {
             id
         };
         self.node_count += 1;
+        self.label_index_add_node(id);
         id
     }
 
@@ -193,6 +262,7 @@ impl Graph {
         self.outgoing_edges[idx] = HashSet::new();
         self.incoming_edges[idx] = HashSet::new();
         self.node_count += 1;
+        self.label_index_add_node(id);
         id
     }
 
@@ -242,7 +312,12 @@ impl Graph {
         }
 
         let node = self.nodes[id as usize].take();
-        if node.is_some() {
+        if let Some(ref n) = node {
+            // ラベル索引から除去
+            let labels: Vec<String> = n.labels.clone();
+            for label in &labels {
+                self.label_index_remove(id, label);
+            }
             self.node_free_list.push(id);
             self.node_count -= 1;
         }
@@ -394,6 +469,64 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sorted(mut v: Vec<NodeId>) -> Vec<NodeId> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn test_label_index_create_and_lookup() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+        let b = graph.create_node("Person");
+        let c = graph.create_node("City");
+
+        assert_eq!(sorted(graph.nodes_by_label("Person")), vec![a, b]);
+        assert_eq!(graph.nodes_by_label("City"), vec![c]);
+        assert!(graph.nodes_by_label("Nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_label_index_delete_consistency() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+        let b = graph.create_node("Person");
+        graph.delete_node(a);
+
+        assert_eq!(graph.nodes_by_label("Person"), vec![b]);
+        graph.delete_node(b);
+        assert!(graph.nodes_by_label("Person").is_empty());
+    }
+
+    #[test]
+    fn test_label_index_add_remove_label() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+
+        graph.add_node_label(a, "Admin".to_string());
+        assert_eq!(graph.nodes_by_label("Admin"), vec![a]);
+        // Adding a duplicate label must not create duplicate index entries.
+        graph.add_node_label(a, "Admin".to_string());
+        assert_eq!(graph.nodes_by_label("Admin"), vec![a]);
+
+        graph.remove_node_label(a, "Admin");
+        assert!(graph.nodes_by_label("Admin").is_empty());
+        // Original label is still indexed.
+        assert_eq!(graph.nodes_by_label("Person"), vec![a]);
+    }
+
+    #[test]
+    fn test_label_index_reused_slot() {
+        // After deleting a node, its slot may be reused; the index must not
+        // retain the old node under a stale label.
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+        graph.delete_node(a);
+        let b = graph.create_node("City"); // likely reuses slot `a`
+        assert!(graph.nodes_by_label("Person").is_empty());
+        assert_eq!(graph.nodes_by_label("City"), vec![b]);
+    }
 
     #[test]
     fn test_create_node() {

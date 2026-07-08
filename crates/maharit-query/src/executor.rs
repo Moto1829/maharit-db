@@ -2499,9 +2499,15 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<Bindings>, ExecuteError> {
         let mut result = Vec::new();
 
-        // Collect all graph node IDs once for the scan-all path.
-        // We reuse this Vec across bindings to avoid repeated allocations.
-        let all_node_ids: Vec<NodeId> = self.graph_ref().node_ids();
+        // Candidate node set for the scan path, computed once and reused across
+        // input bindings. When the pattern specifies a label, enumerate only
+        // nodes carrying that label via the label index instead of scanning
+        // every node in the graph. `node_matches_pattern` still verifies any
+        // additional labels and properties.
+        let all_node_ids: Vec<NodeId> = match pattern.labels.first() {
+            Some(label) => self.graph_ref().nodes_by_label(label),
+            None => self.graph_ref().node_ids(),
+        };
 
         for bindings in current_bindings {
             // Check if variable is already bound

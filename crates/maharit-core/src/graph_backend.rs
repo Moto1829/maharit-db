@@ -43,6 +43,10 @@ pub trait GraphBackend: Send + Sync {
     /// ノードまたはプロパティが存在しない場合は `None`。
     fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue>;
 
+    /// 指定ラベルを持つノード ID を返す（ラベル索引を参照、全走査なし）。
+    /// `MATCH (n:Label)` のスキャン起点を該当ラベルのノードだけに絞るために使う。
+    fn nodes_by_label(&self, label: &str) -> Vec<NodeId>;
+
     /// エッジを所有値として取得する（存在しない場合は `None`）。
     fn get_edge(&self, id: EdgeId) -> Option<Edge>;
 
@@ -133,6 +137,10 @@ impl GraphBackend for Graph {
         Graph::get_node(self, id).and_then(|n| n.get_property(key).cloned())
     }
 
+    fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+        Graph::nodes_by_label(self, label)
+    }
+
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
         Graph::get_edge(self, id).cloned()
     }
@@ -214,15 +222,12 @@ impl GraphBackend for Graph {
     }
 
     fn add_node_label(&mut self, id: NodeId, label: String) {
-        if let Some(node) = Graph::get_node_mut(self, id) {
-            node.add_label(label);
-        }
+        // ラベル索引も更新する Graph 側メソッド経由で行う。
+        Graph::add_node_label(self, id, label);
     }
 
     fn remove_node_label(&mut self, id: NodeId, label: &str) {
-        if let Some(node) = Graph::get_node_mut(self, id) {
-            node.remove_label(label);
-        }
+        Graph::remove_node_label(self, id, label);
     }
 
     fn set_edge_property(&mut self, id: EdgeId, key: &str, value: PropertyValue) {
@@ -250,6 +255,10 @@ impl GraphBackend for ConcurrentGraph {
 
     fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
         self.with_node(id, |n| n.get_property(key).cloned()).flatten()
+    }
+
+    fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+        ConcurrentGraph::nodes_by_label(self, label)
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
@@ -334,11 +343,11 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn add_node_label(&mut self, id: NodeId, label: String) {
-        self.with_node_mut(id, |n| n.add_label(label));
+        ConcurrentGraph::add_node_label(self, id, label);
     }
 
     fn remove_node_label(&mut self, id: NodeId, label: &str) {
-        self.with_node_mut(id, |n| n.remove_label(label));
+        ConcurrentGraph::remove_node_label(self, id, label);
     }
 
     fn set_edge_property(&mut self, id: EdgeId, key: &str, value: PropertyValue) {

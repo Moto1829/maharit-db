@@ -49,6 +49,10 @@ pub struct ConcurrentGraph {
     outgoing: Arc<DashMap<NodeId, HashSet<EdgeId>>>,
     /// Incoming edge-id sets per node.
     incoming: Arc<DashMap<NodeId, HashSet<EdgeId>>>,
+    /// Label → set of NodeIds carrying that label. Lets `MATCH (n:Label)`
+    /// enumerate only matching nodes instead of scanning every node.
+    /// Maintained on create/delete/label changes; rebuilt from creates on load.
+    label_index: Arc<DashMap<String, HashSet<NodeId>>>,
     next_node_id: AtomicU64,
     next_edge_id: AtomicU64,
 }
@@ -67,8 +71,70 @@ impl ConcurrentGraph {
             edges: Arc::new(DashMap::new()),
             outgoing: Arc::new(DashMap::new()),
             incoming: Arc::new(DashMap::new()),
+            label_index: Arc::new(DashMap::new()),
             next_node_id: AtomicU64::new(0),
             next_edge_id: AtomicU64::new(0),
+        }
+    }
+
+    // ── Label index maintenance ───────────────────────────────────────────────
+
+    /// Register `id` under each of `labels` in the label index.
+    fn label_index_add(&self, id: NodeId, labels: &[String]) {
+        for label in labels {
+            self.label_index.entry(label.clone()).or_default().insert(id);
+        }
+    }
+
+    /// Remove `id` from each of `labels` in the label index.
+    fn label_index_remove(&self, id: NodeId, labels: &[String]) {
+        for label in labels {
+            if let Some(mut set) = self.label_index.get_mut(label) {
+                set.remove(&id);
+            }
+        }
+    }
+
+    /// Return the IDs of all nodes carrying `label` (index lookup, no scan).
+    pub fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+        self.label_index
+            .get(label)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Add a label to a node and update the label index.
+    pub fn add_node_label(&self, id: NodeId, label: String) {
+        let added = self
+            .with_node_mut(id, |n| {
+                if n.has_label(&label) {
+                    false
+                } else {
+                    n.add_label(label.clone());
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if added {
+            self.label_index.entry(label).or_default().insert(id);
+        }
+    }
+
+    /// Remove a label from a node and update the label index.
+    pub fn remove_node_label(&self, id: NodeId, label: &str) {
+        let removed = self
+            .with_node_mut(id, |n| {
+                let had = n.has_label(label);
+                if had {
+                    n.remove_label(label);
+                }
+                had
+            })
+            .unwrap_or(false);
+        if removed
+            && let Some(mut set) = self.label_index.get_mut(label)
+        {
+            set.remove(&id);
         }
     }
 
@@ -88,6 +154,7 @@ impl ConcurrentGraph {
     /// Create a new node with multiple labels.
     pub fn create_node_with_labels(&self, labels: Vec<String>) -> NodeId {
         let id = self.next_node_id.fetch_add(1, Ordering::SeqCst);
+        self.label_index_add(id, &labels);
         self.nodes.insert(
             id,
             Node {
@@ -120,6 +187,7 @@ impl ConcurrentGraph {
                 Err(updated) => current = updated,
             }
         }
+        self.label_index_add(id, &labels);
         let node = Node {
             id,
             labels,
@@ -157,6 +225,9 @@ impl ConcurrentGraph {
     /// Remove a node and all its incident edges. Returns the removed node.
     pub fn delete_node(&self, id: NodeId) -> Option<Node> {
         let node = self.nodes.remove(&id).map(|(_, n)| n)?;
+
+        // Remove from the label index.
+        self.label_index_remove(id, &node.labels);
 
         // Remove all outgoing edges
         if let Some((_, out_ids)) = self.outgoing.remove(&id) {
@@ -301,6 +372,34 @@ impl ConcurrentGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sorted(mut v: Vec<NodeId>) -> Vec<NodeId> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn test_label_index_create_delete_and_labels() {
+        let g = ConcurrentGraph::new();
+        let a = g.create_node("Person");
+        let b = g.create_node("Person");
+        let c = g.create_node("City");
+
+        assert_eq!(sorted(g.nodes_by_label("Person")), vec![a, b]);
+        assert_eq!(g.nodes_by_label("City"), vec![c]);
+
+        g.delete_node(a);
+        assert_eq!(g.nodes_by_label("Person"), vec![b]);
+
+        g.add_node_label(b, "Admin".to_string());
+        assert_eq!(g.nodes_by_label("Admin"), vec![b]);
+        g.add_node_label(b, "Admin".to_string()); // duplicate is a no-op
+        assert_eq!(g.nodes_by_label("Admin"), vec![b]);
+
+        g.remove_node_label(b, "Admin");
+        assert!(g.nodes_by_label("Admin").is_empty());
+        assert_eq!(g.nodes_by_label("Person"), vec![b]);
+    }
 
     #[test]
     fn test_create_and_query_nodes() {
