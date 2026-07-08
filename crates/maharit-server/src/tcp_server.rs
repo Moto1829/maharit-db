@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use maharit_core::{ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId, PropertyValue};
-use maharit_query::{Executor, Parser, is_read_only};
+use maharit_query::{AstCache, Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -357,7 +357,13 @@ pub struct TcpServer {
     replication: Option<Arc<LeaderReplicationManager>>,
     /// Authentication manager. Only enforced when `config.require_auth = true`.
     auth: Arc<Mutex<crate::auth::AuthManager>>,
+    /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
+    /// hot request path. Keyed by normalized query text.
+    ast_cache: Arc<Mutex<AstCache>>,
 }
+
+/// Capacity (number of distinct queries) of the shared AST cache.
+const AST_CACHE_CAPACITY: usize = 512;
 
 impl TcpServer {
     /// Create a new TCP server
@@ -372,6 +378,7 @@ impl TcpServer {
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
+            ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
         }
     }
 
@@ -387,6 +394,7 @@ impl TcpServer {
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
+            ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
         }
     }
 
@@ -402,6 +410,7 @@ impl TcpServer {
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
+            ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
         }
     }
 
@@ -489,6 +498,7 @@ impl TcpServer {
                     let config = self.config.clone();
                     let replication = self.replication.clone();
                     let auth = Arc::clone(&self.auth);
+                    let ast_cache = Arc::clone(&self.ast_cache);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -503,6 +513,7 @@ impl TcpServer {
                             config,
                             replication,
                             auth,
+                            ast_cache,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -554,6 +565,7 @@ async fn handle_connection(
     config: ServerConfig,
     replication: Option<Arc<LeaderReplicationManager>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
+    ast_cache: Arc<Mutex<AstCache>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
@@ -647,12 +659,20 @@ async fn handle_connection(
                                     &constraints,
                                     &fulltext,
                                     replication.as_deref(),
+                                    &ast_cache,
                                 )
                                 .await
                             }
                             None => {
-                                execute_query(&graph, &query, &constraints, &fulltext, replication.as_deref())
-                                    .await
+                                execute_query(
+                                    &graph,
+                                    &query,
+                                    &constraints,
+                                    &fulltext,
+                                    replication.as_deref(),
+                                    &ast_cache,
+                                )
+                                .await
                             }
                         };
                         tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
@@ -684,6 +704,7 @@ async fn handle_connection(
                         &constraints,
                         &fulltext,
                         replication.as_deref(),
+                        &ast_cache,
                     )
                     .await
                     {
@@ -854,21 +875,16 @@ async fn execute_streaming_query(
     constraints: &Arc<Mutex<ConstraintManager>>,
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
+    ast_cache: &Arc<Mutex<AstCache>>,
 ) -> std::io::Result<()> {
-    // Parse the query
-    let stmt = match Parser::new(query) {
-        Ok(mut parser) => match parser.parse() {
-            Ok(stmt) => stmt,
-            Err(e) => {
-                let response = Response::Error {
-                    message: format!("Parse error: {}", e),
-                };
-                return send_response(socket, &response, write_timeout).await;
-            }
-        },
+    // Parse the query (reusing a cached AST when available). Bind the result to
+    // a local so the mutex guard is released before any `.await` below.
+    let parsed = ast_cache.lock().unwrap().get_or_parse(query);
+    let stmt = match parsed {
+        Ok(stmt) => stmt,
         Err(e) => {
             let response = Response::Error {
-                message: format!("Lexer error: {}", e),
+                message: format!("Parse error: {}", e),
             };
             return send_response(socket, &response, write_timeout).await;
         }
@@ -1075,19 +1091,13 @@ async fn execute_query_with_tx(
     constraints: &Arc<Mutex<ConstraintManager>>,
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
+    ast_cache: &Arc<Mutex<AstCache>>,
 ) -> Response {
-    let stmt = match Parser::new(query) {
-        Ok(mut p) => match p.parse() {
-            Ok(s) => s,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("Parse error: {}", e),
-                }
-            }
-        },
+    let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
+        Ok(s) => s,
         Err(e) => {
             return Response::Error {
-                message: format!("Lexer error: {}", e),
+                message: format!("Parse error: {}", e),
             }
         }
     };
@@ -1095,7 +1105,7 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, constraints, fulltext, replication).await;
+        return execute_query(graph, query, constraints, fulltext, replication, ast_cache).await;
     }
 
     // Snapshot before execution for undo tracking and WAL diff.
@@ -1163,19 +1173,14 @@ async fn execute_query(
     constraints: &Arc<Mutex<ConstraintManager>>,
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
+    ast_cache: &Arc<Mutex<AstCache>>,
 ) -> Response {
-    let stmt = match Parser::new(query) {
-        Ok(mut parser) => match parser.parse() {
-            Ok(stmt) => stmt,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("Parse error: {}", e),
-                };
-            }
-        },
+    // Reuse a previously parsed AST for identical query text.
+    let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
+        Ok(stmt) => stmt,
         Err(e) => {
             return Response::Error {
-                message: format!("Lexer error: {}", e),
+                message: format!("Parse error: {}", e),
             };
         }
     };
@@ -1781,6 +1786,47 @@ mod tests {
 
         let resp = send_recv(&mut stream, &Request::Ping).await;
         assert!(matches!(resp, Response::Pong), "expected Pong, got {:?}", resp);
+    }
+
+    #[tokio::test]
+    async fn integration_repeated_query_uses_ast_cache_correctly() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let read = Request::Query {
+            query: "MATCH (n:Widget) RETURN n.id".to_string(),
+            tx_id: None,
+            session_token: None,
+        };
+
+        // First run against an empty graph.
+        let resp = send_recv(&mut stream, &read).await;
+        let count0 = match resp {
+            Response::Result { rows } => rows.len(),
+            other => panic!("expected Result, got {:?}", other),
+        };
+        assert_eq!(count0, 0);
+
+        // Insert a Widget.
+        let _ = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (n:Widget {id: 1})".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
+
+        // Re-run the identical read query. Its AST is served from the cache, but
+        // the result must reflect the current graph (the cache stores the parsed
+        // AST, never the result set).
+        let resp = send_recv(&mut stream, &read).await;
+        let count1 = match resp {
+            Response::Result { rows } => rows.len(),
+            other => panic!("expected Result, got {:?}", other),
+        };
+        assert_eq!(count1, 1, "cached AST must not cache stale results");
     }
 
     #[tokio::test]
