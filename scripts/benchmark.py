@@ -525,6 +525,10 @@ def main():
     parser.add_argument("--scaling", action="store_true",
                         help="多ラベル大規模データでラベル索引・WHEREプッシュダウンの"
                              "スケーリング項目を追加実行する（例: --nodes 100000 --scaling）")
+    parser.add_argument("--scaling-nodes", type=int, default=None,
+                        help="スケーリング項目のノード数（省略時は --nodes と同じ）。"
+                             "標準スイートは1件ずつ作成でネットワーク律速のため、"
+                             "スケーリングだけ大きくしたい場合に指定する。")
     parser.add_argument("--output", default=None,
                         help="Markdown レポートの出力先ファイルパス (省略時は自動生成: "
                              "benchmark_reports/bench_YYYYMMDD_HHMMSS.md)")
@@ -572,7 +576,8 @@ def main():
 
         # スケーリング項目（多ラベル + 選択的ラベル + プッシュダウン）
         if args.scaling:
-            all_results.extend(bench_scaling_label_and_pushdown(client, args.nodes))
+            scaling_n = args.scaling_nodes or args.nodes
+            all_results.extend(bench_scaling_label_and_pushdown(client, scaling_n))
 
     finally:
         if not args.no_cleanup:
