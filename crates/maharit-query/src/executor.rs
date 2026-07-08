@@ -2162,9 +2162,34 @@ impl<'a> Executor<'a> {
         segment: &QuerySegment,
         mut bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
-        // Execute MATCH clauses
+        // Filter pushdown: pull simple `var.prop = <const>` equalities out of the
+        // WHERE clause and inject them into the matching node patterns. This lets
+        // `match_node_pattern` use the property index (or at least filter during
+        // the scan) instead of materializing every label match and filtering
+        // afterwards. The original WHERE retain below still runs, so semantics are
+        // unchanged — we only prune candidates earlier.
+        let pushable = match &segment.where_clause {
+            Some(w) => {
+                let mut v = Vec::new();
+                Self::collect_pushable_equalities(w, &mut v);
+                v
+            }
+            None => Vec::new(),
+        };
+
+        // Execute MATCH clauses (augmented with pushed-down predicates where safe).
         for match_clause in &segment.match_clauses {
-            bindings = self.execute_match_clause(match_clause, bindings)?;
+            if pushable.is_empty() || match_clause.optional {
+                // OPTIONAL MATCH is skipped: pushing a predicate into it could turn
+                // a NULL-preserving row into a filtered one before the WHERE runs.
+                bindings = self.execute_match_clause(match_clause, bindings)?;
+            } else {
+                let augmented = MatchClause {
+                    patterns: Self::augment_patterns(&match_clause.patterns, &pushable),
+                    optional: match_clause.optional,
+                };
+                bindings = self.execute_match_clause(&augmented, bindings)?;
+            }
         }
 
         // Apply WHERE filter
@@ -2182,6 +2207,85 @@ impl<'a> Executor<'a> {
         }
 
         Ok(bindings)
+    }
+
+    // ── WHERE 述語のパターン押し下げ（フィルタプッシュダウン）補助 ──────────────
+
+    /// 押し下げ可能な定数（リテラル or パラメータ）かどうか。
+    /// 他変数を参照する式は、マッチ時点で束縛されているとは限らないため対象外。
+    fn is_pushable_const(expr: &Expression) -> bool {
+        matches!(expr, Expression::Literal(_) | Expression::Parameter(_))
+    }
+
+    /// WHERE 式からトップレベルで AND 連結された `var.prop = <const>` の等価述語を
+    /// 収集する。OR / NOT などの下には降りない（誤って絞り込まないため）。
+    fn collect_pushable_equalities(
+        expr: &Expression,
+        out: &mut Vec<(String, String, Expression)>,
+    ) {
+        match expr {
+            Expression::BinaryOp(l, BinaryOp::And, r) => {
+                Self::collect_pushable_equalities(l, out);
+                Self::collect_pushable_equalities(r, out);
+            }
+            Expression::BinaryOp(l, BinaryOp::Eq, r) => match (l.as_ref(), r.as_ref()) {
+                (Expression::Property(v, p), rhs) if Self::is_pushable_const(rhs) => {
+                    out.push((v.clone(), p.clone(), rhs.clone()));
+                }
+                (lhs, Expression::Property(v, p)) if Self::is_pushable_const(lhs) => {
+                    out.push((v.clone(), p.clone(), lhs.clone()));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// パターン列の各ノードパターンに、対応する変数の等価述語を注入したコピーを返す。
+    fn augment_patterns(
+        patterns: &[Pattern],
+        eqs: &[(String, String, Expression)],
+    ) -> Vec<Pattern> {
+        patterns
+            .iter()
+            .map(|p| match p {
+                Pattern::Node(np) => Pattern::Node(Self::augment_node_pattern(np, eqs)),
+                Pattern::Path(pp) => Pattern::Path(PathPattern {
+                    start: Self::augment_node_pattern(&pp.start, eqs),
+                    segments: pp
+                        .segments
+                        .iter()
+                        .map(|seg| PathSegment {
+                            edge: seg.edge.clone(),
+                            node: Self::augment_node_pattern(&seg.node, eqs),
+                        })
+                        .collect(),
+                }),
+            })
+            .collect()
+    }
+
+    /// ノードパターンの変数に一致する等価述語をプロパティ制約として追加する。
+    /// 既存のインラインプロパティは上書きしない（両方を AND として扱う）。
+    fn augment_node_pattern(
+        np: &NodePattern,
+        eqs: &[(String, String, Expression)],
+    ) -> NodePattern {
+        let var = match &np.variable {
+            Some(v) => v,
+            None => return np.clone(),
+        };
+        let mut properties = np.properties.clone();
+        for (v, prop, val) in eqs {
+            if v == var {
+                properties.entry(prop.clone()).or_insert_with(|| val.clone());
+            }
+        }
+        NodePattern {
+            variable: np.variable.clone(),
+            labels: np.labels.clone(),
+            properties,
+        }
     }
 
     fn apply_with_clause(
@@ -5555,6 +5659,90 @@ mod tests {
     fn execute_with(executor: &mut Executor<'_>, query: &str) -> Result<ResultSet, ExecuteError> {
         let stmt = Parser::new(query).unwrap().parse().unwrap();
         executor.execute(stmt)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // WHERE 述語のパターン押し下げ（フィルタプッシュダウン）
+    // ────────────────────────────────────────────────────────────────
+
+    /// 3 都市の Person を作るヘルパー。
+    fn seed_cities(graph: &mut Graph) {
+        execute(
+            graph,
+            "CREATE (:Person {name: 'a', city: 'Tokyo', age: 40})",
+        )
+        .unwrap();
+        execute(
+            graph,
+            "CREATE (:Person {name: 'b', city: 'Tokyo', age: 20})",
+        )
+        .unwrap();
+        execute(
+            graph,
+            "CREATE (:Person {name: 'c', city: 'Osaka', age: 35})",
+        )
+        .unwrap();
+        // 都市プロパティを持たないノード（欠損プロパティの扱いを確認）
+        execute(graph, "CREATE (:Person {name: 'd', age: 50})").unwrap();
+    }
+
+    #[test]
+    fn test_where_equality_pushdown_basic() {
+        let mut graph = Graph::new();
+        seed_cities(&mut graph);
+        let rs = execute(
+            &mut graph,
+            "MATCH (n:Person) WHERE n.city = 'Tokyo' RETURN n.name",
+        )
+        .unwrap();
+        // Tokyo の 2 件のみ（Osaka と city 欠損は除外）
+        assert_eq!(rs.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_where_or_is_not_overpruned() {
+        let mut graph = Graph::new();
+        seed_cities(&mut graph);
+        // OR は押し下げ対象外。両都市が返ることを確認（AND として誤処理されない）。
+        let rs = execute(
+            &mut graph,
+            "MATCH (n:Person) WHERE n.city = 'Tokyo' OR n.city = 'Osaka' RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(rs.rows.len(), 3);
+    }
+
+    #[test]
+    fn test_where_equality_and_range() {
+        let mut graph = Graph::new();
+        seed_cities(&mut graph);
+        // city = 'Tokyo' AND age > 30 → 'a'(40) のみ
+        let rs = execute(
+            &mut graph,
+            "MATCH (n:Person) WHERE n.city = 'Tokyo' AND n.age > 30 RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(rs.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_where_equality_matches_full_scan_semantics() {
+        // 押し下げの有無で結果が変わらないことを、同義な等価述語と
+        // インラインプロパティの件数一致で確認する。
+        let mut graph = Graph::new();
+        seed_cities(&mut graph);
+        let via_where = execute(
+            &mut graph,
+            "MATCH (n:Person) WHERE n.city = 'Osaka' RETURN n.name",
+        )
+        .unwrap();
+        let via_inline = execute(
+            &mut graph,
+            "MATCH (n:Person {city: 'Osaka'}) RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(via_where.rows.len(), via_inline.rows.len());
+        assert_eq!(via_where.rows.len(), 1);
     }
 
     // ────────────────────────────────────────────────────────────────
