@@ -59,7 +59,7 @@ impl IndexDefinition {
 }
 
 /// Property index for exact match lookups
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PropertyIndex {
     /// Index definitions: key -> definition
     definitions: HashMap<String, IndexDefinition>,

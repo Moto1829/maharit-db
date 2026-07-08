@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId, PropertyValue};
+use maharit_core::{ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId, PropertyIndex, PropertyValue};
 use maharit_query::{AstCache, Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -360,6 +360,10 @@ pub struct TcpServer {
     /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
     /// hot request path. Keyed by normalized query text.
     ast_cache: Arc<Mutex<AstCache>>,
+    /// Shared property (B-tree) index: persists across all query executions so
+    /// that `CREATE INDEX` and subsequent index-accelerated lookups survive
+    /// between requests instead of being discarded per Executor.
+    property_index: Arc<Mutex<PropertyIndex>>,
 }
 
 /// Capacity (number of distinct queries) of the shared AST cache.
@@ -379,6 +383,7 @@ impl TcpServer {
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -395,6 +400,7 @@ impl TcpServer {
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -411,6 +417,7 @@ impl TcpServer {
             replication: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -499,6 +506,7 @@ impl TcpServer {
                     let replication = self.replication.clone();
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
+                    let property_index = Arc::clone(&self.property_index);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -514,6 +522,7 @@ impl TcpServer {
                             replication,
                             auth,
                             ast_cache,
+                            property_index,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -566,6 +575,7 @@ async fn handle_connection(
     replication: Option<Arc<LeaderReplicationManager>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
+    property_index: Arc<Mutex<PropertyIndex>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
@@ -660,6 +670,7 @@ async fn handle_connection(
                                     &fulltext,
                                     replication.as_deref(),
                                     &ast_cache,
+                                    &property_index,
                                 )
                                 .await
                             }
@@ -671,6 +682,7 @@ async fn handle_connection(
                                     &fulltext,
                                     replication.as_deref(),
                                     &ast_cache,
+                                    &property_index,
                                 )
                                 .await
                             }
@@ -705,6 +717,7 @@ async fn handle_connection(
                         &fulltext,
                         replication.as_deref(),
                         &ast_cache,
+                        &property_index,
                     )
                     .await
                     {
@@ -876,6 +889,7 @@ async fn execute_streaming_query(
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> std::io::Result<()> {
     // Parse the query (reusing a cached AST when available). Bind the result to
     // a local so the mutex guard is released before any `.await` below.
@@ -905,16 +919,18 @@ async fn execute_streaming_query(
     // Clone shared managers into the executor for this query.
     let cm = constraints.lock().unwrap().clone();
     let fm = fulltext.lock().unwrap().clone();
+    let pi = property_index.lock().unwrap().clone();
 
     // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
     // uses the raw pointer only during the synchronous execute() call below.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
         let result = executor.execute(stmt);
         if result.is_ok() {
-            let (new_cm, new_fm) = executor.into_managers();
+            let (new_cm, new_fm, new_pi) = executor.into_managers();
             *constraints.lock().unwrap() = new_cm;
             *fulltext.lock().unwrap() = new_fm;
+            *property_index.lock().unwrap() = new_pi;
         }
         result
     };
@@ -1092,6 +1108,7 @@ async fn execute_query_with_tx(
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> Response {
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
         Ok(s) => s,
@@ -1105,7 +1122,16 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, constraints, fulltext, replication, ast_cache).await;
+        return execute_query(
+            graph,
+            query,
+            constraints,
+            fulltext,
+            replication,
+            ast_cache,
+            property_index,
+        )
+        .await;
     }
 
     // Snapshot before execution for undo tracking and WAL diff.
@@ -1122,15 +1148,17 @@ async fn execute_query_with_tx(
     // Clone shared managers into the executor for this query.
     let cm = constraints.lock().unwrap().clone();
     let fm = fulltext.lock().unwrap().clone();
+    let pi = property_index.lock().unwrap().clone();
 
     // SAFETY: ConcurrentGraph has interior mutability via DashMap.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
         let result = executor.execute(stmt);
         if result.is_ok() {
-            let (new_cm, new_fm) = executor.into_managers();
+            let (new_cm, new_fm, new_pi) = executor.into_managers();
             *constraints.lock().unwrap() = new_cm;
             *fulltext.lock().unwrap() = new_fm;
+            *property_index.lock().unwrap() = new_pi;
         }
         result
     };
@@ -1174,6 +1202,7 @@ async fn execute_query(
     fulltext: &Arc<Mutex<FulltextManager>>,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> Response {
     // Reuse a previously parsed AST for identical query text.
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
@@ -1200,16 +1229,18 @@ async fn execute_query(
     // Clone shared managers into the executor for this query.
     let cm = constraints.lock().unwrap().clone();
     let fm = fulltext.lock().unwrap().clone();
+    let pi = property_index.lock().unwrap().clone();
 
     // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
     // uses the raw pointer only during the synchronous execute() call.
     let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm) };
+        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
         let result = executor.execute(stmt);
         if result.is_ok() {
-            let (new_cm, new_fm) = executor.into_managers();
+            let (new_cm, new_fm, new_pi) = executor.into_managers();
             *constraints.lock().unwrap() = new_cm;
             *fulltext.lock().unwrap() = new_fm;
+            *property_index.lock().unwrap() = new_pi;
         }
         result
     };
@@ -1786,6 +1817,53 @@ mod tests {
 
         let resp = send_recv(&mut stream, &Request::Ping).await;
         assert!(matches!(resp, Response::Pong), "expected Pong, got {:?}", resp);
+    }
+
+    #[tokio::test]
+    async fn integration_property_index_persists_across_requests() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Seed a node and create an index in one request.
+        let _ = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE (:Widget {id: 1})".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
+        let _ = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "CREATE INDEX ON :Widget(id)".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
+
+        // A subsequent, separate request must still see the index. Before the
+        // property index was shared across requests, each Executor started with
+        // an empty index and this returned zero rows.
+        let resp = send_recv(
+            &mut stream,
+            &Request::Query {
+                query: "SHOW INDEXES".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
+        let rows = match resp {
+            Response::Result { rows } => rows,
+            other => panic!("expected Result, got {:?}", other),
+        };
+        assert!(
+            !rows.is_empty(),
+            "property index must persist across requests (SHOW INDEXES returned no rows)"
+        );
     }
 
     #[tokio::test]

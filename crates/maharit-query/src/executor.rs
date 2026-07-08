@@ -427,6 +427,7 @@ impl<'a> Executor<'a> {
         graph: &'a ConcurrentGraph,
         constraints: ConstraintManager,
         fulltext: FulltextManager,
+        property_index: PropertyIndex,
     ) -> Self {
         let g: &dyn GraphBackend = graph;
         Self {
@@ -435,16 +436,20 @@ impl<'a> Executor<'a> {
             _marker: std::marker::PhantomData,
             constraints,
             fulltext,
-            property_index: PropertyIndex::new(),
+            property_index,
             params: HashMap::new(),
         }
     }
 
-    /// Consume the executor and return the constraint and fulltext managers.
+    /// Consume the executor and return the constraint, fulltext, and property
+    /// index managers.
     ///
-    /// Use this after `execute()` to persist updated manager state.
-    pub fn into_managers(self) -> (ConstraintManager, FulltextManager) {
-        (self.constraints, self.fulltext)
+    /// Use this after `execute()` to persist updated manager state across
+    /// requests (the property index in particular must survive so that
+    /// `CREATE INDEX` and subsequent index-accelerated lookups work over the
+    /// network path, not just within a single Executor instance).
+    pub fn into_managers(self) -> (ConstraintManager, FulltextManager, PropertyIndex) {
+        (self.constraints, self.fulltext, self.property_index)
     }
 
     /// Return a shared reference to the graph backend.
