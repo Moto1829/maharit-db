@@ -8,6 +8,7 @@ MaharitDB 大量データ性能ベンチマーク
   python3 scripts/benchmark.py --nodes 10000 --host localhost --port 7687
   python3 scripts/benchmark.py --nodes 1000 --no-cleanup
   python3 scripts/benchmark.py --output reports/bench_20260320.md
+  python3 scripts/benchmark.py --nodes 100000 --scaling   # 大規模: ラベル索引/プッシュダウン
 
 分析:
   ベンチ完了後、Claude Code で /analyze-benchmark を実行すると
@@ -299,6 +300,65 @@ def bench_unwind_batch_create(client: MaharitClient, n: int) -> BenchResult:
     return r
 
 
+def bench_scaling_label_and_pushdown(client: MaharitClient, n: int) -> list[BenchResult]:
+    """多ラベル大規模データで、ラベル索引と WHERE プッシュダウンの効果を可視化する。
+
+    - 大量の `ScaleFiller`（`grp` プロパティ、選択度 1/100）と少数の `ScaleRare` を作成。
+    - 選択的ラベルスキャン `MATCH (n:ScaleRare)` はラベル索引により O(該当) を期待。
+    - `WHERE n.grp = 7` は述語プッシュダウンで、同義のインライン `{grp:7}` と同等の性能を期待。
+
+    大規模ノード数（例: `--nodes 100000 --scaling`）で実行すると差が顕著になる。
+    """
+    import json
+
+    section(f"スケーリング: 多ラベル {n:,} 件 + 選択的ラベル")
+
+    # 大量の Filler ノードをバッチ作成（grp: 0..99 の 1/100 選択度）
+    batch_size = 500
+    for batch_start in range(0, n, batch_size):
+        batch_end = min(batch_start + batch_size, n)
+        items = [{"id": i, "grp": i % 100} for i in range(batch_start, batch_end)]
+        client.query(
+            f"UNWIND {json.dumps(items)} AS it "
+            f"CREATE (:ScaleFiller {{id: it.id, grp: it.grp}})"
+        )
+        if batch_end % max(1, (n // 20)) < batch_size:
+            progress(batch_end, n)
+    print()
+
+    # 少数の Rare ノード（全体の中で選択的: 約 0.1%、最低 10 件）
+    rare = max(10, n // 1000)
+    rare_items = [{"id": i} for i in range(rare)]
+    client.query(
+        f"UNWIND {json.dumps(rare_items)} AS it CREATE (:ScaleRare {{id: it.id}})"
+    )
+
+    results: list[BenchResult] = []
+
+    # 選択的ラベルスキャン（ラベル索引 → 全走査せず該当ノードのみ列挙）
+    count, med = _run_timed(client, "MATCH (n:ScaleRare) RETURN n")
+    r = BenchResult(f"SCALE label scan (Rare {rare} of {n:,})", count, med)
+    r.print()
+    results.append(r)
+
+    # WHERE 等価（述語プッシュダウン、grp は 1/100 選択度）
+    count, med = _run_timed(client, "MATCH (n:ScaleFiller) WHERE n.grp = 7 RETURN n")
+    r = BenchResult("SCALE WHERE grp=7 (pushdown)", count, med)
+    r.print()
+    results.append(r)
+
+    # 同義のインラインプロパティ（プッシュダウンの比較用ベースライン）
+    count, med = _run_timed(client, "MATCH (n:ScaleFiller {grp: 7}) RETURN n")
+    r = BenchResult("SCALE inline {grp:7} (baseline)", count, med)
+    r.print()
+    results.append(r)
+
+    # クリーンアップ（このセクションのデータのみ）
+    client.query("MATCH (n:ScaleFiller) DELETE n")
+    client.query("MATCH (n:ScaleRare) DELETE n")
+    return results
+
+
 def cleanup(client: MaharitClient):
     section("クリーンアップ")
     resp = client.query("MATCH (n:BenchPerson) DETACH DELETE n")
@@ -462,6 +522,9 @@ def main():
                         help="ストリーミングのチャンクサイズ (デフォルト: 100)")
     parser.add_argument("--no-cleanup", action="store_true",
                         help="ベンチ後にデータを削除しない")
+    parser.add_argument("--scaling", action="store_true",
+                        help="多ラベル大規模データでラベル索引・WHEREプッシュダウンの"
+                             "スケーリング項目を追加実行する（例: --nodes 100000 --scaling）")
     parser.add_argument("--output", default=None,
                         help="Markdown レポートの出力先ファイルパス (省略時は自動生成: "
                              "benchmark_reports/bench_YYYYMMDD_HHMMSS.md)")
@@ -507,9 +570,16 @@ def main():
         all_results.append(bench_stream(client, args.chunk_size))
         all_results.append(bench_concurrent_reads(client, args.repeat))
 
+        # スケーリング項目（多ラベル + 選択的ラベル + プッシュダウン）
+        if args.scaling:
+            all_results.extend(bench_scaling_label_and_pushdown(client, args.nodes))
+
     finally:
         if not args.no_cleanup:
             cleanup(client)
+            # スケーリングデータの取りこぼしを掃除（途中失敗時の保険）
+            client.query("MATCH (n:ScaleFiller) DELETE n")
+            client.query("MATCH (n:ScaleRare) DELETE n")
         client.close()
 
     print_summary(all_results)
