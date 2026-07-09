@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use crate::replication::{LeaderReplicationManager, WalEntryData};
+use crate::replication::{FollowerReplicationManager, LeaderReplicationManager, WalEntryData};
 use crate::tracing_setup::TracingConfig;
 
 /// Server configuration
@@ -344,6 +344,17 @@ pub enum Request {
     },
 }
 
+/// Replication status embedded in the `stats` response.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReplicationStatus {
+    /// `"leader"` or `"follower"`.
+    pub role: String,
+    /// For a follower: whether the leader is currently reachable (heartbeats
+    /// arriving). For a leader: always `true` (it is the leader).
+    #[serde(rename = "is_leader_alive")]
+    pub is_leader_alive: bool,
+}
+
 fn default_chunk_size() -> usize {
     DEFAULT_CHUNK_SIZE
 }
@@ -376,6 +387,10 @@ pub enum Response {
         total_queries: u64,
         nodes: usize,
         edges: usize,
+        /// Replication status for leader/follower nodes; absent for a
+        /// standalone server.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replication: Option<ReplicationStatus>,
     },
 
     /// Goodbye response before disconnect
@@ -485,6 +500,9 @@ pub struct TcpServer {
     /// Optional leader replication manager: when set, write operations are
     /// automatically replicated to followers via WAL entries.
     replication: Option<Arc<LeaderReplicationManager>>,
+    /// Optional follower replication manager: when set, the `stats` response
+    /// reports the follower's view of leader liveness.
+    follower: Option<Arc<FollowerReplicationManager>>,
     /// Authentication manager. Only enforced when `config.require_auth = true`.
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
@@ -511,6 +529,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             property_index: Arc::new(Mutex::new(PropertyIndex::new())),
@@ -528,6 +547,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             property_index: Arc::new(Mutex::new(PropertyIndex::new())),
@@ -545,6 +565,7 @@ impl TcpServer {
             constraints: Arc::new(Mutex::new(ConstraintManager::new())),
             fulltext: Arc::new(Mutex::new(FulltextManager::new())),
             replication: None,
+            follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             property_index: Arc::new(Mutex::new(PropertyIndex::new())),
@@ -568,6 +589,13 @@ impl TcpServer {
     /// broadcasts them to all connected followers.
     pub fn with_replication(mut self, manager: Arc<LeaderReplicationManager>) -> Self {
         self.replication = Some(manager);
+        self
+    }
+
+    /// Attach a follower replication manager so the `stats` response can report
+    /// this follower's view of leader liveness.
+    pub fn with_follower(mut self, manager: Arc<FollowerReplicationManager>) -> Self {
+        self.follower = Some(manager);
         self
     }
 
@@ -634,6 +662,7 @@ impl TcpServer {
                     let fulltext = Arc::clone(&self.fulltext);
                     let config = self.config.clone();
                     let replication = self.replication.clone();
+                    let follower = self.follower.clone();
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
                     let property_index = Arc::clone(&self.property_index);
@@ -650,6 +679,7 @@ impl TcpServer {
                             fulltext,
                             config,
                             replication,
+                            follower,
                             auth,
                             ast_cache,
                             property_index,
@@ -703,6 +733,7 @@ async fn handle_connection(
     fulltext: Arc<Mutex<FulltextManager>>,
     config: ServerConfig,
     replication: Option<Arc<LeaderReplicationManager>>,
+    follower: Option<Arc<FollowerReplicationManager>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
     property_index: Arc<Mutex<PropertyIndex>>,
@@ -869,12 +900,30 @@ async fn handle_connection(
                 }
             }
             Request::Ping => Response::Pong,
-            Request::Stats => Response::Stats {
-                connections: stats.current_connections.load(Ordering::SeqCst),
-                total_queries: stats.total_queries.load(Ordering::SeqCst),
-                nodes: graph.node_count(),
-                edges: graph.edge_count(),
-            },
+            Request::Stats => {
+                // Report replication status when this node is a follower (its
+                // view of leader liveness) or a leader (always alive).
+                let replication_status = if let Some(f) = follower.as_ref() {
+                    Some(ReplicationStatus {
+                        role: "follower".to_string(),
+                        is_leader_alive: f.is_leader_alive(),
+                    })
+                } else if replication.is_some() {
+                    Some(ReplicationStatus {
+                        role: "leader".to_string(),
+                        is_leader_alive: true,
+                    })
+                } else {
+                    None
+                };
+                Response::Stats {
+                    connections: stats.current_connections.load(Ordering::SeqCst),
+                    total_queries: stats.total_queries.load(Ordering::SeqCst),
+                    nodes: graph.node_count(),
+                    edges: graph.edge_count(),
+                    replication: replication_status,
+                }
+            }
             Request::Disconnect => {
                 send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
                 break;

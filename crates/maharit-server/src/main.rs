@@ -381,7 +381,8 @@ fn run_server(args: &[String]) {
                 Arc::clone(&graph_arc),
             ));
             let follower_clone = Arc::clone(&follower);
-            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
+                .with_follower(Arc::clone(&follower));
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }

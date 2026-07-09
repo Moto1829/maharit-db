@@ -20,10 +20,24 @@
    リーダーが実際には停止されず、フォロワー2 がハートビートタイムアウトで
    `is_leader_alive=false` に遷移する条件が発生しない。
 
-## あるべき対応（要判断）
-- `stats`（または新規 `replicationStats` リクエスト）でリーダー生存/LSN/フォロワー数を公開する。
-- もしくは failover_test を、実際にリーダープロセスを停止し
-  `admin promote-to-leader` を発行する自動フロー（--no-docker でも）に改める。
+## 対応（完了）— 両方実施
+1. **プロトコル拡張**（`tcp_server.rs`）:
+   - `ReplicationStatus { role, is_leader_alive }` を追加し、`stats` レスポンスに
+     `replication` フィールド（standalone では省略）を追加。
+   - `TcpServer` に `follower: Option<Arc<FollowerReplicationManager>>` と
+     `with_follower()` を追加。`stats` ハンドラで follower なら
+     `is_leader_alive()`、leader なら常に true を返す。
+   - `main.rs` のフォロワー分岐で `.with_follower(...)` を配線。
+2. **テストフロー自動化**（`failover_test.py`）:
+   - `--no-docker` 非対話モードで、PID ファイル先頭のリーダーを実際に SIGKILL
+     （`kill_local_leader`）、検出したバイナリで `admin promote-to-leader` を実行。
+   - `admin promote-to-leader --addr <follower>` はフォロワーに直接接続して昇格させ、
+     リーダー不要（`send_promote_to_leader`）。
+
+## 検証
+- `failover_test.py --no-docker`（ローカル 3 ノード）: **18/18 通過**。
+  リーダー SIGKILL → フォロワー1昇格 → フォロワー2 が `stats.replication.is_leader_alive`
+  でリーダー死亡（ハートビートタイムアウト）を検出。
 
 ## ステータス
-未対応（原因切り分け済み・既存問題として記録）。中核のフェイルオーバー機能自体は動作。
+完了

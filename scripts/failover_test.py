@@ -17,6 +17,7 @@ docker-compose.replication.yml で起動した環境（リーダー1台 + フォ
 
 import argparse
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -70,6 +71,33 @@ def run_docker(args: list[str]) -> tuple[int, str]:
         return 1, "timeout"
     except FileNotFoundError:
         return 1, "docker コマンドが見つかりません"
+
+
+LOCAL_PIDFILE = "/tmp/maharit_repl_local.pids"
+
+
+def _find_binary() -> str | None:
+    """ローカルクラスターの maharit バイナリを検出する。"""
+    for path in ("./target/release/maharit", "./target/debug/maharit"):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def kill_local_leader() -> bool:
+    """PID ファイル先頭（リーダー）のプロセスを SIGKILL で停止する。"""
+    try:
+        with open(LOCAL_PIDFILE) as f:
+            pids = [line.strip() for line in f if line.strip()]
+    except OSError:
+        return False
+    if not pids:
+        return False
+    try:
+        os.kill(int(pids[0]), signal.SIGKILL)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
 
 
 # ── テストフロー ──────────────────────────────────────────────────────────────
@@ -137,13 +165,11 @@ def phase3_stop_leader(use_docker: bool):
         rc, out = run_docker(["stop", "maharit-leader"])
         check("docker stop maharit-leader", rc == 0, out)
     else:
-        print(f"  {YELLOW}⚠ --no-docker モード: リーダーを手動で停止してください{RESET}")
-        print("  例: kill $(cat /tmp/maharit_repl_local.pids | head -1)")
-        if sys.stdin.isatty():
-            input("  停止後に Enter を押してください...")
-        else:
-            print(f"  {YELLOW}非インタラクティブモード: 自動で続行します{RESET}")
-            time.sleep(1)
+        # ローカルプロセスモード: PID ファイル先頭のリーダーを実際に kill する。
+        killed = kill_local_leader()
+        check("ローカルリーダープロセスを停止 (SIGKILL)", killed,
+              "PIDファイルからリーダーをkillできなかった")
+        time.sleep(1)
 
 
 def phase4_promote_follower(follower1_port: int, use_docker: bool):
@@ -162,13 +188,22 @@ def phase4_promote_follower(follower1_port: int, use_docker: bool):
         ])
         check("maharit admin promote-to-leader (docker exec)", rc == 0, out)
     else:
-        print(f"  {YELLOW}⚠ --no-docker モード: 以下のコマンドを手動で実行してください:{RESET}")
-        print(f"  maharit admin promote-to-leader --addr {promote_addr}")
-        if sys.stdin.isatty():
-            input("  昇格後に Enter を押してください...")
-        else:
-            print(f"  {YELLOW}非インタラクティブモード: 自動で続行します{RESET}")
-            time.sleep(1)
+        # ローカルプロセスモード: 検出したバイナリで昇格コマンドを実行する。
+        binary = _find_binary()
+        if not binary:
+            check("promote 用バイナリ検出", False,
+                  "./target/{release,debug}/maharit が見つからない")
+            return
+        try:
+            result = subprocess.run(
+                [binary, "admin", "promote-to-leader", "--addr", promote_addr],
+                capture_output=True, text=True, timeout=30,
+            )
+            out = result.stdout.strip() or result.stderr.strip()
+            check("maharit admin promote-to-leader (local)", result.returncode == 0, out)
+        except Exception as e:
+            check("maharit admin promote-to-leader (local)", False, str(e))
+        time.sleep(1)
 
 
 def phase5_verify_new_leader(follower1_port: int, wait_sec: float):
