@@ -13,6 +13,7 @@ docker-compose.replication.yml で起動したコンテナ群に対して
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import time

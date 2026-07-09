@@ -17,6 +17,7 @@ docker-compose.replication.yml で起動した環境（リーダー1台 + フォ
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import time
