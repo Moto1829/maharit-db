@@ -2026,6 +2026,12 @@ impl<'a> Executor<'a> {
     // ========== MATCH ==========
 
     fn execute_match(&mut self, m: MatchStatement) -> Result<ResultSet, ExecuteError> {
+        // Fast path: `MATCH (n:L) RETURN count(*)` / `count(n)` with no filters
+        // answers from the label/node count without materializing any bindings.
+        if let Some(rs) = self.try_simple_count(&m) {
+            return Ok(rs);
+        }
+
         // Detect an early-termination limit: applicable only when there is no ORDER BY
         // and no aggregation, since both require collecting all rows before outputting.
         let has_aggregation = m
@@ -2076,6 +2082,76 @@ impl<'a> Executor<'a> {
 
         // Build result set
         self.build_result_set(&m.return_clause, &all_bindings)
+    }
+
+    /// Fast path for a filter-free node count: `MATCH (n:L) RETURN count(*)`
+    /// or `count(n)`. Returns `Some(result)` when the query matches this shape,
+    /// answering from `nodes_by_label`/`node_count` without building bindings.
+    /// Returns `None` (fall back to the general path) for anything more complex.
+    fn try_simple_count(&self, m: &MatchStatement) -> Option<ResultSet> {
+        if m.call_clause.is_some() || m.segments.len() != 1 {
+            return None;
+        }
+        let seg = &m.segments[0];
+        if seg.where_clause.is_some() || seg.with_clause.is_some() {
+            return None;
+        }
+        if seg.match_clauses.len() != 1 {
+            return None;
+        }
+        let clause = &seg.match_clauses[0];
+        if clause.optional || clause.patterns.len() != 1 {
+            return None;
+        }
+        let np = match &clause.patterns[0] {
+            Pattern::Node(np) => np,
+            _ => return None,
+        };
+        // Inline properties or multiple labels would filter the set, so the
+        // simple count identity no longer holds.
+        if !np.properties.is_empty() || np.labels.len() > 1 {
+            return None;
+        }
+
+        let rc = &m.return_clause;
+        if rc.order_by.is_some() || rc.skip.is_some() || rc.limit.is_some() || rc.items.is_empty() {
+            return None;
+        }
+
+        // Every return item must be a plain count(*) or count(<the node var>).
+        let node_var = np.variable.as_deref();
+        if !rc.items.iter().all(|it| Self::is_plain_count(it, node_var)) {
+            return None;
+        }
+
+        let cnt = match np.labels.first() {
+            Some(label) => self.graph_ref().nodes_by_label(label).len(),
+            None => self.graph_ref().node_count(),
+        } as i64;
+
+        let columns: Vec<String> = rc
+            .items
+            .iter()
+            .map(|it| self.return_item_to_column_name(it))
+            .collect();
+        let row_values = vec![Value::Int(cnt); rc.items.len()];
+        Some(ResultSet::new(columns, vec![Row { columns: row_values }]))
+    }
+
+    /// True if `item` is `count(*)` or `count(v)` where `v` is `node_var`
+    /// (unwrapping any `AS` alias). Both count exactly the matched node set.
+    fn is_plain_count(item: &ReturnItem, node_var: Option<&str>) -> bool {
+        match item {
+            ReturnItem::Alias(inner, _) => Self::is_plain_count(inner, node_var),
+            ReturnItem::Aggregate(AggregateFunction::Count(inner)) => match inner {
+                None => true, // count(*)
+                Some(boxed) => match boxed.as_ref() {
+                    ReturnItem::Variable(v) => node_var == Some(v.as_str()),
+                    _ => false,
+                },
+            },
+            _ => false,
+        }
     }
 
     fn execute_call_subquery(
@@ -5728,6 +5804,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rs.rows.len(), 1);
+    }
+
+    fn count_of(rs: &ResultSet) -> i64 {
+        match &rs.rows[0].columns[0] {
+            Value::Int(n) => *n,
+            other => panic!("expected Int count, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_count_shortcut_and_filtered_counts() {
+        let mut graph = Graph::new();
+        seed_cities(&mut graph); // 4 Person (3 with city: 2 Tokyo/1 Osaka, 1 without)
+
+        // Short-circuit path: count over label = all Person.
+        assert_eq!(
+            count_of(&execute(&mut graph, "MATCH (n:Person) RETURN count(*)").unwrap()),
+            4
+        );
+        assert_eq!(
+            count_of(&execute(&mut graph, "MATCH (n:Person) RETURN count(n)").unwrap()),
+            4
+        );
+        // No label → all nodes.
+        assert_eq!(
+            count_of(&execute(&mut graph, "MATCH (n) RETURN count(*)").unwrap()),
+            4
+        );
+        // AS alias still short-circuits.
+        assert_eq!(
+            count_of(&execute(&mut graph, "MATCH (n:Person) RETURN count(*) AS c").unwrap()),
+            4
+        );
+
+        // WHERE must still filter (shortcut must NOT fire): only Tokyo = 2.
+        assert_eq!(
+            count_of(
+                &execute(
+                    &mut graph,
+                    "MATCH (n:Person) WHERE n.city = 'Tokyo' RETURN count(*)"
+                )
+                .unwrap()
+            ),
+            2
+        );
+        // Inline property must still filter: Osaka = 1.
+        assert_eq!(
+            count_of(
+                &execute(&mut graph, "MATCH (n:Person {city: 'Osaka'}) RETURN count(*)").unwrap()
+            ),
+            1
+        );
     }
 
     #[test]
