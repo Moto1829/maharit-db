@@ -44,6 +44,13 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev[n]
 }
 
+/// `range()` が一度に生成できる最大要素数。
+///
+/// 上限がないと `range(0, i64::MAX)` のようなクエリでメモリを枯渇させたり、
+/// 加算のオーバーフローで無限ループに陥らせる DoS が可能になるため、
+/// リスト確保前にこの値を超える範囲を拒否する。
+const MAX_RANGE_LEN: usize = 10_000_000;
+
 /// 実行エラー
 #[derive(Debug, Clone, Error, PartialEq)]
 pub enum ExecuteError {
@@ -4376,17 +4383,45 @@ impl<'a> Executor<'a> {
                                 "range() step cannot be zero".to_string(),
                             ));
                         }
-                        let mut result = Vec::new();
+                        // Compute the element count up-front in i128 (so the
+                        // subtraction cannot overflow i64) and reject ranges
+                        // that would exhaust memory before allocating.
+                        let count: i128 = if step > 0 {
+                            if end < start {
+                                0
+                            } else {
+                                (end as i128 - start as i128) / step as i128 + 1
+                            }
+                        } else if end > start {
+                            0
+                        } else {
+                            (start as i128 - end as i128) / (-(step as i128)) + 1
+                        };
+                        if count > MAX_RANGE_LEN as i128 {
+                            return Err(ExecuteError::TypeError(format!(
+                                "range() would produce {} elements, exceeding the limit of {}",
+                                count, MAX_RANGE_LEN
+                            )));
+                        }
+                        let mut result = Vec::with_capacity(count as usize);
                         let mut i = start;
+                        // `checked_add` guards against i64 overflow near the
+                        // bounds, which would otherwise wrap and loop forever.
                         if step > 0 {
                             while i <= end {
                                 result.push(Value::Int(i));
-                                i += step;
+                                match i.checked_add(step) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
                             }
                         } else {
                             while i >= end {
                                 result.push(Value::Int(i));
-                                i += step;
+                                match i.checked_add(step) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
                             }
                         }
                         Ok(Value::List(result))
@@ -10136,6 +10171,51 @@ mod tests {
                 Value::Int(9)
             ])
         );
+    }
+
+    #[test]
+    fn test_range_rejects_oversized_allocation() {
+        // A range spanning the whole i64 domain must be rejected before
+        // attempting to allocate ~9e18 elements (memory-exhaustion DoS).
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let err = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN range(0, 9000000000000000000)",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ExecuteError::TypeError(ref m) if m.contains("exceeding the limit")),
+            "expected range limit error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_range_no_overflow_infinite_loop() {
+        // Stepping past i64::MAX must terminate instead of wrapping around and
+        // looping forever (CPU/memory-exhaustion DoS). The element count here
+        // is tiny, so it is well under MAX_RANGE_LEN and must succeed.
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN range(9223372036854775806, 9223372036854775807, 2)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns[0],
+            Value::List(vec![Value::Int(9223372036854775806)])
+        );
+    }
+
+    #[test]
+    fn test_range_at_limit_boundary() {
+        // A descending range must also be bounded correctly.
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (n:T)").unwrap();
+        let err = execute(&mut graph, "MATCH (n:T) RETURN range(9000000000000000000, 0, -1)")
+            .unwrap_err();
+        assert!(matches!(err, ExecuteError::TypeError(_)));
     }
 
     #[test]
