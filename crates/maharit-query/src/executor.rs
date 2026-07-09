@@ -341,6 +341,11 @@ pub struct Executor<'a> {
     fulltext: FulltextManager,
     property_index: PropertyIndex,
     params: HashMap<String, Value>,
+    /// 現在処理中セグメントの WHERE から抽出した範囲述語のヒント
+    /// `(変数名, プロパティ名, 演算子, 比較値)`。索引がある数値プロパティの
+    /// スキャン候補を範囲索引で絞るために使う。正当性は WHERE の retain が保証し、
+    /// ここでは候補のスーパーセットを得るだけなので誤りは生じない。
+    range_hints: Vec<(String, String, BinaryOp, PropertyValue)>,
 }
 
 // SAFETY: The raw `*mut Graph` pointer inside `Executor` is derived from a
@@ -362,6 +367,7 @@ impl<'a> Executor<'a> {
             fulltext: FulltextManager::new(),
             property_index: PropertyIndex::new(),
             params: HashMap::new(),
+            range_hints: Vec::new(),
         }
     }
 
@@ -396,6 +402,7 @@ impl<'a> Executor<'a> {
             fulltext: FulltextManager::new(),
             property_index: PropertyIndex::new(),
             params: HashMap::new(),
+            range_hints: Vec::new(),
         }
     }
 
@@ -421,6 +428,7 @@ impl<'a> Executor<'a> {
             fulltext: FulltextManager::new(),
             property_index: PropertyIndex::new(),
             params: HashMap::new(),
+            range_hints: Vec::new(),
         }
     }
 
@@ -445,6 +453,7 @@ impl<'a> Executor<'a> {
             fulltext,
             property_index,
             params: HashMap::new(),
+            range_hints: Vec::new(),
         }
     }
 
@@ -564,6 +573,34 @@ impl<'a> Executor<'a> {
     /// プロパティインデックスへの可変参照を取得
     pub fn property_index_mut(&mut self) -> &mut PropertyIndex {
         &mut self.property_index
+    }
+
+    /// SET/REMOVE で単一プロパティが変化した際に、共有プロパティ索引を追随させる。
+    ///
+    /// `(プライマリラベル, property)` に索引がある場合のみ旧値を除去し新値を登録する。
+    /// これがないと、永続化された索引が SET 後に陳腐化し、索引ベースの候補絞り込みが
+    /// 偽陰性（本来一致するノードを取りこぼす）を起こして誤結果になる。
+    fn reindex_node_property(
+        &mut self,
+        node_id: NodeId,
+        property: &str,
+        old: Option<PropertyValue>,
+        new: Option<&PropertyValue>,
+    ) {
+        // 索引定義は (label, property) 単位。プライマリラベルで判定する。
+        let label = match self.graph_ref().get_node(node_id) {
+            Some(n) => n.primary_label().to_string(),
+            None => return,
+        };
+        if !self.property_index.has_index(&label, property) {
+            return;
+        }
+        if let Some(o) = old {
+            self.property_index.unindex_property(node_id, property, &o);
+        }
+        if let Some(n) = new {
+            self.property_index.index_property(node_id, property, n);
+        }
     }
 
     /// 文を実行
@@ -864,6 +901,7 @@ impl<'a> Executor<'a> {
             if d.delete_clause.detach {
                 // delete_node already handles related edges
                 if self.graph_mut().delete_node(node_id).is_some() {
+                    self.property_index.remove_node(node_id);
                     deleted_nodes += 1;
                 }
             } else {
@@ -877,6 +915,7 @@ impl<'a> Executor<'a> {
                 }
 
                 if self.graph_mut().delete_node(node_id).is_some() {
+                    self.property_index.remove_node(node_id);
                     deleted_nodes += 1;
                 }
             }
@@ -1093,7 +1132,18 @@ impl<'a> Executor<'a> {
                                         &prop_value,
                                     )?;
                                 }
-                                self.graph_mut().set_node_property(*node_id, property, prop_value);
+                                let old = self.graph_ref().get_node_property(*node_id, property);
+                                self.graph_mut().set_node_property(
+                                    *node_id,
+                                    property,
+                                    prop_value.clone(),
+                                );
+                                self.reindex_node_property(
+                                    *node_id,
+                                    property,
+                                    old,
+                                    Some(&prop_value),
+                                );
                             }
                             BindingValue::Edge(edge_id) => {
                                 self.graph_mut().set_edge_property(*edge_id, property, prop_value);
@@ -1131,7 +1181,13 @@ impl<'a> Executor<'a> {
                                     }
                                 }
                                 for (key, prop_val) in evaluated {
-                                    self.graph_mut().set_node_property(*node_id, &key, prop_val);
+                                    let old = self.graph_ref().get_node_property(*node_id, &key);
+                                    self.graph_mut().set_node_property(
+                                        *node_id,
+                                        &key,
+                                        prop_val.clone(),
+                                    );
+                                    self.reindex_node_property(*node_id, &key, old, Some(&prop_val));
                                 }
                             }
                             BindingValue::Edge(edge_id) => {
@@ -1347,7 +1403,11 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph_ref().get_node(*node_id) {
                                     self.constraints.validate_property_remove(&node, prop)?;
                                 }
-                                self.graph_mut().remove_node_property(*node_id, prop);
+                                let removed =
+                                    self.graph_mut().remove_node_property(*node_id, prop);
+                                if let Some(old) = removed {
+                                    self.reindex_node_property(*node_id, prop, Some(old), None);
+                                }
                             }
                             BindingValue::Edge(edge_id) => {
                                 self.graph_mut().remove_edge_property(*edge_id, prop);
@@ -1544,7 +1604,10 @@ impl<'a> Executor<'a> {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
                                 self.constraints.validate_property_remove(&node, prop)?;
                             }
-                            self.graph_mut().remove_node_property(*node_id, prop);
+                            let removed = self.graph_mut().remove_node_property(*node_id, prop);
+                            if let Some(old) = removed {
+                                self.reindex_node_property(*node_id, prop, Some(old), None);
+                            }
                         }
                         BindingValue::Edge(edge_id) => {
                             self.graph_mut().remove_edge_property(*edge_id, prop);
@@ -2246,7 +2309,7 @@ impl<'a> Executor<'a> {
     }
 
     fn execute_query_segment(
-        &self,
+        &mut self,
         segment: &QuerySegment,
         mut bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
@@ -2260,6 +2323,18 @@ impl<'a> Executor<'a> {
             Some(w) => {
                 let mut v = Vec::new();
                 Self::collect_pushable_equalities(w, &mut v);
+                v
+            }
+            None => Vec::new(),
+        };
+
+        // Range pushdown: collect `var.prop <op> <numeric>` predicates and stash
+        // them so `match_node_pattern` can narrow candidates via the range index
+        // (only an optimization; the WHERE retain below guarantees correctness).
+        self.range_hints = match &segment.where_clause {
+            Some(w) => {
+                let mut v = Vec::new();
+                Self::collect_range_predicates(w, &mut v);
                 v
             }
             None => Vec::new(),
@@ -2279,6 +2354,10 @@ impl<'a> Executor<'a> {
                 bindings = self.execute_match_clause(&augmented, bindings)?;
             }
         }
+
+        // Confine range hints to this segment's node scan so they cannot affect
+        // later WHERE-clause pattern predicates, WITH, or subquery evaluation.
+        self.range_hints.clear();
 
         // Apply WHERE filter
         if let Some(where_expr) = &segment.where_clause {
@@ -2325,6 +2404,58 @@ impl<'a> Executor<'a> {
                 }
                 _ => {}
             },
+            _ => {}
+        }
+    }
+
+    /// WHERE 式からトップレベル AND で連結された数値の範囲述語
+    /// `var.prop <op> <numeric literal>` を収集する（op ∈ Lt/Gt/Lte/Gte）。
+    /// プロパティが左右どちらの辺でも、演算子を向きに合わせて正規化する。
+    /// 収集結果は範囲索引での候補絞り込みに使う（正当性は WHERE retain が保証）。
+    fn collect_range_predicates(
+        expr: &Expression,
+        out: &mut Vec<(String, String, BinaryOp, PropertyValue)>,
+    ) {
+        // リテラルを数値の PropertyValue に変換（それ以外は None）。
+        fn numeric(expr: &Expression) -> Option<PropertyValue> {
+            match expr {
+                Expression::Literal(Literal::Int(n)) => Some(PropertyValue::Int(*n)),
+                Expression::Literal(Literal::Float(f)) => Some(PropertyValue::Float(*f)),
+                _ => None,
+            }
+        }
+        // プロパティが右辺にある場合に演算子を反転する（`40 < n.age` → `n.age > 40`）。
+        fn flip(op: BinaryOp) -> BinaryOp {
+            match op {
+                BinaryOp::Lt => BinaryOp::Gt,
+                BinaryOp::Gt => BinaryOp::Lt,
+                BinaryOp::Lte => BinaryOp::Gte,
+                BinaryOp::Gte => BinaryOp::Lte,
+                other => other,
+            }
+        }
+        match expr {
+            Expression::BinaryOp(l, BinaryOp::And, r) => {
+                Self::collect_range_predicates(l, out);
+                Self::collect_range_predicates(r, out);
+            }
+            Expression::BinaryOp(l, op, r)
+                if matches!(op, BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte) =>
+            {
+                match (l.as_ref(), r.as_ref()) {
+                    (Expression::Property(v, p), rhs) => {
+                        if let Some(val) = numeric(rhs) {
+                            out.push((v.clone(), p.clone(), *op, val));
+                        }
+                    }
+                    (lhs, Expression::Property(v, p)) => {
+                        if let Some(val) = numeric(lhs) {
+                            out.push((v.clone(), p.clone(), flip(*op), val));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -2684,6 +2815,72 @@ impl<'a> Executor<'a> {
         Ok(matches)
     }
 
+    /// スキャン候補を範囲索引で絞り込む（該当する範囲ヒントと索引がある場合）。
+    ///
+    /// 戻り値は「WHERE を満たすノードを必ず含むスーパーセット」。最終的な正当性は
+    /// `node_matches_pattern` と WHERE の retain が保証するため、多少広くても問題ない。
+    /// int/float の両範囲索引を union するので、プロパティの数値型が混在していても
+    /// 取りこぼさない。
+    fn range_index_candidates(&self, pattern: &NodePattern) -> Option<Vec<NodeId>> {
+        // 数値 f を i64 に安全に丸める（範囲外はクランプ）。
+        fn floor_i64(f: f64) -> i64 {
+            if f >= i64::MAX as f64 {
+                i64::MAX
+            } else if f <= i64::MIN as f64 {
+                i64::MIN
+            } else {
+                f.floor() as i64
+            }
+        }
+        fn ceil_i64(f: f64) -> i64 {
+            if f >= i64::MAX as f64 {
+                i64::MAX
+            } else if f <= i64::MIN as f64 {
+                i64::MIN
+            } else {
+                f.ceil() as i64
+            }
+        }
+
+        let var = pattern.variable.as_deref()?;
+        let label = pattern.labels.first()?;
+
+        for (v, prop, op, val) in &self.range_hints {
+            if v != var || !self.property_index.has_index(label, prop) {
+                continue;
+            }
+            let f = match val {
+                PropertyValue::Int(n) => *n as f64,
+                PropertyValue::Float(x) => *x,
+                _ => continue,
+            };
+            let lower_open = matches!(op, BinaryOp::Gt | BinaryOp::Gte);
+            let upper_open = matches!(op, BinaryOp::Lt | BinaryOp::Lte);
+
+            let mut ids: Vec<NodeId> = Vec::new();
+            if lower_open {
+                ids.extend(
+                    self.property_index
+                        .find_by_int_range(prop, floor_i64(f), i64::MAX),
+                );
+                ids.extend(self.property_index.find_by_float_range(prop, f, f64::MAX));
+            } else if upper_open {
+                ids.extend(
+                    self.property_index
+                        .find_by_int_range(prop, i64::MIN, ceil_i64(f)),
+                );
+                ids.extend(self.property_index.find_by_float_range(prop, f64::MIN, f));
+            } else {
+                continue;
+            }
+
+            ids.sort_unstable();
+            ids.dedup();
+            return Some(ids);
+        }
+        None
+    }
+
     fn match_node_pattern(
         &self,
         pattern: &NodePattern,
@@ -2692,14 +2889,24 @@ impl<'a> Executor<'a> {
         let mut result = Vec::new();
 
         // Candidate node set for the scan path, computed once and reused across
-        // input bindings. When the pattern specifies a label, enumerate only
-        // nodes carrying that label via the label index instead of scanning
-        // every node in the graph. `node_matches_pattern` still verifies any
-        // additional labels and properties.
-        let all_node_ids: Vec<NodeId> = match pattern.labels.first() {
-            Some(label) => self.graph_ref().nodes_by_label(label),
-            None => self.graph_ref().node_ids(),
-        };
+        // input bindings.
+        //
+        // Priority:
+        // 1. A WHERE range predicate on an indexed numeric property → use the
+        //    range index for a candidate superset (narrows the scan a lot).
+        // 2. Otherwise, if the pattern has a label → enumerate only that label's
+        //    nodes via the label index.
+        // 3. Otherwise → all node ids.
+        //
+        // `node_matches_pattern` re-verifies labels/properties and the WHERE
+        // retain re-checks the exact predicate, so a candidate *superset* is
+        // always safe.
+        let all_node_ids: Vec<NodeId> = self
+            .range_index_candidates(pattern)
+            .unwrap_or_else(|| match pattern.labels.first() {
+                Some(label) => self.graph_ref().nodes_by_label(label),
+                None => self.graph_ref().node_ids(),
+            });
 
         for bindings in current_bindings {
             // Check if variable is already bound
@@ -5839,6 +6046,70 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rs.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_property_index_updated_on_set_and_delete() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+
+        execute_with(&mut executor, "CREATE (:P {age: 10})").unwrap();
+        execute_with(&mut executor, "CREATE INDEX ON :P(age)").unwrap();
+
+        // Index-backed lookup finds the node at its original value.
+        let rs = execute_with(&mut executor, "MATCH (n:P {age: 10}) RETURN n").unwrap();
+        assert_eq!(rs.rows.len(), 1);
+
+        // SET must update the index so the new value is found and the old is not.
+        execute_with(&mut executor, "MATCH (n:P {age: 10}) SET n.age = 20").unwrap();
+        let rs = execute_with(&mut executor, "MATCH (n:P {age: 20}) RETURN n").unwrap();
+        assert_eq!(
+            rs.rows.len(),
+            1,
+            "index not updated on SET (index-backed lookup missed the node)"
+        );
+        let rs = execute_with(&mut executor, "MATCH (n:P {age: 10}) RETURN n").unwrap();
+        assert_eq!(rs.rows.len(), 0);
+
+        // DELETE must remove the node from the index (no stale hit).
+        execute_with(&mut executor, "MATCH (n:P {age: 20}) DELETE n").unwrap();
+        let rs = execute_with(&mut executor, "MATCH (n:P {age: 20}) RETURN n").unwrap();
+        assert_eq!(rs.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_range_pushdown_with_index() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        for age in [10, 20, 30, 40, 50] {
+            execute_with(&mut executor, &format!("CREATE (:P {{age: {}}})", age)).unwrap();
+        }
+        execute_with(&mut executor, "CREATE INDEX ON :P(age)").unwrap();
+
+        let n = |ex: &mut Executor<'_>, q: &str| execute_with(ex, q).unwrap().rows.len();
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age > 30 RETURN n"), 2); // 40,50
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age >= 30 RETURN n"), 3); // 30,40,50
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age < 30 RETURN n"), 2); // 10,20
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age <= 20 RETURN n"), 2); // 10,20
+        // Literal on the left (operator must be flipped).
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE 30 < n.age RETURN n"), 2); // 40,50
+
+        // After SET the index must stay correct (maintenance + range pushdown).
+        execute_with(&mut executor, "MATCH (n:P) WHERE n.age = 10 SET n.age = 100").unwrap();
+        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age > 60 RETURN n"), 1); // only 100
+    }
+
+    #[test]
+    fn test_range_pushdown_mixed_int_float() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        execute_with(&mut executor, "CREATE INDEX ON :M(v)").unwrap();
+        execute_with(&mut executor, "CREATE (:M {v: 10})").unwrap();
+        execute_with(&mut executor, "CREATE (:M {v: 25.5})").unwrap();
+        execute_with(&mut executor, "CREATE (:M {v: 40})").unwrap();
+        // v > 20 must include the float 25.5 (int/float range indexes are unioned).
+        let rs = execute_with(&mut executor, "MATCH (n:M) WHERE n.v > 20 RETURN n").unwrap();
+        assert_eq!(rs.rows.len(), 2); // 25.5, 40
     }
 
     fn count_of(rs: &ResultSet) -> i64 {
