@@ -33,5 +33,22 @@
 - replication_test / failover_test は 3 ノードクラスター起動（`start_replication_local.sh`）が
   必要なため未実行。
 
+## 対応（完了）
+1. **パーサー拡張**（`parser.rs`）: `parse_create_user` / `parse_alter_user` が
+   `ROLE` の前の `SET` を省略可、ロール値を識別子・文字列リテラル両対応に
+   （`parse_role_value` を追加）。既存の `ROLE <ident>` 構文も引き続き受理。
+2. **サーバー配線**（`tcp_server.rs`）: `try_handle_user_management` を追加し、
+   CREATE/DROP/ALTER USER・SHOW USERS を Executor スタブではなくサーバーの
+   `AuthManager` にルーティング。
+   - ロール文字列 `reader`/`writer`/`admin`（+ `read_only`/`read_write`）を Role にマップ。
+   - DROP/ALTER の存在しないユーザーは `AuthError` 由来のエラーを返す。
+   - SHOW USERS は username/role/active を行として返す。
+   - 認証有効時は admin（ManageUsers）権限を要求。
+3. テスト: `integration_user_management_over_tcp`（CREATE→SHOW→DROP→存在チェック）。
+
+## 検証
+- `python3 scripts/auth_test.py --port <new server>`: **15/15 通過（2 skip）**。
+  skip の 2 件は認証有効サーバー限定の RBAC 書き込みテスト（認証無効時は正しくスキップ）。
+
 ## ステータス
-未対応（原因切り分け済み・既存問題として記録）
+完了

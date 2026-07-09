@@ -1982,6 +1982,14 @@ impl Parser {
     // ========== User Management ==========
 
     /// CREATE USER username SET PASSWORD 'pass' ROLE role
+    /// ロール値を識別子（`reader`）または文字列リテラル（`'reader'`）として受理する。
+    fn parse_role_value(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::String(_)) => self.expect_string(),
+            _ => self.expect_ident(),
+        }
+    }
+
     fn parse_create_user(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Create)?;
         self.expect(TokenKind::User)?;
@@ -1989,8 +1997,12 @@ impl Parser {
         self.expect(TokenKind::Set)?;
         self.expect(TokenKind::Password)?;
         let password = self.expect_string()?;
+        // ROLE の前の `SET` は省略可（`SET ROLE 'x'` と `ROLE x` の両方を受理）。
+        if self.check(TokenKind::Set) {
+            self.advance();
+        }
         self.expect(TokenKind::Role)?;
-        let role = self.expect_ident()?;
+        let role = self.parse_role_value()?;
 
         Ok(Statement::CreateUser(CreateUserStatement {
             username,
@@ -2018,19 +2030,22 @@ impl Parser {
         let mut password = None;
         let mut role = None;
 
-        // Parse SET PASSWORD and/or SET ROLE
+        // Parse SET PASSWORD and/or [SET] ROLE
         if self.check(TokenKind::Password) {
             self.advance();
             password = Some(self.expect_string()?);
 
-            // Check for additional SET ROLE
+            // Check for additional [SET] ROLE
+            if self.check(TokenKind::Set) {
+                self.advance();
+            }
             if self.check(TokenKind::Role) {
                 self.advance();
-                role = Some(self.expect_ident()?);
+                role = Some(self.parse_role_value()?);
             }
         } else if self.check(TokenKind::Role) {
             self.advance();
-            role = Some(self.expect_ident()?);
+            role = Some(self.parse_role_value()?);
         } else {
             return Err(self.unexpected_token("PASSWORD or ROLE"));
         }

@@ -135,6 +135,136 @@ fn authorize_query(role: crate::auth::Role, query: &str) -> Option<Response> {
     }
 }
 
+/// ロール文字列を [`crate::auth::Role`] に対応付ける。
+/// `reader`/`read_only`、`writer`/`read_write`、`admin` を受理（大文字小文字無視）。
+fn parse_role_str(s: &str) -> Option<crate::auth::Role> {
+    match s.to_ascii_lowercase().as_str() {
+        "reader" | "read_only" | "readonly" => Some(crate::auth::Role::ReadOnly),
+        "writer" | "read_write" | "readwrite" => Some(crate::auth::Role::ReadWrite),
+        "admin" => Some(crate::auth::Role::Admin),
+        _ => None,
+    }
+}
+
+/// 単一メッセージの `result` レスポンスを作る。
+fn result_message(msg: String) -> Response {
+    let mut row = HashMap::new();
+    row.insert("result".to_string(), serde_json::Value::String(msg));
+    Response::Result { rows: vec![row] }
+}
+
+/// ユーザー管理文（CREATE/DROP/ALTER USER, SHOW USERS）をサーバーの
+/// [`AuthManager`] に配線する。対象文なら `Some(Response)` を返し、そうでなければ
+/// `None`（呼び出し側は通常のクエリ実行にフォールバック）。
+///
+/// クエリ実行エンジンはこれらを stub（実際には何もしない）として扱うため、
+/// ここでサーバーの認証状態に対して実処理する。認証有効時は admin（ManageUsers）
+/// 権限を要求する。
+fn try_handle_user_management(
+    query: &str,
+    auth: &Arc<Mutex<crate::auth::AuthManager>>,
+    ast_cache: &Arc<Mutex<AstCache>>,
+    role: crate::auth::Role,
+    require_auth: bool,
+) -> Option<Response> {
+    use maharit_query::ast::Statement;
+
+    let stmt = ast_cache.lock().unwrap().get_or_parse(query).ok()?;
+    let is_user_mgmt = matches!(
+        stmt,
+        Statement::CreateUser(_)
+            | Statement::DropUser(_)
+            | Statement::AlterUser(_)
+            | Statement::ShowUsers
+    );
+    if !is_user_mgmt {
+        return None;
+    }
+
+    // RBAC: 認証有効時はユーザー管理を admin (ManageUsers) に限定する。
+    if require_auth
+        && crate::auth::AuthManager::check_role_permission(
+            role,
+            crate::auth::Operation::ManageUsers,
+        )
+        .is_err()
+    {
+        return Some(Response::AuthError {
+            message: "permission denied: user management requires admin role".to_string(),
+        });
+    }
+
+    let mut mgr = auth.lock().unwrap();
+    let resp = match stmt {
+        Statement::CreateUser(cu) => match parse_role_str(&cu.role) {
+            Some(r) => match mgr.create_user(&cu.username, &cu.password, r) {
+                Ok(()) => result_message(format!(
+                    "User '{}' created with role '{}'",
+                    cu.username, cu.role
+                )),
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            },
+            None => Response::Error {
+                message: format!("unknown role: '{}'", cu.role),
+            },
+        },
+        Statement::DropUser(du) => match mgr.drop_user(&du.username) {
+            Ok(()) => result_message(format!("User '{}' dropped", du.username)),
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Statement::AlterUser(au) => {
+            let mut result: Result<(), crate::auth::AuthError> = Ok(());
+            if let Some(pw) = &au.password {
+                result = mgr.alter_user_password(&au.username, pw);
+            }
+            if result.is_ok()
+                && let Some(rl) = &au.role
+            {
+                match parse_role_str(rl) {
+                    Some(r) => result = mgr.alter_user_role(&au.username, r),
+                    None => {
+                        return Some(Response::Error {
+                            message: format!("unknown role: '{}'", rl),
+                        });
+                    }
+                }
+            }
+            match result {
+                Ok(()) => result_message(format!("User '{}' altered", au.username)),
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Statement::ShowUsers => {
+            let rows: Vec<HashMap<String, serde_json::Value>> = mgr
+                .list_users()
+                .iter()
+                .map(|u| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "username".to_string(),
+                        serde_json::Value::String(u.username.clone()),
+                    );
+                    m.insert(
+                        "role".to_string(),
+                        serde_json::Value::String(role_label(&u.role)),
+                    );
+                    m.insert("active".to_string(), serde_json::Value::Bool(u.active));
+                    m
+                })
+                .collect();
+            Response::Result { rows }
+        }
+        _ => unreachable!("filtered to user-management statements above"),
+    };
+    Some(resp)
+}
+
 /// Request message from client
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -652,7 +782,15 @@ async fn handle_connection(
             } => match check_session(config.require_auth, &auth, &session_token) {
                 Err(resp) => resp,
                 Ok(role) => {
-                    if let Some(resp) = authorize_query(role, &query) {
+                    if let Some(resp) = try_handle_user_management(
+                        &query,
+                        &auth,
+                        &ast_cache,
+                        role,
+                        config.require_auth,
+                    ) {
+                        resp
+                    } else if let Some(resp) = authorize_query(role, &query) {
                         resp
                     } else {
                         stats.total_queries.fetch_add(1, Ordering::SeqCst);
@@ -1817,6 +1955,57 @@ mod tests {
 
         let resp = send_recv(&mut stream, &Request::Ping).await;
         assert!(matches!(resp, Response::Pong), "expected Pong, got {:?}", resp);
+    }
+
+    #[tokio::test]
+    async fn integration_user_management_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let q = |s: &str| Request::Query {
+            query: s.to_string(),
+            tx_id: None,
+            session_token: None,
+        };
+
+        // CREATE USER (test's `SET PASSWORD .. SET ROLE '..'` grammar).
+        let resp = send_recv(
+            &mut stream,
+            &q("CREATE USER alice SET PASSWORD 'pw1' SET ROLE 'reader'"),
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "CREATE USER failed: {:?}",
+            resp
+        );
+
+        // SHOW USERS must list admin + alice (no longer a placeholder).
+        let resp = send_recv(&mut stream, &q("SHOW USERS")).await;
+        let rows = match resp {
+            Response::Result { rows } => rows,
+            other => panic!("expected Result, got {:?}", other),
+        };
+        let joined = format!("{:?}", rows);
+        assert!(joined.contains("alice"), "SHOW USERS missing alice: {}", joined);
+        assert!(joined.contains("admin"), "SHOW USERS missing admin: {}", joined);
+
+        // DROP USER of a nonexistent user must error (not silently succeed).
+        let resp = send_recv(&mut stream, &q("DROP USER nobody")).await;
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "DROP USER nonexistent should error, got {:?}",
+            resp
+        );
+
+        // DROP the real user, then it is gone.
+        let _ = send_recv(&mut stream, &q("DROP USER alice")).await;
+        let resp = send_recv(&mut stream, &q("SHOW USERS")).await;
+        if let Response::Result { rows } = resp {
+            assert!(!format!("{:?}", rows).contains("alice"));
+        } else {
+            panic!("expected Result");
+        }
     }
 
     #[tokio::test]
