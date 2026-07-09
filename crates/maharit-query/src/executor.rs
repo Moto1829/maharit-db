@@ -2331,13 +2331,17 @@ impl<'a> Executor<'a> {
         // Range pushdown: collect `var.prop <op> <numeric>` predicates and stash
         // them so `match_node_pattern` can narrow candidates via the range index
         // (only an optimization; the WHERE retain below guarantees correctness).
+        //
+        // Skip entirely when no property index is defined: range narrowing needs
+        // an index to fire, so without one this collection is pure overhead on
+        // every WHERE query.
         self.range_hints = match &segment.where_clause {
-            Some(w) => {
+            Some(w) if self.property_index.has_any_index() => {
                 let mut v = Vec::new();
                 Self::collect_range_predicates(w, &mut v);
                 v
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         };
 
         // Execute MATCH clauses (augmented with pushed-down predicates where safe).

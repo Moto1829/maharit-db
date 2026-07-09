@@ -129,6 +129,12 @@ impl PropertyIndex {
         self.definitions.contains_key(&key)
     }
 
+    /// Return `true` if any index definition exists. Cheap O(1) check used to
+    /// skip index-dependent query planning work when no indexes are defined.
+    pub fn has_any_index(&self) -> bool {
+        !self.definitions.is_empty()
+    }
+
     // ========== Index Operations ==========
 
     /// Add a property value to the index
