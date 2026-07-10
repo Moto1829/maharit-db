@@ -1,108 +1,126 @@
 {
-  "timestamp": "2026-04-06T14:00:47Z",
+  "timestamp": "2026-07-09T22:22:49Z",
   "node_count": 1000,
   "host": "localhost",
   "port": 7687,
   "environment": {
     "build_type": "docker_release",
-    "docker_image_id": "sha256:0467432e079d1cd1f2e434566d7023bcb749c830ee899e5b601be8d18dbb7ca1"
+    "docker_image_id": "sha256:eba13fc4f605884781c6f4c7a7c3dd948be44497d9bf623d74a9e4545148a159"
   },
   "results": {
     "CREATE Person nodes": {
-      "ops_per_sec": 116.95,
-      "latency_ms": 8.5507,
+      "ops_per_sec": 142.43,
+      "latency_ms": 7.021,
       "count": 1000,
-      "elapsed_s": 8.5507
+      "elapsed_s": 7.021
     },
     "UNWIND batch CREATE (map list)": {
-      "ops_per_sec": 13626.86,
-      "latency_ms": 0.0734,
+      "ops_per_sec": 12116.59,
+      "latency_ms": 0.0825,
       "count": 1000,
-      "elapsed_s": 0.0734
+      "elapsed_s": 0.0825
     },
     "CREATE KNOWS edges": {
-      "ops_per_sec": 55.75,
-      "latency_ms": 17.9376,
+      "ops_per_sec": 58.51,
+      "latency_ms": 17.0899,
       "count": 300,
-      "elapsed_s": 5.3813
+      "elapsed_s": 5.127
     },
     "MATCH full scan (BenchPerson)": {
-      "ops_per_sec": 422520.24,
-      "latency_ms": 0.0024,
+      "ops_per_sec": 472496.67,
+      "latency_ms": 0.0021,
       "count": 1000,
-      "elapsed_s": 0.0024
+      "elapsed_s": 0.0021
     },
     "MATCH WHERE age > 40": {
-      "ops_per_sec": 405181.11,
-      "latency_ms": 0.0025,
+      "ops_per_sec": 311409.42,
+      "latency_ms": 0.0032,
       "count": 580,
-      "elapsed_s": 0.0014
+      "elapsed_s": 0.0019
     },
     "MATCH WHERE city = 'Tokyo'": {
-      "ops_per_sec": 102942.41,
-      "latency_ms": 0.0097,
+      "ops_per_sec": 103788.27,
+      "latency_ms": 0.0096,
       "count": 100,
       "elapsed_s": 0.001
     },
     "MATCH WHERE skill = 'Rust'": {
-      "ops_per_sec": 101807.07,
-      "latency_ms": 0.0098,
+      "ops_per_sec": 97791.58,
+      "latency_ms": 0.0102,
       "count": 100,
       "elapsed_s": 0.001
     },
     "MATCH WHERE id < 100": {
-      "ops_per_sec": 105513.04,
-      "latency_ms": 0.0095,
+      "ops_per_sec": 70202.13,
+      "latency_ms": 0.0142,
       "count": 100,
-      "elapsed_s": 0.0009
+      "elapsed_s": 0.0014
     },
     "AGG COUNT all": {
-      "ops_per_sec": 386.46,
-      "latency_ms": 2.5876,
+      "ops_per_sec": 1418.27,
+      "latency_ms": 0.7051,
       "count": 1,
-      "elapsed_s": 0.0026
+      "elapsed_s": 0.0007
     },
     "AGG AVG age": {
-      "ops_per_sec": 270.21,
-      "latency_ms": 3.7009,
+      "ops_per_sec": 242.75,
+      "latency_ms": 4.1194,
       "count": 1,
-      "elapsed_s": 0.0037
+      "elapsed_s": 0.0041
     },
     "AGG COUNT per city": {
-      "ops_per_sec": 2166.93,
-      "latency_ms": 0.4615,
-      "count": 10,
-      "elapsed_s": 0.0046
-    },
-    "AGG COUNT per skill": {
-      "ops_per_sec": 2098.82,
-      "latency_ms": 0.4765,
+      "ops_per_sec": 2080.44,
+      "latency_ms": 0.4807,
       "count": 10,
       "elapsed_s": 0.0048
     },
+    "AGG COUNT per skill": {
+      "ops_per_sec": 2123.61,
+      "latency_ms": 0.4709,
+      "count": 10,
+      "elapsed_s": 0.0047
+    },
     "TRAV 1-hop KNOWS": {
-      "ops_per_sec": 208816.72,
-      "latency_ms": 0.0048,
+      "ops_per_sec": 152397.06,
+      "latency_ms": 0.0066,
       "count": 300,
-      "elapsed_s": 0.0014
+      "elapsed_s": 0.002
     },
     "TRAV filter on edge": {
-      "ops_per_sec": 137315.6,
-      "latency_ms": 0.0073,
+      "ops_per_sec": 93087.69,
+      "latency_ms": 0.0107,
       "count": 168,
-      "elapsed_s": 0.0012
+      "elapsed_s": 0.0018
     },
     "STREAM MATCH (chunk=100)": {
-      "ops_per_sec": 329778.96,
-      "latency_ms": 0.003,
+      "ops_per_sec": 383349.91,
+      "latency_ms": 0.0026,
       "count": 1000,
-      "elapsed_s": 0.003
+      "elapsed_s": 0.0026
     },
     "Repeated point-lookup (id filter)": {
-      "ops_per_sec": 56.0,
-      "latency_ms": 17.8577,
+      "ops_per_sec": 65.83,
+      "latency_ms": 15.1909,
       "count": 50,
-      "elapsed_s": 0.8929
+      "elapsed_s": 0.7595
+    },
+    "SCALE label scan (Rare 50 of 50,000)": {
+      "ops_per_sec": 47105.01,
+      "latency_ms": 0.0212,
+      "count": 50,
+      "elapsed_s": 0.0011
+    },
+    "SCALE WHERE grp=7 (pushdown)": {
+      "ops_per_sec": 39776.72,
+      "latency_ms": 0.0251,
+      "count": 500,
+      "elapsed_s": 0.0126
+    },
+    "SCALE inline {grp:7} (baseline)": {
+      "ops_per_sec": 42029.46,
+      "latency_ms": 0.0238,
+      "count": 500,
+      "elapsed_s": 0.0119
     }
   }
 }
