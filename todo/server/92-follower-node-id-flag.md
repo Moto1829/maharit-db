@@ -23,5 +23,19 @@ e2e（replication_test）実施時に判明: `main.rs` の CLI には node_id �
 ## 優先度 / 規模
 - 中（運用ギャップ解消）。小規模・低リスク（CLI 配線 + スクリプト）。
 
+## 対応（完了）
+- `main.rs` に `--node-id <ID>` フラグ + 環境変数 `MAHARIT_NODE_ID` を追加。
+  解決（フラグ > env > 既定 `node-1`）した値を leader/follower の
+  `ReplicationConfig.node_id` に反映。ヘルプテキスト更新。
+- `start_replication_local.sh` で各ノードに個別 node-id を付与
+  （`leader` / `follower1` / `follower2`）。
+
+## 検証
+- ローカル 3 ノードで各ノードが一意の node_id を持つ。
+- **クラスター再起動直後の初回 replication_test で 26/26 通過**
+  （従来はフォロワー2が初回接続時に部分同期する一過性の揺れがあったが、
+   node_id 衝突解消により初回から安定して全同期）。
+- failover_test --no-docker: 18/18 通過。server テスト 240 件パス。
+
 ## ステータス
-未着手（バックログ）
+完了

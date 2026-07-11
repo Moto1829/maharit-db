@@ -65,6 +65,7 @@ echo "リーダー起動中... (port 7687, replication-bind 127.0.0.1:7688)"
     --data /tmp/maharit_leader.db \
     --replication-role leader \
     --replication-bind 127.0.0.1:7688 \
+    --node-id leader \
     > /tmp/maharit_leader.log 2>&1 &
 echo $! >> "$PIDFILE"
 
@@ -78,6 +79,7 @@ echo "フォロワー1 起動中... (port 7689)"
     --data /tmp/maharit_follower1.db \
     --replication-role follower \
     --leader-addr 127.0.0.1:7688 \
+    --node-id follower1 \
     > /tmp/maharit_follower1.log 2>&1 &
 echo $! >> "$PIDFILE"
 
@@ -88,6 +90,7 @@ echo "フォロワー2 起動中... (port 7690)"
     --data /tmp/maharit_follower2.db \
     --replication-role follower \
     --leader-addr 127.0.0.1:7688 \
+    --node-id follower2 \
     > /tmp/maharit_follower2.log 2>&1 &
 echo $! >> "$PIDFILE"
 

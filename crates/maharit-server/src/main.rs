@@ -87,6 +87,7 @@ fn run_server(args: &[String]) {
     let mut replication_role: Option<String> = None;
     let mut replication_bind: Option<String> = None;
     let mut leader_addr: Option<String> = None;
+    let mut node_id: Option<String> = None;
 
     // Persistence option
     let mut data_path: Option<String> = None;
@@ -175,6 +176,12 @@ fn run_server(args: &[String]) {
             "--leader-addr" => {
                 if i + 1 < args.len() {
                     leader_addr = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--node-id" => {
+                if i + 1 < args.len() {
+                    node_id = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -320,6 +327,14 @@ fn run_server(args: &[String]) {
         .or_else(|| std::env::var("MAHARIT_REPLICATION_SECRET").ok())
         .filter(|s| !s.is_empty());
 
+    // ノード識別子（--node-id / 環境変数）。クラスター内で一意にする。未指定なら
+    // ReplicationConfig の既定（"node-1"）にフォールバックするため、複数フォロワーを
+    // 同一ホストで起動する場合は必ず個別指定すること。
+    let node_id: String = node_id
+        .or_else(|| std::env::var("MAHARIT_NODE_ID").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ReplicationConfig::default().node_id);
+
     let graph_arc = Arc::new(graph);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
 
@@ -329,6 +344,7 @@ fn run_server(args: &[String]) {
                 .unwrap_or_else(|| "127.0.0.1:7688".to_string());
             let repl_config = ReplicationConfig {
                 role: NodeRole::Leader,
+                node_id: node_id.clone(),
                 replication_bind_address: bind,
                 leader_address: None,
                 shared_secret: replication_secret.clone(),
@@ -369,6 +385,7 @@ fn run_server(args: &[String]) {
                 .unwrap_or_else(|| "127.0.0.1:7689".to_string());
             let repl_config = ReplicationConfig {
                 role: NodeRole::Follower,
+                node_id: node_id.clone(),
                 replication_bind_address: bind,
                 leader_address: Some(la),
                 shared_secret: replication_secret.clone(),
@@ -871,6 +888,7 @@ fn print_server_help() {
     println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
     println!("    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)");
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
+    println!("    --node-id <ID>                   Unique node identifier in the replication cluster (env: MAHARIT_NODE_ID, default: node-1)");
     println!("    --shard                          Start as a shard node (normal TcpServer with shard-id logged)");
     println!("    --shard-id <ID>                  Shard identifier for this node (used with --shard)");
     println!("    --coordinator                    Start as a coordinator node (fans queries out to shards)");
