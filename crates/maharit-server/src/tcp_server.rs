@@ -22,7 +22,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use crate::replication::{FollowerReplicationManager, LeaderReplicationManager, WalEntryData};
+use crate::replication::{
+    FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
+};
 use crate::tracing_setup::TracingConfig;
 
 /// Server configuration
@@ -349,10 +351,29 @@ pub enum Request {
 pub struct ReplicationStatus {
     /// `"leader"` or `"follower"`.
     pub role: String,
+    /// This node's identifier in the cluster.
+    pub node_id: String,
+    /// Current log sequence number (applied WAL position).
+    pub current_lsn: u64,
+    /// Number of connected followers (leader only; 0 for a follower).
+    pub follower_count: usize,
     /// For a follower: whether the leader is currently reachable (heartbeats
     /// arriving). For a leader: always `true` (it is the leader).
     #[serde(rename = "is_leader_alive")]
     pub is_leader_alive: bool,
+}
+
+impl From<ReplicationStats> for ReplicationStatus {
+    fn from(s: ReplicationStats) -> Self {
+        Self {
+            // ReplicationStats uses "Leader"/"Follower"; expose lowercase on the wire.
+            role: s.role.to_lowercase(),
+            node_id: s.node_id,
+            current_lsn: s.current_lsn,
+            follower_count: s.follower_count,
+            is_leader_alive: s.is_leader_alive,
+        }
+    }
 }
 
 fn default_chunk_size() -> usize {
@@ -901,18 +922,13 @@ async fn handle_connection(
             }
             Request::Ping => Response::Pong,
             Request::Stats => {
-                // Report replication status when this node is a follower (its
-                // view of leader liveness) or a leader (always alive).
+                // Report replication status (role, node id, current LSN, follower
+                // count, leader liveness) when this node participates in
+                // replication as a follower or leader.
                 let replication_status = if let Some(f) = follower.as_ref() {
-                    Some(ReplicationStatus {
-                        role: "follower".to_string(),
-                        is_leader_alive: f.is_leader_alive(),
-                    })
-                } else if replication.is_some() {
-                    Some(ReplicationStatus {
-                        role: "leader".to_string(),
-                        is_leader_alive: true,
-                    })
+                    Some(ReplicationStatus::from(f.get_stats()))
+                } else if let Some(l) = replication.as_ref() {
+                    Some(ReplicationStatus::from(l.get_stats()))
                 } else {
                     None
                 };

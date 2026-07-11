@@ -24,5 +24,23 @@ failover 検知を可能にした。監視性をさらに高めるため、`Repl
 ## 優先度 / 規模
 - 中（監視性向上）。小〜中規模。bug/90 の自然な延長。
 
+## 対応（完了）
+- `ReplicationStatus`（stats レスポンス埋め込み）に `node_id` / `current_lsn` /
+  `follower_count` を追加。`is_leader_alive` は据え置き。
+- `From<ReplicationStats> for ReplicationStatus` を追加し、Stats ハンドラで
+  leader は `LeaderReplicationManager::get_stats()`、follower は
+  `FollowerReplicationManager::get_stats()` から変換して公開。
+- 追加フィールドは既存クライアントに無害（追加のみ）。standalone は
+  `replication` フィールド自体を省略（従来どおり）。
+- 注: 当初案の「各フォロワー遅延 LSN」は `ReplicationStats` に無く、leader の
+  followers マップ走査が必要なため今回は範囲外（follower_count/current_lsn で
+  同期状況は把握可能）。
+
+## 検証
+- ローカル 3 ノードで write 後に stats を取得:
+  - leader: `follower_count=2`, `current_lsn=6`, `node_id=leader`
+  - follower1/2: `current_lsn=6`（leader と一致＝同期済み）, `is_leader_alive=true`
+- server テスト 240 件パス。
+
 ## ステータス
-未着手（バックログ）
+完了
