@@ -31,3 +31,7 @@
 
 - `crates/maharit-query/src/executor.rs`: `ScalarFunction::Range` 実装のみ。
 - 正常系（昇順/降順/step 指定/空範囲）の挙動は不変。
+
+## ステータス
+完了（`crates/maharit-query/src/executor.rs` に `MAX_RANGE_LEN=10_000_000` +
+`checked_add` を実装。コミット `345f04f3` に混入して反映済み。テスト3件追加）。
