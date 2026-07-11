@@ -314,7 +314,10 @@ impl BindingValue {
 }
 
 /// 変数バインディング
-type Bindings = HashMap<String, BindingValue>;
+// 変数名は `Arc<str>` をキーにする。多段パターン/JOIN で bindings を複製する際、
+// キー文字列を再確保せず参照カウントのインクリメントで済む（clone が浅くなる）。
+// 変数名インターナーは持たず、insert 時に `Arc::from(var)` で確保する。
+type Bindings = HashMap<Arc<str>, BindingValue>;
 
 /// クエリエグゼキュータ
 pub struct Executor<'a> {
@@ -831,7 +834,7 @@ impl<'a> Executor<'a> {
 
         // Bind variable
         if let Some(var) = &pattern.variable {
-            bindings.insert(var.clone(), BindingValue::Node(node_id));
+            bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
         }
 
         Ok(node_id)
@@ -867,7 +870,7 @@ impl<'a> Executor<'a> {
 
         for bindings in &all_bindings {
             for var in &d.delete_clause.variables {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(id) => {
                             if !nodes_to_delete.contains(id) {
@@ -983,7 +986,7 @@ impl<'a> Executor<'a> {
                 Pattern::Node(node_pattern) => {
                     // If variable is already bound, skip creation
                     if let Some(var) = &node_pattern.variable
-                        && bindings.contains_key(var)
+                        && bindings.contains_key(var.as_str())
                     {
                         continue;
                     }
@@ -993,7 +996,7 @@ impl<'a> Executor<'a> {
                 Pattern::Path(path_pattern) => {
                     // Check if start node is already bound
                     let start_id = if let Some(var) = &path_pattern.start.variable {
-                        if let Some(bound) = bindings.get(var) {
+                        if let Some(bound) = bindings.get(var.as_str()) {
                             bound.as_node().ok_or_else(|| {
                                 ExecuteError::TypeError("expected node binding".to_string())
                             })?
@@ -1013,7 +1016,7 @@ impl<'a> Executor<'a> {
                     for segment in &path_pattern.segments {
                         // Check if end node is already bound
                         let end_id = if let Some(var) = &segment.node.variable {
-                            if let Some(bound) = bindings.get(var) {
+                            if let Some(bound) = bindings.get(var.as_str()) {
                                 bound.as_node().ok_or_else(|| {
                                     ExecuteError::TypeError("expected node binding".to_string())
                                 })?
@@ -1115,7 +1118,7 @@ impl<'a> Executor<'a> {
                 match item {
                     SetItem::Property(variable, property, value_expr) => {
                         let binding_value = bindings
-                            .get(variable)
+                            .get(variable.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
 
                         let value = self.evaluate_expression(value_expr, bindings)?;
@@ -1157,7 +1160,7 @@ impl<'a> Executor<'a> {
                     }
                     SetItem::MergeProperties(variable, props_map) => {
                         let binding_value = bindings
-                            .get(variable)
+                            .get(variable.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
 
                         // Evaluate all property expressions first
@@ -1204,7 +1207,7 @@ impl<'a> Executor<'a> {
                     }
                     SetItem::AddLabel(variable, new_label) => {
                         let binding_value = bindings
-                            .get(variable)
+                            .get(variable.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
 
                         match binding_value {
@@ -1294,7 +1297,7 @@ impl<'a> Executor<'a> {
         match pattern {
             Pattern::Node(node_pattern) => {
                 if let Some(var) = &node_pattern.variable
-                    && bindings.contains_key(var)
+                    && bindings.contains_key(var.as_str())
                 {
                     return Ok(());
                 }
@@ -1303,7 +1306,7 @@ impl<'a> Executor<'a> {
             }
             Pattern::Path(path_pattern) => {
                 let start_id = if let Some(var) = &path_pattern.start.variable {
-                    if let Some(bound) = bindings.get(var) {
+                    if let Some(bound) = bindings.get(var.as_str()) {
                         bound
                             .as_node()
                             .ok_or_else(|| ExecuteError::TypeError("expected node".to_string()))?
@@ -1318,7 +1321,7 @@ impl<'a> Executor<'a> {
 
                 for segment in &path_pattern.segments {
                     let end_id = if let Some(var) = &segment.node.variable {
-                        if let Some(bound) = bindings.get(var) {
+                        if let Some(bound) = bindings.get(var.as_str()) {
                             bound.as_node().ok_or_else(|| {
                                 ExecuteError::TypeError("expected node".to_string())
                             })?
@@ -1394,7 +1397,7 @@ impl<'a> Executor<'a> {
                 match item {
                     RemoveItem::Property(var, prop) => {
                         let binding_value = bindings
-                            .get(var)
+                            .get(var.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
 
                         match binding_value {
@@ -1421,9 +1424,9 @@ impl<'a> Executor<'a> {
                     }
                     RemoveItem::Label(var, label) => {
                         let _binding_value = bindings
-                            .get(var)
+                            .get(var.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-                        if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
+                        if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node()) {
                             self.graph_mut().remove_node_label(node_id, label);
                         }
                     }
@@ -1465,7 +1468,7 @@ impl<'a> Executor<'a> {
         let mut all_bindings: Vec<Bindings> = Vec::new();
         for item in &items {
             let mut bindings = Bindings::new();
-            bindings.insert(uw.variable.clone(), BindingValue::Scalar(item.clone()));
+            bindings.insert(Arc::from(uw.variable.as_str()), BindingValue::Scalar(item.clone()));
             all_bindings.push(bindings);
         }
 
@@ -1530,7 +1533,7 @@ impl<'a> Executor<'a> {
 
         for item in &items {
             let mut bindings = outer_bindings.clone();
-            bindings.insert(stmt.variable.clone(), BindingValue::Scalar(item.clone()));
+            bindings.insert(Arc::from(stmt.variable.as_str()), BindingValue::Scalar(item.clone()));
 
             for clause in &stmt.clauses {
                 self.execute_foreach_clause(clause, &bindings)?;
@@ -1596,7 +1599,7 @@ impl<'a> Executor<'a> {
             match item {
                 RemoveItem::Property(var, prop) => {
                     let binding_value = bindings
-                        .get(var)
+                        .get(var.as_str())
                         .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
 
                     match binding_value {
@@ -1620,7 +1623,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 RemoveItem::Label(var, label) => {
-                    if let Some(node_id) = bindings.get(var).and_then(|v| v.as_node()) {
+                    if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node()) {
                         self.graph_mut().remove_node_label(node_id, label);
                     } else {
                         return Err(ExecuteError::UndefinedVariable(var.clone()));
@@ -1640,7 +1643,7 @@ impl<'a> Executor<'a> {
         let mut edges_to_delete = Vec::new();
 
         for var in &delete.variables {
-            if let Some(binding_value) = bindings.get(var) {
+            if let Some(binding_value) = bindings.get(var.as_str()) {
                 match binding_value {
                     BindingValue::Node(id) => {
                         if !nodes_to_delete.contains(id) {
@@ -1981,11 +1984,11 @@ impl<'a> Executor<'a> {
             let mut bindings = Bindings::new();
             // Always bind "node" and "score" so RETURN items can reference them
             bindings.insert(
-                "node".to_string(),
+                Arc::from("node"),
                 BindingValue::Node(result.node_id),
             );
             bindings.insert(
-                "score".to_string(),
+                Arc::from("score"),
                 BindingValue::Scalar(Value::Float(result.score)),
             );
             all_bindings.push(bindings);
@@ -2001,7 +2004,7 @@ impl<'a> Executor<'a> {
         for bindings in &all_bindings {
             let mut row_cols = Vec::new();
             for col_name in &yield_cols {
-                let val = match bindings.get(col_name) {
+                let val = match bindings.get(col_name.as_str()) {
                     Some(BindingValue::Node(id)) => Value::Node(*id),
                     Some(BindingValue::Scalar(v)) => v.clone(),
                     Some(BindingValue::Edge(id)) => Value::Int(*id as i64),
@@ -2236,8 +2239,8 @@ impl<'a> Executor<'a> {
             let inner_start = if let Some(ref imports) = call.with_import {
                 let mut inner = Bindings::new();
                 for var in imports {
-                    if let Some(val) = outer.get(var) {
-                        inner.insert(var.clone(), val.clone());
+                    if let Some(val) = outer.get(var.as_str()) {
+                        inner.insert(Arc::from(var.as_str()), val.clone());
                     }
                 }
                 inner
@@ -2299,7 +2302,7 @@ impl<'a> Executor<'a> {
             for inner_row in &inner_result.rows {
                 let mut merged = outer.clone();
                 for (col_name, col_val) in col_names.iter().zip(inner_row.columns.iter()) {
-                    merged.insert(col_name.clone(), BindingValue::Scalar(col_val.clone()));
+                    merged.insert(Arc::from(col_name.as_str()), BindingValue::Scalar(col_val.clone()));
                 }
                 result.push(merged);
             }
@@ -2576,14 +2579,14 @@ impl<'a> Executor<'a> {
                     for (col, value) in col_names.iter().zip(row.columns.into_iter()) {
                         match value {
                             Value::Node(id) | Value::NodeData { id, .. } => {
-                                new_binding.insert(col.clone(), BindingValue::Node(id));
+                                new_binding.insert(Arc::from(col.as_str()), BindingValue::Node(id));
                             }
                             Value::Path { nodes, edges } => {
                                 new_binding
-                                    .insert(col.clone(), BindingValue::Path { nodes, edges });
+                                    .insert(Arc::from(col.as_str()), BindingValue::Path { nodes, edges });
                             }
                             other => {
-                                new_binding.insert(col.clone(), BindingValue::Scalar(other));
+                                new_binding.insert(Arc::from(col.as_str()), BindingValue::Scalar(other));
                             }
                         }
                     }
@@ -2606,14 +2609,14 @@ impl<'a> Executor<'a> {
                 // Convert Value back to BindingValue for the new binding
                 match value {
                     Value::Node(id) | Value::NodeData { id, .. } => {
-                        new_binding.insert(var_name.clone(), BindingValue::Node(id));
+                        new_binding.insert(Arc::from(var_name.as_str()), BindingValue::Node(id));
                     }
                     Value::Path { nodes, edges } => {
                         new_binding
-                            .insert(var_name.clone(), BindingValue::Path { nodes, edges });
+                            .insert(Arc::from(var_name.as_str()), BindingValue::Path { nodes, edges });
                     }
                     other => {
-                        new_binding.insert(var_name.clone(), BindingValue::Scalar(other));
+                        new_binding.insert(Arc::from(var_name.as_str()), BindingValue::Scalar(other));
                     }
                 }
             }
@@ -2915,7 +2918,7 @@ impl<'a> Executor<'a> {
         for bindings in current_bindings {
             // Check if variable is already bound
             if let Some(var) = &pattern.variable
-                && let Some(bound_value) = bindings.get(var)
+                && let Some(bound_value) = bindings.get(var.as_str())
             {
                 if let Some(bound_id) = bound_value.as_node() {
                     // Variable already bound, check if it matches
@@ -2941,7 +2944,7 @@ impl<'a> Executor<'a> {
                             if self.node_matches_pattern(node_id, pattern, &bindings)? {
                                 let mut new_bindings = bindings.clone();
                                 if let Some(var) = &pattern.variable {
-                                    new_bindings.insert(var.clone(), BindingValue::Node(node_id));
+                                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
                                 }
                                 result.push(new_bindings);
                             }
@@ -2985,7 +2988,7 @@ impl<'a> Executor<'a> {
                     };
                     let mut new_bindings = bindings.clone();
                     if let Some(var) = &pattern.variable {
-                        new_bindings.insert(var.clone(), BindingValue::Node(node_id));
+                        new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
                     }
                     result.push(new_bindings);
                 }
@@ -2995,7 +2998,7 @@ impl<'a> Executor<'a> {
                     if self.node_matches_pattern(node_id, pattern, &bindings)? {
                         let mut new_bindings = bindings.clone();
                         if let Some(var) = &pattern.variable {
-                            new_bindings.insert(var.clone(), BindingValue::Node(node_id));
+                            new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
                         }
                         result.push(new_bindings);
                     }
@@ -3064,7 +3067,7 @@ impl<'a> Executor<'a> {
             .ok_or_else(|| ExecuteError::TypeError("path pattern requires variable".to_string()))?;
 
         let prev_id = bindings
-            .get(prev_var)
+            .get(prev_var.as_str())
             .and_then(|v| v.as_node())
             .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
@@ -3087,10 +3090,10 @@ impl<'a> Executor<'a> {
                 let mut new_bindings = bindings.clone();
 
                 if let Some(var) = &segment.node.variable {
-                    new_bindings.insert(var.clone(), BindingValue::Node(next_id));
+                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(next_id));
                 }
                 if let Some(var) = &segment.edge.variable {
-                    new_bindings.insert(var.clone(), BindingValue::Edge(edge.id));
+                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Edge(edge.id));
                 }
 
                 result.push(new_bindings);
@@ -3116,7 +3119,7 @@ impl<'a> Executor<'a> {
             })?;
 
             let start_id = bindings
-                .get(prev_var)
+                .get(prev_var.as_str())
                 .and_then(|v| v.as_node())
                 .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
@@ -3173,13 +3176,13 @@ impl<'a> Executor<'a> {
 
                 // Bind the end node
                 if let Some(var) = &segment.node.variable {
-                    new_bindings.insert(var.clone(), BindingValue::Node(end_id));
+                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(end_id));
                 }
 
                 // Bind the path variable (edge list) if specified
                 if let Some(var) = &segment.edge.variable {
                     new_bindings.insert(
-                        var.clone(),
+                        Arc::from(var.as_str()),
                         BindingValue::Path {
                             nodes: path_nodes,
                             edges: path_edges,
@@ -3719,7 +3722,7 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, ExecuteError> {
         match item {
             ReturnItem::Variable(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
@@ -3747,7 +3750,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ReturnItem::Property(var, prop) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
@@ -3804,7 +3807,7 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, ExecuteError> {
         match func {
             ScalarFunction::Nodes(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     if let BindingValue::Path { nodes, .. } = binding_value {
                         // Return list of node data
                         let node_values: Vec<Value> = nodes
@@ -3833,7 +3836,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Relationships(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     if let BindingValue::Path { edges, .. } = binding_value {
                         // Return list of edge IDs (or edge data if available)
                         let edge_values: Vec<Value> = edges
@@ -3852,7 +3855,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Length(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     if let BindingValue::Path { edges, .. } = binding_value {
                         Ok(Value::Int(edges.len() as i64))
                     } else {
@@ -3867,11 +3870,11 @@ impl<'a> Executor<'a> {
             }
             ScalarFunction::ShortestPath { start, end } => {
                 let start_id = bindings
-                    .get(start)
+                    .get(start.as_str())
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(start.clone()))?;
                 let end_id = bindings
-                    .get(end)
+                    .get(end.as_str())
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
@@ -3887,11 +3890,11 @@ impl<'a> Executor<'a> {
             }
             ScalarFunction::AllShortestPaths { start, end } => {
                 let start_id = bindings
-                    .get(start)
+                    .get(start.as_str())
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(start.clone()))?;
                 let end_id = bindings
-                    .get(end)
+                    .get(end.as_str())
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
@@ -4226,7 +4229,7 @@ impl<'a> Executor<'a> {
             ScalarFunction::E => Ok(Value::Float(std::f64::consts::E)),
             ScalarFunction::Pi => Ok(Value::Float(std::f64::consts::PI)),
             ScalarFunction::Id(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(id) => Ok(Value::Int(*id as i64)),
                         BindingValue::Edge(id) => Ok(Value::Int(*id as i64)),
@@ -4239,7 +4242,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::ElementId(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(id) => Ok(Value::String(format!("node:{}", id))),
                         BindingValue::Edge(id) => Ok(Value::String(format!("edge:{}", id))),
@@ -4252,7 +4255,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Type(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
                             if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
@@ -4270,7 +4273,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::StartNode(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
                             if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
@@ -4297,7 +4300,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::EndNode(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Edge(edge_id) => {
                             if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
@@ -4324,7 +4327,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Labels(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
@@ -4347,7 +4350,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Properties(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
@@ -4386,7 +4389,7 @@ impl<'a> Executor<'a> {
                 }
             }
             ScalarFunction::Keys(var) => {
-                if let Some(binding_value) = bindings.get(var) {
+                if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
@@ -4664,8 +4667,8 @@ impl<'a> Executor<'a> {
                 let mut acc = init_val;
                 for item in items {
                     let mut local_bindings = bindings.clone();
-                    local_bindings.insert(acc_var.clone(), BindingValue::Scalar(acc));
-                    local_bindings.insert(item_var.clone(), BindingValue::Scalar(item));
+                    local_bindings.insert(Arc::from(acc_var.as_str()), BindingValue::Scalar(acc));
+                    local_bindings.insert(Arc::from(item_var.as_str()), BindingValue::Scalar(item));
                     acc = self.evaluate_expression(body, &local_bindings)?;
                 }
                 Ok(acc)
@@ -4966,7 +4969,7 @@ impl<'a> Executor<'a> {
                     if let ReturnItem::Variable(var) = inner.as_ref() {
                         let is_always_bound = bindings_list
                             .first()
-                            .and_then(|b| b.get(var))
+                            .and_then(|b| b.get(var.as_str()))
                             .map(|bv| matches!(bv, BindingValue::Node(_) | BindingValue::Edge(_)))
                             .unwrap_or(false);
                         if is_always_bound {
@@ -5384,7 +5387,7 @@ impl<'a> Executor<'a> {
             Expression::Literal(lit) => Ok(Value::from(lit.clone())),
             Expression::Variable(var) => {
                 let binding_value = bindings
-                    .get(var)
+                    .get(var.as_str())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
                 match binding_value {
                     BindingValue::Node(id) => Ok(Value::Node(*id)),
@@ -5398,7 +5401,7 @@ impl<'a> Executor<'a> {
             }
             Expression::Property(var, prop) => {
                 let binding_value = bindings
-                    .get(var)
+                    .get(var.as_str())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
 
                 match binding_value {
@@ -5496,7 +5499,7 @@ impl<'a> Executor<'a> {
                 let mut output = Vec::new();
                 for item in items {
                     let mut local_bindings = bindings.clone();
-                    local_bindings.insert(variable.clone(), BindingValue::Scalar(item));
+                    local_bindings.insert(Arc::from(variable.as_str()), BindingValue::Scalar(item));
                     // Apply predicate filter
                     if let Some(pred) = predicate {
                         let pred_val = self.evaluate_expression(pred, &local_bindings)?;
@@ -5587,7 +5590,7 @@ impl<'a> Executor<'a> {
                 let mut count = 0usize;
                 for item in &items {
                     let mut local_bindings = bindings.clone();
-                    local_bindings.insert(variable.clone(), BindingValue::Scalar(item.clone()));
+                    local_bindings.insert(Arc::from(variable.as_str()), BindingValue::Scalar(item.clone()));
                     let pred_val = self.evaluate_expression(predicate, &local_bindings)?;
                     if matches!(pred_val, Value::Bool(true)) {
                         count += 1;
