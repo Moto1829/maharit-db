@@ -22,5 +22,21 @@
 ## 優先度 / 規模
 - 低〜中（効果は特定ワークロード限定）。**高チャーン・要慎重検証**。
 
+## 対応（完了）
+- `type Bindings = HashMap<String, BindingValue>` → `HashMap<Arc<str>, BindingValue>`。
+- コンパイラ誘導で **65 箇所**を機械修正:
+  - `.get(x)` / `.contains_key(x)` の `&String` 引数 → `x.as_str()`（`Arc<str>: Borrow<str>`）。
+  - `.insert(key.clone(), ..)` / リテラルキー → `Arc::from(key.as_str())` / `Arc::from("lit")`。
+- 変数名インターナーは導入せず（insert 時に `Arc::from` で確保）。多段パターン/JOIN で
+  binding を複製する際、キーが String 再確保ではなく Arc 参照カウント増で済む（clone が浅い）。
+
+## 効果 / 検証
+- **正当性**: query 508 テスト + workspace 全16バイナリパス（意味論不変）。
+- **性能**: binding 複製が発生する多段トラバーサル/JOIN で確保コスト減。
+  単発 scan（insert 1 回・以降複製なし）ではほぼ中立。効果は絶対値で小さく、
+  dev マシンのベンチばらつき（TRAV 項目は run 間 ±30〜40%）に埋もれるため
+  数値での明確な before/after 提示は困難。アーキテクチャ上の確保削減として実施。
+- 追加余地: 変数名の真のインターン（`Arc<str>` 再利用）で insert 側の確保も削減可能（別タスク候補）。
+
 ## ステータス
-未着手（バックログ、保留経緯あり）
+完了
