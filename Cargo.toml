@@ -43,7 +43,21 @@ csv = "1"
 quick-xml = { version = "0.37", features = ["serialize"] }
 colored = "2"
 regex = "1"
-tokio = { version = "1", features = ["full"] }
+# 実使用の feature のみに絞る（"full" は未使用機能を含む）。
+# 使用実績: rt-multi-thread(Runtime::new/#[tokio::main]) / net(TcpStream,TcpListener) /
+# io-util(AsyncRead/WriteExt,BufReader) / sync(broadcast,Mutex,RwLock) /
+# time(sleep,timeout,interval) / signal(ctrl_c,unix) / macros(test,select!,join!)。
+# fs / process は未使用。依存クレートが必要とする feature は cargo の feature
+# 統合で自動的に有効化されるため、この絞り込みで壊れることはない。
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "macros",
+] }
 bytes = "1"
 flate2 = "1"
 zstd = "0.13"
