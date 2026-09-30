@@ -34,13 +34,13 @@ use crate::replication::{
 use crate::tcp_server::{ServerConfig, TcpServer};
 
 /// Range of the `k` property: small so random operations collide often.
-const KEYS: u64 = 12;
+pub(crate) const KEYS: u64 = 12;
 
 /// Minimal deterministic PRNG (SplitMix64) — no extra dependency needed.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -48,11 +48,11 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
 
-    fn chance(&mut self, percent: u64) -> bool {
+    pub(crate) fn chance(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
 }
@@ -88,7 +88,7 @@ pub(crate) fn fingerprint(g: &ConcurrentGraph) -> Fingerprint {
     (nodes, edges)
 }
 
-async fn request(stream: &mut TcpStream, req: &Value) -> Value {
+pub(crate) async fn request(stream: &mut TcpStream, req: &Value) -> Value {
     let body = serde_json::to_vec(req).unwrap();
     stream
         .write_all(&(body.len() as u32).to_be_bytes())
@@ -103,7 +103,7 @@ async fn request(stream: &mut TcpStream, req: &Value) -> Value {
 }
 
 /// Pick a random write statement over a small key space.
-fn random_statement(rng: &mut Rng) -> String {
+pub(crate) fn random_statement(rng: &mut Rng) -> String {
     let x = rng.below(KEYS);
     let y = rng.below(KEYS);
     match rng.below(14) {
@@ -126,7 +126,7 @@ fn random_statement(rng: &mut Rng) -> String {
 }
 
 /// One client's random workload. Returns its operation log.
-async fn run_client(addr: std::net::SocketAddr, seed: u64, ops: usize) -> Vec<String> {
+pub(crate) async fn run_client(addr: std::net::SocketAddr, seed: u64, ops: usize) -> Vec<String> {
     let mut rng = Rng(seed);
     let mut s = TcpStream::connect(addr).await.unwrap();
     let mut log = Vec::with_capacity(ops);
@@ -175,7 +175,10 @@ async fn run_client(addr: std::net::SocketAddr, seed: u64, ops: usize) -> Vec<St
 }
 
 /// Property-index answers on the leader must match a full scan of its graph.
-async fn index_mismatches(addr: std::net::SocketAddr, graph: &ConcurrentGraph) -> Vec<String> {
+pub(crate) async fn index_mismatches(
+    addr: std::net::SocketAddr,
+    graph: &ConcurrentGraph,
+) -> Vec<String> {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let mut out = Vec::new();
     for k in 0..KEYS {

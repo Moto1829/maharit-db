@@ -1,5 +1,7 @@
 pub mod audit;
 pub mod auth;
+#[cfg(test)]
+mod concurrency_stress_test;
 pub mod coordinator;
 pub mod http_server;
 pub mod logging;
