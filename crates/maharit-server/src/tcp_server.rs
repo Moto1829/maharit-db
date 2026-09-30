@@ -7,15 +7,14 @@
 //! - Connection pool management
 //! - Graceful shutdown
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use maharit_core::{
-    ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId,
-    PropertyIndex, PropertyValue,
+    ConcurrentGraph, ConstraintManager, FulltextManager, GraphBackend, PropertyIndex,
 };
 use maharit_query::{AstCache, Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
@@ -30,6 +29,7 @@ use crate::replication::{
     FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
 };
 use crate::tracing_setup::TracingConfig;
+use maharit_storage::UndoRecord;
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -577,6 +577,39 @@ impl SharedManagers {
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
+        let (result, wal, _) = self.run(graph, stmt, is_write, record_wal, false);
+        (result, wal)
+    }
+
+    /// Run a write statement inside a transaction: like [`execute`] but also
+    /// returns the undo records needed to roll the statement back.
+    ///
+    /// Must be called while holding `write_gate`.
+    fn execute_in_tx(
+        &self,
+        graph: &ConcurrentGraph,
+        stmt: maharit_query::ast::Statement,
+        record_wal: bool,
+    ) -> (
+        Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
+        Vec<WalEntryData>,
+        Vec<UndoRecord>,
+    ) {
+        self.run(graph, stmt, true, record_wal, true)
+    }
+
+    fn run(
+        &self,
+        graph: &ConcurrentGraph,
+        stmt: maharit_query::ast::Statement,
+        is_write: bool,
+        record_wal: bool,
+        capture_undo: bool,
+    ) -> (
+        Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
+        Vec<WalEntryData>,
+        Vec<UndoRecord>,
+    ) {
         // Lock order is always constraints → fulltext → property_index.
         // A poisoned lock only means another query panicked mid-execution; the
         // managers are still structurally valid, so keep serving.
@@ -588,10 +621,14 @@ impl SharedManagers {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let mut recorder = RecordingGraph::new(graph, record_wal);
+            if capture_undo {
+                recorder = recorder.with_undo();
+            }
             let result =
                 Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
                     .execute(stmt);
-            (result, recorder.into_log())
+            let (wal, undo) = recorder.into_parts();
+            (result, wal, undo)
         } else {
             let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
             let fm = self.fulltext.read().unwrap_or_else(|e| e.into_inner());
@@ -602,8 +639,44 @@ impl SharedManagers {
             // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
             // executor uses the raw pointer only during this synchronous call.
             let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) };
-            (executor.execute(stmt), Vec::new())
+            (executor.execute(stmt), Vec::new(), Vec::new())
         }
+    }
+
+    /// Roll back transaction `tx_id`: apply its undo log to the graph, bring
+    /// the property / fulltext indexes of every touched node back in line with
+    /// the restored state, and return the compensating mutations as WAL
+    /// entries so followers roll back too.
+    ///
+    /// Must be called while holding `write_gate`.
+    fn rollback(
+        &self,
+        graph: &ConcurrentGraph,
+        tx_manager: &TransactionManager,
+        tx_id: u64,
+        record_wal: bool,
+    ) -> Result<Vec<WalEntryData>, maharit_storage::TransactionError> {
+        let mut fm = self.fulltext.write().unwrap_or_else(|e| e.into_inner());
+        let mut pi = self
+            .property_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut recorder = RecordingGraph::new(graph, record_wal);
+        let touched = tx_manager.rollback_backend(tx_id, &mut recorder)?;
+        for id in touched {
+            pi.remove_node(id);
+            fm.remove_node(id);
+            if let Some(node) = graph.get_node(id) {
+                let label = node.primary_label();
+                for (key, value) in node.properties.iter() {
+                    if pi.has_index(label, key) {
+                        pi.index_property(id, key, value);
+                    }
+                }
+                fm.index_node(id, label, &node.properties);
+            }
+        }
+        Ok(recorder.into_log())
     }
 }
 
@@ -1044,12 +1117,22 @@ async fn handle_connection(
                 session_token,
             } => match check_session(config.require_auth, &auth, &session_token) {
                 Err(resp) => resp,
-                Ok(_) => match tx_manager.rollback_concurrent(tx_id, &graph) {
-                    Ok(()) => Response::RolledBack { tx_id },
-                    Err(e) => Response::Error {
-                        message: format!("Rollback failed: {}", e),
-                    },
-                },
+                Ok(_) => {
+                    // Serialize with writers so the compensating WAL entries
+                    // are ordered after the statements they undo.
+                    let _write_guard = managers.write_gate.lock().await;
+                    match managers.rollback(&graph, &tx_manager, tx_id, replication.is_some()) {
+                        Ok(wal) => {
+                            if let Some(repl) = replication.as_deref() {
+                                emit_wal_entries(wal, repl).await;
+                            }
+                            Response::RolledBack { tx_id }
+                        }
+                        Err(e) => Response::Error {
+                            message: format!("Rollback failed: {}", e),
+                        },
+                    }
+                }
             },
         };
 
@@ -1237,111 +1320,7 @@ async fn execute_streaming_query(
 
 // ── Transaction-aware query execution ────────────────────────────────────────
 
-type NodeSnapshot = (Vec<String>, Arc<HashMap<String, PropertyValue>>);
-type EdgeSnapshot = (NodeId, NodeId, String, Arc<HashMap<String, PropertyValue>>);
-
-/// Lightweight snapshot of ConcurrentGraph state captured before a write query.
-///
-/// `Arc`-cloned property maps act as copy-on-write snapshots: when the executor
-/// modifies a node's properties via `Arc::make_mut`, a new map is allocated,
-/// leaving the snapshot Arc pointing at the original unchanged data.
-struct ConcurrentSnapshot {
-    nodes: HashMap<NodeId, NodeSnapshot>,
-    edges: HashMap<EdgeId, EdgeSnapshot>,
-}
-
-fn take_concurrent_snapshot(graph: &ConcurrentGraph) -> ConcurrentSnapshot {
-    let nodes = graph
-        .nodes()
-        .map(|r| {
-            let n = r.value();
-            (n.id, (n.labels.clone(), Arc::clone(&n.properties)))
-        })
-        .collect();
-    let edges = graph
-        .edges()
-        .map(|r| {
-            let e = r.value();
-            (
-                e.id,
-                (e.from, e.to, e.label.clone(), Arc::clone(&e.properties)),
-            )
-        })
-        .collect();
-    ConcurrentSnapshot { nodes, edges }
-}
-
-/// Diff the graph against a pre-execution snapshot and record undo entries.
-fn record_undo_diff_concurrent(
-    graph: &ConcurrentGraph,
-    snapshot: &ConcurrentSnapshot,
-    tx_id: u64,
-    tx_manager: &TransactionManager,
-) {
-    let current_node_ids: HashSet<NodeId> = graph.node_ids().into_iter().collect();
-    let snap_node_ids: HashSet<NodeId> = snapshot.nodes.keys().copied().collect();
-
-    for &id in current_node_ids.difference(&snap_node_ids) {
-        let _ = tx_manager.record_node_created(tx_id, id);
-    }
-    for &id in snap_node_ids.difference(&current_node_ids) {
-        let (labels, properties) = snapshot.nodes[&id].clone();
-        let _ = tx_manager.record_node_deleted(tx_id, id, labels, properties);
-    }
-    for &id in snap_node_ids.intersection(&current_node_ids) {
-        let (_, old_props) = &snapshot.nodes[&id];
-        if let Some(node) = graph.get_node(id) {
-            for (key, old_val) in old_props.iter() {
-                if node.properties.get(key.as_str()) != Some(old_val) {
-                    let _ = tx_manager.record_property_changed(
-                        tx_id,
-                        id,
-                        key.clone(),
-                        Some(old_val.clone()),
-                    );
-                }
-            }
-            for key in node.properties.keys() {
-                if !old_props.contains_key(key.as_str()) {
-                    let _ = tx_manager.record_property_changed(tx_id, id, key.clone(), None);
-                }
-            }
-        }
-    }
-
-    let current_edge_ids: HashSet<EdgeId> = graph.edge_ids().into_iter().collect();
-    let snap_edge_ids: HashSet<EdgeId> = snapshot.edges.keys().copied().collect();
-
-    for &id in current_edge_ids.difference(&snap_edge_ids) {
-        let _ = tx_manager.record_edge_created(tx_id, id);
-    }
-    for &id in snap_edge_ids.difference(&current_edge_ids) {
-        let (from, to, label, properties) = snapshot.edges[&id].clone();
-        let _ = tx_manager.record_edge_deleted(tx_id, id, from, to, label, properties);
-    }
-    for &id in snap_edge_ids.intersection(&current_edge_ids) {
-        let (_, _, _, old_props) = &snapshot.edges[&id];
-        if let Some(edge) = graph.get_edge(id) {
-            for (key, old_val) in old_props.iter() {
-                if edge.properties.get(key.as_str()) != Some(old_val) {
-                    let _ = tx_manager.record_edge_property_changed(
-                        tx_id,
-                        id,
-                        key.clone(),
-                        Some(old_val.clone()),
-                    );
-                }
-            }
-            for key in edge.properties.keys() {
-                if !old_props.contains_key(key.as_str()) {
-                    let _ = tx_manager.record_edge_property_changed(tx_id, id, key.clone(), None);
-                }
-            }
-        }
-    }
-}
-
-/// Execute a write query within a transaction: snapshot → execute → record undo diff.
+/// Execute a write query within a transaction: execute → record undo log → replicate.
 #[allow(clippy::too_many_arguments)]
 async fn execute_query_with_tx(
     graph: &Arc<ConcurrentGraph>,
@@ -1370,18 +1349,26 @@ async fn execute_query_with_tx(
     // Serialize writers across execute → WAL emission (see SharedManagers).
     let _write_guard = managers.write_gate.lock().await;
 
-    // Snapshot before execution for undo tracking.
-    let snapshot = take_concurrent_snapshot(graph);
+    // Refuse to write under a transaction that is unknown or already
+    // finished: its changes could never be rolled back.
+    if !tx_manager.is_active(tx_id) {
+        return Response::Error {
+            message: format!("Execution error: transaction {} is not active", tx_id),
+        };
+    }
 
-    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    let (exec_result, wal, undo) = managers.execute_in_tx(graph, stmt, replication.is_some());
+    // Record undo even when the statement failed midway: its partial changes
+    // were applied and must be reverted by ROLLBACK.
+    if let Err(e) = tx_manager.record_undo(tx_id, undo) {
+        tracing::error!(tx_id, error = %e, "failed to record undo log");
+    }
     if let Some(repl) = replication {
         emit_wal_entries(wal, repl).await;
     }
 
     match exec_result {
         Ok(result) => {
-            record_undo_diff_concurrent(graph, &snapshot, tx_id, tx_manager);
-
             let rows: Vec<HashMap<String, serde_json::Value>> = result
                 .rows
                 .into_iter()
@@ -2107,6 +2094,230 @@ mod tests {
             }
         }
         assert_eq!(ok, 1, "exactly one CREATE must pass the UNIQUE check");
+    }
+
+    async fn tx_query(stream: &mut TcpStream, tx_id: u64, q: &str) -> Response {
+        send_recv(
+            stream,
+            &Request::Query {
+                query: q.to_string(),
+                tx_id: Some(tx_id),
+                session_token: None,
+            },
+        )
+        .await
+    }
+
+    async fn begin(stream: &mut TcpStream) -> u64 {
+        match send_recv(
+            stream,
+            &Request::BeginTransaction {
+                read_only: false,
+                session_token: None,
+            },
+        )
+        .await
+        {
+            Response::TransactionBegun { tx_id } => tx_id,
+            other => panic!("begin failed: {other:?}"),
+        }
+    }
+
+    async fn rollback(stream: &mut TcpStream, tx_id: u64) {
+        let resp = send_recv(
+            stream,
+            &Request::Rollback {
+                tx_id,
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::RolledBack { .. }),
+            "rollback failed: {resp:?}"
+        );
+    }
+
+    async fn row_count(stream: &mut TcpStream, q: &str) -> usize {
+        match query(stream, q).await {
+            Response::Result { rows } => rows.len(),
+            other => panic!("query failed: {q}: {other:?}"),
+        }
+    }
+
+    /// Changes made inside a transaction (SET on existing nodes, label changes,
+    /// CREATE, DETACH DELETE) run on the index-maintaining executor. ROLLBACK
+    /// must restore the graph *and* the property index; label changes and
+    /// DETACH-deleted edges used to be left un-restored (task117).
+    #[tokio::test]
+    async fn rollback_restores_graph_labels_edges_and_index() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        query(&mut s, "CREATE INDEX ON :Item(k)").await;
+        query(&mut s, "CREATE (:Item {k: 1}), (:Item {k: 5})").await;
+        query(
+            &mut s,
+            "MATCH (a:Item {k: 1}), (b:Item {k: 5}) CREATE (a)-[:R {w: 1}]->(b)",
+        )
+        .await;
+
+        let tx = begin(&mut s).await;
+        for q in [
+            "MATCH (n:Item) WHERE n.k = 1 SET n.k = 2, n:Tmp",
+            "CREATE (:Item {k: 9})",
+            "MATCH (n:Item) WHERE n.k = 5 DETACH DELETE n",
+        ] {
+            let resp = tx_query(&mut s, tx, q).await;
+            assert!(matches!(resp, Response::Result { .. }), "{q}: {resp:?}");
+        }
+        rollback(&mut s, tx).await;
+
+        // Index-backed equality lookups must reflect the restored state.
+        assert_eq!(
+            row_count(&mut s, "MATCH (n:Item) WHERE n.k = 1 RETURN n").await,
+            1
+        );
+        assert_eq!(
+            row_count(&mut s, "MATCH (n:Item) WHERE n.k = 2 RETURN n").await,
+            0
+        );
+        assert_eq!(
+            row_count(&mut s, "MATCH (n:Item) WHERE n.k = 9 RETURN n").await,
+            0
+        );
+        assert_eq!(
+            row_count(&mut s, "MATCH (n:Item) WHERE n.k = 5 RETURN n").await,
+            1
+        );
+        assert_eq!(row_count(&mut s, "MATCH (n:Tmp) RETURN n").await, 0);
+        assert_eq!(
+            row_count(&mut s, "MATCH (a:Item)-[r:R]->(b:Item) RETURN r.w").await,
+            1,
+            "DETACH-deleted edge must be restored"
+        );
+    }
+
+    /// Writing with an unknown / finished transaction ID must be rejected
+    /// instead of applying changes that can never be rolled back.
+    #[tokio::test]
+    async fn write_with_inactive_tx_is_rejected() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let tx = begin(&mut s).await;
+        rollback(&mut s, tx).await;
+        let resp = tx_query(&mut s, tx, "CREATE (:Ghost)").await;
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(row_count(&mut s, "MATCH (n:Ghost) RETURN n").await, 0);
+    }
+
+    /// ROLLBACK on the leader must be replicated so followers end up with the
+    /// same data (task117).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rollback_is_replicated_to_followers() {
+        use crate::replication::{
+            FollowerReplicationManager, LeaderReplicationManager, NodeRole, ReplicationConfig,
+        };
+
+        let repl_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let repl_addr = repl_listener.local_addr().unwrap();
+        let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
+        repl.start_with_listener(repl_listener).await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            read_timeout: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(5),
+            ..Default::default()
+        })
+        .with_replication(Arc::clone(&repl));
+        let leader_graph = server.graph_arc();
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+        let follower = FollowerReplicationManager::with_concurrent_graph(
+            ReplicationConfig {
+                role: NodeRole::Follower,
+                node_id: "f-rollback".to_string(),
+                replication_bind_address: "127.0.0.1:0".to_string(),
+                leader_address: Some(repl_addr.to_string()),
+                heartbeat_interval_secs: 1,
+                heartbeat_timeout_secs: 5,
+                shared_secret: None,
+            },
+            Arc::clone(&follower_graph),
+        );
+        follower.start().await.unwrap();
+        for _ in 0..50 {
+            if repl.get_follower_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        query(&mut s, "CREATE (:P {name: 'a'}), (:P {name: 'b'})").await;
+        query(
+            &mut s,
+            "MATCH (a:P {name: 'a'}), (b:P {name: 'b'}) CREATE (a)-[:R]->(b)",
+        )
+        .await;
+
+        let tx = begin(&mut s).await;
+        tx_query(
+            &mut s,
+            tx,
+            "MATCH (n:P {name: 'a'}) SET n.name = 'z', n:Tmp",
+        )
+        .await;
+        tx_query(&mut s, tx, "CREATE (:P {name: 'c'})").await;
+        tx_query(&mut s, tx, "MATCH (n:P {name: 'b'}) DETACH DELETE n").await;
+        rollback(&mut s, tx).await;
+
+        let snapshot = |g: &ConcurrentGraph| {
+            let mut nodes: Vec<_> = g
+                .all_nodes()
+                .into_iter()
+                .map(|n| {
+                    let mut labels = n.labels.clone();
+                    labels.sort();
+                    let mut props: Vec<_> = n
+                        .properties
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v:?}"))
+                        .collect();
+                    props.sort();
+                    (n.id, labels, props)
+                })
+                .collect();
+            nodes.sort();
+            let mut edges: Vec<_> = g
+                .all_edges()
+                .into_iter()
+                .map(|e| (e.id, e.from, e.to, e.label))
+                .collect();
+            edges.sort();
+            (nodes, edges)
+        };
+
+        let expected = snapshot(&leader_graph);
+        assert_eq!(expected.0.len(), 2);
+        assert_eq!(expected.1.len(), 1);
+        let mut actual = snapshot(&follower_graph);
+        for _ in 0..100 {
+            if actual == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            actual = snapshot(&follower_graph);
+        }
+        assert_eq!(
+            actual, expected,
+            "follower diverged from leader after ROLLBACK"
+        );
     }
     #[tokio::test]
     async fn integration_property_index_persists_across_requests() {

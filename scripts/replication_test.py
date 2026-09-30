@@ -207,6 +207,50 @@ def test_update_propagation(leader, followers: list, wait_sec: float):
               len(rows) == 1 and str(rows[0].get("r.weight")) == "1.0", str(rows))
 
 
+def test_rollback_propagation(leader, followers: list, wait_sec: float):
+    """トランザクションの ROLLBACK がフォロワーへ複製される（task117）"""
+    section("ROLLBACK の伝播確認")
+
+    resp = leader.send({"type": "begin"})
+    tx_id = resp.get("txId")
+    check("リーダー: BEGIN", resp.get("type") == "transactionBegun", str(resp))
+
+    for q, label in [
+        ("MATCH (n:ReplTest {name: 'Repl_Carol'}) SET n.name = 'Repl_Carol_tx', n:ReplTx", "tx 内 SET"),
+        ("CREATE (n:ReplTest {name: 'Repl_TxOnly'})", "tx 内 CREATE"),
+        ("MATCH (n:ReplTest {name: 'Repl_Dave'}) DETACH DELETE n", "tx 内 DETACH DELETE"),
+    ]:
+        resp = leader.send({"type": "query", "query": q, "txId": tx_id})
+        check(f"リーダー: {label}", resp.get("type") == "result", str(resp))
+
+    resp = leader.send({"type": "rollback", "txId": tx_id})
+    check("リーダー: ROLLBACK", resp.get("type") == "rolledBack", str(resp))
+
+    print(f"  {YELLOW}⏳ {wait_sec}秒待機中...{RESET}")
+    time.sleep(wait_sec)
+
+    expected = sorted(
+        r.get("n.name", "")
+        for r in leader.query("MATCH (n:ReplTest) RETURN n.name").get("rows", [])
+    )
+    check("リーダー: ROLLBACK 後に tx の変更が残っていない",
+          "Repl_Carol" in expected and "Repl_Dave" in expected
+          and "Repl_TxOnly" not in expected and "Repl_Carol_tx" not in expected,
+          str(expected))
+
+    for i, follower in enumerate(followers, 1):
+        if not follower:
+            continue
+        actual = sorted(
+            r.get("n.name", "")
+            for r in follower.query("MATCH (n:ReplTest) RETURN n.name").get("rows", [])
+        )
+        check(f"フォロワー{i}: ROLLBACK 後のノードがリーダーと一致",
+              actual == expected, f"expected={expected}, actual={actual}")
+        rows = follower.query("MATCH (n:ReplTx) RETURN n").get("rows", [])
+        check(f"フォロワー{i}: tx で付けたラベルが取り消されている", len(rows) == 0, str(rows))
+
+
 def test_cleanup(leader):
     section("クリーンアップ（リーダーから削除）")
 
@@ -323,6 +367,7 @@ def main():
         test_follower_read_consistency(followers, names)
         test_write_propagation_sequential(leader, followers, args.wait)
         test_update_propagation(leader, followers, args.wait)
+        test_rollback_propagation(leader, followers, args.wait)
         test_cleanup(leader)
         test_cleanup_propagation(followers, args.wait)
     finally:

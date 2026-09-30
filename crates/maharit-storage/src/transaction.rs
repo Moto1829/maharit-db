@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use maharit_core::{ConcurrentGraph, EdgeId, Graph, NodeId, PropertyValue};
+use maharit_core::{EdgeId, Graph, GraphBackend, NodeId, PropertyValue};
 use thiserror::Error;
 
 /// Transaction ID type
@@ -58,14 +58,17 @@ pub enum TransactionState {
     RolledBack,
 }
 
-/// A change recorded during a transaction for rollback
-#[derive(Debug, Clone)]
-enum UndoRecord {
+/// A change recorded during a transaction for rollback.
+///
+/// Rollback applies the inverse of each record in reverse order. Deleted nodes
+/// and edges are restored under their original IDs so later records (and
+/// replicas) keep addressing the same elements.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UndoRecord {
     CreateNode {
         node_id: NodeId,
     },
     DeleteNode {
-        #[allow(dead_code)] // Kept for potential future use (e.g., ID restoration)
         node_id: NodeId,
         labels: Vec<String>,
         properties: Arc<HashMap<String, PropertyValue>>,
@@ -79,7 +82,6 @@ enum UndoRecord {
         edge_id: EdgeId,
     },
     DeleteEdge {
-        #[allow(dead_code)]
         edge_id: EdgeId,
         from: NodeId,
         to: NodeId,
@@ -90,6 +92,16 @@ enum UndoRecord {
         edge_id: EdgeId,
         key: String,
         old_value: Option<PropertyValue>,
+    },
+    /// A label was added to a node (undo = remove it).
+    AddLabel {
+        node_id: NodeId,
+        label: String,
+    },
+    /// A label was removed from a node (undo = add it back).
+    RemoveLabel {
+        node_id: NodeId,
+        label: String,
     },
 }
 
@@ -229,97 +241,22 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Rollback a transaction
+    /// Rollback a transaction against a [`Graph`].
     pub fn rollback(&self, tx_id: TxId, graph: &mut Graph) -> Result<()> {
-        let tx_arc = self.get_transaction(tx_id)?;
-        let mut tx = tx_arc.lock().unwrap();
-
-        if tx.state != TransactionState::Active {
-            return Err(TransactionError::AlreadyFinished(tx_id));
-        }
-
-        // Apply undo records in reverse order
-        for record in tx.undo_log.iter().rev() {
-            match record {
-                UndoRecord::CreateNode { node_id } => {
-                    graph.delete_node(*node_id);
-                }
-                UndoRecord::DeleteNode {
-                    node_id: _,
-                    labels,
-                    properties,
-                } => {
-                    let new_id = graph.create_node_with_labels(labels.clone());
-                    if let Some(node) = graph.get_node_mut(new_id) {
-                        for (key, value) in properties.iter() {
-                            node.set_property(key.clone(), value.clone());
-                        }
-                    }
-                }
-                UndoRecord::SetProperty {
-                    node_id,
-                    key,
-                    old_value,
-                } => {
-                    if let Some(node) = graph.get_node_mut(*node_id) {
-                        match old_value {
-                            Some(value) => node.set_property(key.clone(), value.clone()),
-                            None => {
-                                node.remove_property(key);
-                            }
-                        }
-                    }
-                }
-                UndoRecord::CreateEdge { edge_id } => {
-                    graph.delete_edge(*edge_id);
-                }
-                UndoRecord::DeleteEdge {
-                    edge_id: _,
-                    from,
-                    to,
-                    label,
-                    properties,
-                } => {
-                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone())
-                        && let Some(edge) = graph.get_edge_mut(new_id)
-                    {
-                        for (k, v) in properties.iter() {
-                            edge.set_property(k.clone(), v.clone());
-                        }
-                    }
-                }
-                UndoRecord::SetEdgeProperty {
-                    edge_id,
-                    key,
-                    old_value,
-                } => {
-                    if let Some(edge) = graph.get_edge_mut(*edge_id) {
-                        match old_value {
-                            Some(value) => edge.set_property(key.clone(), value.clone()),
-                            None => {
-                                edge.remove_property(key);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Release all locks
-        self.release_all_locks(tx_id, &tx.held_locks);
-
-        tx.undo_log.clear();
-        tx.state = TransactionState::RolledBack;
-
-        Ok(())
+        self.rollback_backend(tx_id, graph).map(|_| ())
     }
 
-    /// Rollback a transaction against a `ConcurrentGraph`.
+    /// Rollback a transaction against any [`GraphBackend`].
     ///
-    /// Unlike [`rollback`] which requires `&mut Graph`, this method takes a
-    /// shared `&ConcurrentGraph` because DashMap provides interior mutability.
-    pub fn rollback_concurrent(&self, tx_id: TxId, graph: &ConcurrentGraph) -> Result<()> {
-        use std::sync::Arc as StdArc;
+    /// Undo records are applied in reverse order through the backend, so a
+    /// wrapping backend (e.g. one that records mutations for replication) sees
+    /// every compensating change. Returns the IDs of nodes whose state was
+    /// touched, so callers can resynchronise secondary indexes.
+    pub fn rollback_backend(
+        &self,
+        tx_id: TxId,
+        graph: &mut dyn GraphBackend,
+    ) -> Result<Vec<NodeId>> {
         let tx_arc = self.get_transaction(tx_id)?;
         let mut tx = tx_arc.lock().unwrap();
 
@@ -327,47 +264,53 @@ impl TransactionManager {
             return Err(TransactionError::AlreadyFinished(tx_id));
         }
 
-        // Apply undo records in reverse order.
+        let mut touched: Vec<NodeId> = Vec::new();
         for record in tx.undo_log.iter().rev() {
             match record {
                 UndoRecord::CreateNode { node_id } => {
                     graph.delete_node(*node_id);
+                    touched.push(*node_id);
                 }
                 UndoRecord::DeleteNode {
-                    node_id: _,
+                    node_id,
                     labels,
                     properties,
                 } => {
-                    let new_id = graph.create_node_with_labels(labels.clone());
+                    graph.restore_node(*node_id, labels.clone());
                     for (key, value) in properties.iter() {
-                        graph.set_node_property(new_id, key, value.clone());
+                        graph.set_node_property(*node_id, key, value.clone());
                     }
+                    touched.push(*node_id);
                 }
                 UndoRecord::SetProperty {
                     node_id,
                     key,
                     old_value,
-                } => match old_value {
-                    Some(value) => graph.set_node_property(*node_id, key, value.clone()),
-                    None => {
-                        graph.with_node_mut(*node_id, |n| {
-                            StdArc::make_mut(&mut n.properties).remove(key.as_str());
-                        });
+                } => {
+                    match old_value {
+                        Some(value) => graph.set_node_property(*node_id, key, value.clone()),
+                        None => {
+                            graph.remove_node_property(*node_id, key);
+                        }
                     }
-                },
+                    touched.push(*node_id);
+                }
                 UndoRecord::CreateEdge { edge_id } => {
                     graph.delete_edge(*edge_id);
                 }
                 UndoRecord::DeleteEdge {
-                    edge_id: _,
+                    edge_id,
                     from,
                     to,
                     label,
                     properties,
                 } => {
-                    if let Ok(new_id) = graph.create_edge(*from, *to, label.clone()) {
+                    if graph
+                        .restore_edge(*edge_id, *from, *to, label.clone())
+                        .is_ok()
+                    {
                         for (k, v) in properties.iter() {
-                            graph.set_edge_property(new_id, k, v.clone());
+                            graph.set_edge_property(*edge_id, k, v.clone());
                         }
                     }
                 }
@@ -378,20 +321,27 @@ impl TransactionManager {
                 } => match old_value {
                     Some(value) => graph.set_edge_property(*edge_id, key, value.clone()),
                     None => {
-                        graph.with_edge_mut(*edge_id, |e| {
-                            StdArc::make_mut(&mut e.properties).remove(key.as_str());
-                        });
+                        graph.remove_edge_property(*edge_id, key);
                     }
                 },
+                UndoRecord::AddLabel { node_id, label } => {
+                    graph.remove_node_label(*node_id, label);
+                    touched.push(*node_id);
+                }
+                UndoRecord::RemoveLabel { node_id, label } => {
+                    graph.add_node_label(*node_id, label.clone());
+                    touched.push(*node_id);
+                }
             }
         }
 
-        // Release all locks held by this transaction.
         self.release_all_locks(tx_id, &tx.held_locks);
         tx.undo_log.clear();
         tx.state = TransactionState::RolledBack;
 
-        Ok(())
+        touched.sort_unstable();
+        touched.dedup();
+        Ok(touched)
     }
 
     /// Create a node within a transaction
@@ -502,6 +452,25 @@ impl TransactionManager {
     // ── External undo-log recording API ──────────────────────────────────────
     // These methods allow the server layer (tcp_server) to record undo entries
     // for operations performed via the Executor, which is unaware of transactions.
+
+    /// Whether `tx_id` refers to a transaction that is still active.
+    pub fn is_active(&self, tx_id: TxId) -> bool {
+        self.get_transaction(tx_id)
+            .map(|tx| tx.lock().unwrap().state == TransactionState::Active)
+            .unwrap_or(false)
+    }
+
+    /// Append undo records captured while executing a statement in `tx_id`
+    /// (in execution order).
+    pub fn record_undo(&self, tx_id: TxId, records: Vec<UndoRecord>) -> Result<()> {
+        let tx_arc = self.get_transaction(tx_id)?;
+        let mut tx = tx_arc.lock().unwrap();
+        if tx.state != TransactionState::Active {
+            return Err(TransactionError::AlreadyFinished(tx_id));
+        }
+        tx.undo_log.extend(records);
+        Ok(())
+    }
 
     /// Record that a node was created (undo = delete it on rollback)
     pub fn record_node_created(&self, tx_id: TxId, node_id: NodeId) -> Result<()> {
@@ -921,7 +890,7 @@ mod tests {
         use maharit_core::ConcurrentGraph;
 
         let tm = TransactionManager::new();
-        let graph = ConcurrentGraph::new();
+        let mut graph = ConcurrentGraph::new();
 
         let tx_id = tm.begin();
         let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
@@ -929,7 +898,7 @@ mod tests {
 
         assert_eq!(graph.node_count(), 1);
 
-        tm.rollback_concurrent(tx_id, &graph).unwrap();
+        tm.rollback_backend(tx_id, &mut graph).unwrap();
 
         assert_eq!(graph.node_count(), 0);
         assert!(graph.get_node(node_id).is_none());
@@ -942,7 +911,7 @@ mod tests {
         use std::sync::Arc;
 
         let tm = TransactionManager::new();
-        let graph = ConcurrentGraph::new();
+        let mut graph = ConcurrentGraph::new();
 
         let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
         graph.set_node_property(node_id, "name", PropertyValue::String("Alice".to_string()));
@@ -961,10 +930,14 @@ mod tests {
 
         assert_eq!(graph.node_count(), 0);
 
-        // Rollback should restore the node (with a new ID since ConcurrentGraph doesn't reuse IDs)
-        tm.rollback_concurrent(tx_id, &graph).unwrap();
+        // Rollback restores the node under its original ID.
+        tm.rollback_backend(tx_id, &mut graph).unwrap();
 
         assert_eq!(graph.node_count(), 1);
+        assert_eq!(
+            graph.get_node(node_id).unwrap().properties.get("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
     }
 
     #[test]
@@ -972,7 +945,7 @@ mod tests {
         use maharit_core::{ConcurrentGraph, PropertyValue};
 
         let tm = TransactionManager::new();
-        let graph = ConcurrentGraph::new();
+        let mut graph = ConcurrentGraph::new();
 
         let node_id = graph.create_node_with_labels(vec!["Person".to_string()]);
         graph.set_node_property(node_id, "name", PropertyValue::String("Alice".to_string()));
@@ -991,7 +964,7 @@ mod tests {
         );
 
         // Rollback
-        tm.rollback_concurrent(tx_id, &graph).unwrap();
+        tm.rollback_backend(tx_id, &mut graph).unwrap();
 
         let n = graph.get_node(node_id).unwrap();
         assert_eq!(
@@ -1005,13 +978,13 @@ mod tests {
         use maharit_core::ConcurrentGraph;
 
         let tm = TransactionManager::new();
-        let graph = ConcurrentGraph::new();
+        let mut graph = ConcurrentGraph::new();
 
         let tx_id = tm.begin();
         tm.commit(tx_id).unwrap();
 
         assert!(matches!(
-            tm.rollback_concurrent(tx_id, &graph),
+            tm.rollback_backend(tx_id, &mut graph),
             Err(TransactionError::AlreadyFinished(_))
         ));
     }

@@ -366,6 +366,47 @@ impl Graph {
         Ok(id)
     }
 
+    /// 指定したIDでエッジを作成する（ROLLBACK での復元 / WAL 再生用）
+    ///
+    /// 指定した `id` が既に使用されている場合は何もせず `id` を返す。
+    pub fn create_edge_with_id(
+        &mut self,
+        id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: impl Into<String>,
+    ) -> Result<EdgeId, GraphError> {
+        if !matches!(self.nodes.get(from as usize), Some(Some(_))) {
+            return Err(GraphError::NodeNotFound(from));
+        }
+        if !matches!(self.nodes.get(to as usize), Some(Some(_))) {
+            return Err(GraphError::NodeNotFound(to));
+        }
+        let idx = id as usize;
+        if matches!(self.edges.get(idx), Some(Some(_))) {
+            return Ok(id);
+        }
+        if idx >= self.edges.len() {
+            // Slots skipped over become free for later allocations.
+            for skipped in self.edges.len()..idx {
+                self.edge_free_list.push(skipped as EdgeId);
+            }
+            self.edges.resize_with(idx + 1, || None);
+        }
+        self.edge_free_list.retain(|&fid| fid != id);
+        self.edges[idx] = Some(Edge {
+            id,
+            label: label.into(),
+            from,
+            to,
+            properties: Arc::new(HashMap::new()),
+        });
+        self.outgoing_edges[from as usize].insert(id);
+        self.incoming_edges[to as usize].insert(id);
+        self.edge_count += 1;
+        Ok(id)
+    }
+
     /// エッジを取得
     pub fn get_edge(&self, id: EdgeId) -> Option<&Edge> {
         self.edges.get(id as usize)?.as_ref()

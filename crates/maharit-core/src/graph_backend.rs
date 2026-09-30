@@ -114,6 +114,18 @@ pub trait GraphBackend: Send + Sync {
 
     /// エッジのプロパティを削除して返す。
     fn remove_edge_property(&mut self, id: EdgeId, key: &str) -> Option<PropertyValue>;
+
+    /// 削除済みノードを元の ID で復元する（ROLLBACK 用）。プロパティは別途設定する。
+    fn restore_node(&mut self, id: NodeId, labels: Vec<String>);
+
+    /// 削除済みエッジを元の ID で復元する（ROLLBACK 用）。プロパティは別途設定する。
+    fn restore_edge(
+        &mut self,
+        id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: String,
+    ) -> Result<(), GraphError>;
 }
 
 // ── Graph 実装 ─────────────────────────────────────────────────────────────
@@ -233,6 +245,20 @@ impl GraphBackend for Graph {
     fn remove_edge_property(&mut self, id: EdgeId, key: &str) -> Option<PropertyValue> {
         Graph::get_edge_mut(self, id)?.remove_property(key)
     }
+
+    fn restore_node(&mut self, id: NodeId, labels: Vec<String>) {
+        Graph::create_node_with_id_and_labels(self, id, labels);
+    }
+
+    fn restore_edge(
+        &mut self,
+        id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: String,
+    ) -> Result<(), GraphError> {
+        Graph::create_edge_with_id(self, id, from, to, label).map(|_| ())
+    }
 }
 
 // ── ConcurrentGraph 実装 ─────────────────────────────────────────────────
@@ -349,5 +375,19 @@ impl GraphBackend for ConcurrentGraph {
 
     fn remove_edge_property(&mut self, id: EdgeId, key: &str) -> Option<PropertyValue> {
         ConcurrentGraph::remove_edge_property(self, id, key)
+    }
+
+    fn restore_node(&mut self, id: NodeId, labels: Vec<String>) {
+        ConcurrentGraph::create_node_with_id_and_labels(self, id, labels);
+    }
+
+    fn restore_edge(
+        &mut self,
+        id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: String,
+    ) -> Result<(), GraphError> {
+        ConcurrentGraph::create_edge_with_id(self, id, from, to, label).map(|_| ())
     }
 }
