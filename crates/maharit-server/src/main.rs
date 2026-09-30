@@ -4,6 +4,7 @@ pub mod coordinator;
 pub mod http_server;
 pub mod logging;
 pub mod metrics;
+pub mod mutation_log;
 mod repl;
 pub mod replication;
 pub mod tcp_server;

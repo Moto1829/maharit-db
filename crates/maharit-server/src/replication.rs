@@ -19,6 +19,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{interval, timeout};
 
+use crate::mutation_log::property_value_to_wal_string;
+
 /// Error types for replication operations
 #[derive(Debug, thiserror::Error)]
 pub enum ReplicationError {
@@ -104,6 +106,16 @@ pub enum WalEntryData {
         key: String,
         value: String,
     },
+    /// A property was removed from a node or edge
+    RemoveProperty {
+        target_id: u64,
+        is_node: bool,
+        key: String,
+    },
+    /// A label was added to a node
+    AddLabel { node_id: u64, label: String },
+    /// A label was removed from a node
+    RemoveLabel { node_id: u64, label: String },
 }
 
 /// Messages exchanged between leader and follower over the replication channel
@@ -397,18 +409,7 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
             labels: node.labels.clone(),
         });
         for (key, val) in node.properties.iter() {
-            let value = match val {
-                PropertyValue::Null => "null".to_string(),
-                PropertyValue::Bool(b) => b.to_string(),
-                PropertyValue::Int(n) => n.to_string(),
-                PropertyValue::Float(n) => n.to_string(),
-                PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
-                PropertyValue::Date(_)
-                | PropertyValue::DateTime(_)
-                | PropertyValue::Duration { .. } => {
-                    serde_json::to_string(&val.to_string()).unwrap_or_default()
-                }
-            };
+            let value = property_value_to_wal_string(val);
             entries.push(WalEntryData::SetProperty {
                 target_id: node.id,
                 is_node: true,
@@ -426,18 +427,7 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
             label: edge.label.clone(),
         });
         for (key, val) in edge.properties.iter() {
-            let value = match val {
-                PropertyValue::Null => "null".to_string(),
-                PropertyValue::Bool(b) => b.to_string(),
-                PropertyValue::Int(n) => n.to_string(),
-                PropertyValue::Float(n) => n.to_string(),
-                PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
-                PropertyValue::Date(_)
-                | PropertyValue::DateTime(_)
-                | PropertyValue::Duration { .. } => {
-                    serde_json::to_string(&val.to_string()).unwrap_or_default()
-                }
-            };
+            let value = property_value_to_wal_string(val);
             entries.push(WalEntryData::SetProperty {
                 target_id: edge.id,
                 is_node: false,
@@ -769,9 +759,14 @@ fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
             graph.delete_node(*node_id);
         }
         WalEntryData::CreateEdge {
-            from, to, label, ..
+            edge_id,
+            from,
+            to,
+            label,
         } => {
-            if let Err(e) = graph.create_edge(*from, *to, label) {
+            // Keep the leader's edge ID so later SetProperty/DeleteEdge entries
+            // (which address edges by ID) hit the same edge on the follower.
+            if let Err(e) = graph.create_edge_with_id(*edge_id, *from, *to, label) {
                 eprintln!("WAL apply: create_edge failed: {}", e);
             }
         }
@@ -806,6 +801,23 @@ fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
             } else {
                 graph.set_edge_property(*target_id, key, prop_val);
             }
+        }
+        WalEntryData::RemoveProperty {
+            target_id,
+            is_node,
+            key,
+        } => {
+            if *is_node {
+                graph.remove_node_property(*target_id, key);
+            } else {
+                graph.remove_edge_property(*target_id, key);
+            }
+        }
+        WalEntryData::AddLabel { node_id, label } => {
+            graph.add_node_label(*node_id, label.clone());
+        }
+        WalEntryData::RemoveLabel { node_id, label } => {
+            graph.remove_node_label(*node_id, label);
         }
     }
 }
@@ -1198,6 +1210,72 @@ mod tests {
             prop.flatten(),
             Some(PropertyValue::String("Alice".to_string()))
         );
+    }
+
+    #[test]
+    fn test_apply_wal_entry_updates_and_edge_ids() {
+        use maharit_core::{ConcurrentGraph, GraphBackend};
+        let graph = Arc::new(ConcurrentGraph::new());
+        for id in [0, 1] {
+            apply_wal_entry(
+                &graph,
+                &WalEntryData::CreateNode {
+                    node_id: id,
+                    labels: vec!["N".to_string()],
+                },
+            );
+        }
+        // The follower must keep the leader's edge ID even when it differs
+        // from what its own counter would allocate.
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::CreateEdge {
+                edge_id: 7,
+                from: 0,
+                to: 1,
+                label: "R".to_string(),
+            },
+        );
+        assert!(graph.get_edge(7).is_some());
+
+        let set = |target_id, is_node, key: &str, value: &str| WalEntryData::SetProperty {
+            target_id,
+            is_node,
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        apply_wal_entry(&graph, &set(7, false, "w", "1.0"));
+        assert_eq!(
+            graph.get_edge(7).unwrap().properties.get("w"),
+            Some(&PropertyValue::Float(1.0))
+        );
+        apply_wal_entry(&graph, &set(0, true, "name", "\"a\""));
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::RemoveProperty {
+                target_id: 0,
+                is_node: true,
+                key: "name".to_string(),
+            },
+        );
+        assert_eq!(graph.get_node_property(0, "name"), None);
+
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::AddLabel {
+                node_id: 0,
+                label: "Q".to_string(),
+            },
+        );
+        apply_wal_entry(
+            &graph,
+            &WalEntryData::RemoveLabel {
+                node_id: 0,
+                label: "N".to_string(),
+            },
+        );
+        let node = graph.get_node(0).unwrap();
+        assert!(node.has_label("Q") && !node.has_label("N"));
     }
 
     #[test]

@@ -4,8 +4,6 @@
 //! エグゼキュータや制約マネージャーはこのトレイトを介してグラフを操作するため、
 //! どちらの実装でも透過的に動作する。
 
-use std::sync::Arc;
-
 use crate::GraphError;
 use crate::concurrent_graph::ConcurrentGraph;
 use crate::graph::{Edge, EdgeId, Graph, Node, NodeId};
@@ -334,8 +332,7 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn remove_node_property(&mut self, id: NodeId, key: &str) -> Option<PropertyValue> {
-        self.with_node_mut(id, |n| Arc::make_mut(&mut n.properties).remove(key))
-            .flatten()
+        ConcurrentGraph::remove_node_property(self, id, key)
     }
 
     fn add_node_label(&mut self, id: NodeId, label: String) {
@@ -351,7 +348,6 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn remove_edge_property(&mut self, id: EdgeId, key: &str) -> Option<PropertyValue> {
-        self.with_edge_mut(id, |e| Arc::make_mut(&mut e.properties).remove(key))
-            .flatten()
+        ConcurrentGraph::remove_edge_property(self, id, key)
     }
 }

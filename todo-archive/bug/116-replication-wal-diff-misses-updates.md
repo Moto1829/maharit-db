@@ -47,11 +47,11 @@ ConcurrentGraph はロックなしで並行書き込みされるため、クエ�
 
 ## 受け入れ条件
 
-- [ ] 既存ノード/エッジへの SET・REMOVE・ラベル変更がフォロワーに反映されるユニットテスト
-- [ ] 並行書き込み時に WAL エントリが重複しないこと
-- [ ] `scripts/replication_test.py` に SET / REMOVE / ラベル変更のケースを追加しグリーン
-- [ ] `scripts/failover_test.py` グリーン
-- [ ] レプリケーション有効時の書き込みベンチがノード数に依存しないこと
+- [x] 既存ノード/エッジへの SET・REMOVE・ラベル変更がフォロワーに反映されるユニットテスト
+- [x] 並行書き込み時に WAL エントリが重複しないこと
+- [x] `scripts/replication_test.py` に SET / REMOVE / ラベル変更のケースを追加しグリーン
+- [x] `scripts/failover_test.py` グリーン
+- [x] レプリケーション有効時の書き込みベンチがノード数に依存しないこと
 
 ## 対象ファイル
 
@@ -59,3 +59,36 @@ ConcurrentGraph はロックなしで並行書き込みされるため、クエ�
 - `crates/maharit-server/src/replication.rs`（`WalEntryData`、フォロワー適用処理）
 - `crates/maharit-query/src/executor.rs`（mutation log 記録）
 - `scripts/replication_test.py`
+
+## 完了内容 (2026-09-30)
+
+方針を「Executor に mutation log を持たせる」から **GraphBackend ラッパーで記録する** 形に変更（Executor の書き込みは
+すべて `GraphBackend` の 9 メソッドを通るため、Executor 本体の変更が最小で済む）。
+
+- `crates/maharit-server/src/mutation_log.rs`（新規）: `RecordingGraph` が `ConcurrentGraph` を包み、
+  CreateNode / CreateEdge / DeleteNode / DeleteEdge / SetProperty / RemoveProperty / AddLabel / RemoveLabel を実行順に記録
+  - レプリケーション無効時は記録しない（`enabled=false`）
+- `WalEntryData` に `RemoveProperty` / `AddLabel` / `RemoveLabel` を追加、フォロワーの `apply_wal_entry` に適用処理を追加
+- `Executor::new_with_backend_exclusive(&mut dyn GraphBackend, …)` を追加（graph ポインタを `*mut (dyn GraphBackend + 'a)` に）
+- `emit_wal_diff`（全 ID 集合の前後比較）と書き込み毎の ID スナップショットを削除 → `emit_wal_entries(log)`
+- 並行書き込みの差分混入: task114 の `write_gate` で書き込みを直列化し、WAL 送出まで保持するため解消
+- 失敗した文でも適用済みの変更は WAL に流す（リーダーのグラフはロールバックされないため）
+
+### 調査中に見つけて併せて修正
+- フォロワーが `CreateEdge.edge_id` を無視して独自採番していた → `ConcurrentGraph::create_edge_with_id` を追加して leader の ID を維持
+- `Float(1.0)` が `"1"` とエンコードされフォロワーで `Int` になっていた → `{:?}` で `"1.0"` に（snapshot 側のエンコーダも共通化）
+- `ConcurrentGraph` に `remove_node_property` / `remove_edge_property`（&self）を追加
+
+### 検証
+- ユニットテスト: `RecordingGraph` の記録順・無効時・Float エンコード、`SharedManagers::execute` の SET/REMOVE/ラベル記録、
+  フォロワー適用（エッジ ID 維持・RemoveProperty・Add/RemoveLabel・Float 型）
+- `cargo test --workspace` 1114 passed、clippy/fmt クリーン
+- `replication_test.py` に「既存要素の更新の伝播確認」（SET+ラベル / REMOVE / エッジ SET の Float 型）を追加 → 35/35 通過を確認
+- `failover_test.py --no-docker` 18/18
+- 単一サーバー E2E（smoke 32 / concurrent 19 / constraint 26 / query_feature 63）全通過
+
+### 残課題（別タスク化）
+- replication_test が不安定（変更前バイナリでも 4 回中 3 回失敗 → 既存不具合）: bug/120
+- ROLLBACK がフォロワーへ複製されない: bug/117
+- tx 経路の undo 用 `take_concurrent_snapshot` は依然 O(N)（`RecordingGraph` のログから undo を作れば解消可能）
+- 旧バージョンのフォロワーは新しい WAL バリアントをデシリアライズできない（0.x のためローリング更新非対応として許容）

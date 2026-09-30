@@ -170,6 +170,43 @@ def test_write_propagation_sequential(leader, followers: list, wait_sec: float):
         check(f"フォロワー{i}: Repl_Dave が伝播", len(rows) == 1, str(rows))
 
 
+def test_update_propagation(leader, followers: list, wait_sec: float):
+    """既存要素への SET / REMOVE / ラベル変更 / エッジプロパティの伝播（task116）"""
+    section("既存要素の更新の伝播確認")
+
+    for q, label in [
+        ("MATCH (n:ReplTest {name: 'Repl_Alice'}) SET n.age = 31, n:ReplUpdated", "SET プロパティ+ラベル"),
+        ("MATCH (n:ReplTest {name: 'Repl_Bob'}) REMOVE n.ts", "REMOVE プロパティ"),
+        ("MATCH (a:ReplTest)-[r:REPL_KNOWS]->(b:ReplTest) SET r.weight = 1.0", "エッジ SET"),
+    ]:
+        resp = leader.query(q)
+        check(f"リーダー: {label}", resp.get("type") == "result", str(resp))
+
+    print(f"  {YELLOW}⏳ {wait_sec}秒待機中...{RESET}")
+    time.sleep(wait_sec)
+
+    for i, follower in enumerate(followers, 1):
+        if not follower:
+            continue
+        rows = follower.query(
+            "MATCH (n:ReplUpdated {name: 'Repl_Alice'}) RETURN n.age"
+        ).get("rows", [])
+        check(f"フォロワー{i}: SET n.age / SET n:ReplUpdated が伝播",
+              len(rows) == 1 and str(rows[0].get("n.age")) == "31", str(rows))
+
+        rows = follower.query(
+            "MATCH (n:ReplTest {name: 'Repl_Bob'}) RETURN n.ts"
+        ).get("rows", [])
+        check(f"フォロワー{i}: REMOVE n.ts が伝播",
+              len(rows) == 1 and rows[0].get("n.ts") in (None, "null"), str(rows))
+
+        rows = follower.query(
+            "MATCH (a:ReplTest)-[r:REPL_KNOWS]->(b:ReplTest) RETURN r.weight"
+        ).get("rows", [])
+        check(f"フォロワー{i}: エッジ SET r.weight が伝播（Float 型維持）",
+              len(rows) == 1 and str(rows[0].get("r.weight")) == "1.0", str(rows))
+
+
 def test_cleanup(leader):
     section("クリーンアップ（リーダーから削除）")
 
@@ -285,6 +322,7 @@ def main():
         test_replication_propagation(leader, followers, names, args.wait)
         test_follower_read_consistency(followers, names)
         test_write_propagation_sequential(leader, followers, args.wait)
+        test_update_propagation(leader, followers, args.wait)
         test_cleanup(leader)
         test_cleanup_propagation(followers, args.wait)
     finally:

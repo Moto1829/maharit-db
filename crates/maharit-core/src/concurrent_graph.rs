@@ -299,6 +299,50 @@ impl ConcurrentGraph {
         Ok(id)
     }
 
+    /// Create an edge with a caller-chosen ID (used when replaying a leader's WAL
+    /// so that follower edge IDs match the leader's).
+    ///
+    /// Advances the internal edge ID counter past `id`.
+    pub fn create_edge_with_id(
+        &self,
+        id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+        label: impl Into<String>,
+    ) -> Result<EdgeId, GraphError> {
+        if !self.nodes.contains_key(&from) {
+            return Err(GraphError::NodeNotFound(from));
+        }
+        if !self.nodes.contains_key(&to) {
+            return Err(GraphError::NodeNotFound(to));
+        }
+        let mut current = self.next_edge_id.load(Ordering::SeqCst);
+        while current <= id {
+            match self.next_edge_id.compare_exchange(
+                current,
+                id + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
+        self.edges.insert(
+            id,
+            Edge {
+                id,
+                label: label.into(),
+                from,
+                to,
+                properties: Arc::new(std::collections::HashMap::new()),
+            },
+        );
+        self.outgoing.entry(from).or_default().insert(id);
+        self.incoming.entry(to).or_default().insert(id);
+        Ok(id)
+    }
+
     /// Read-only access to an edge via a closure.
     pub fn with_edge<F, R>(&self, id: EdgeId, f: F) -> Option<R>
     where
@@ -355,6 +399,18 @@ impl ConcurrentGraph {
             props.insert(key.to_string(), value);
             edge.properties = Arc::new(props);
         }
+    }
+
+    /// Remove a property from a node, returning the old value.
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
+        self.with_node_mut(id, |n| Arc::make_mut(&mut n.properties).remove(key))
+            .flatten()
+    }
+
+    /// Remove a property from an edge, returning the old value.
+    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<PropertyValue> {
+        self.with_edge_mut(id, |e| Arc::make_mut(&mut e.properties).remove(key))
+            .flatten()
     }
 
     /// Collect outgoing edges for a node into a Vec (snapshot).

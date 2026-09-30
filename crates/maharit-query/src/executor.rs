@@ -401,7 +401,7 @@ pub struct Executor<'a> {
     ///   pointer cast.  Write methods on `ConcurrentGraph` use DashMap interior
     ///   mutability, so calling `graph_mut()` is safe even though the original
     ///   reference was shared.
-    graph: *mut dyn GraphBackend,
+    graph: *mut (dyn GraphBackend + 'a),
     readonly: bool,
     _marker: std::marker::PhantomData<&'a ()>,
     constraints: ManagerSlot<'a, ConstraintManager>,
@@ -554,25 +554,22 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Create an `Executor` for a [`ConcurrentGraph`] that updates the shared
-    /// managers in place (no clone-in / write-back).
+    /// Create an `Executor` over any writable [`GraphBackend`] that updates the
+    /// shared managers in place (no clone-in / write-back).
     ///
     /// Intended for write statements while the caller holds exclusive locks on
     /// the managers. Index updates stay in step with graph mutations even when
     /// the statement fails midway (the graph is not rolled back either).
-    ///
-    /// # Safety
-    ///
-    /// Same safety requirements as [`new_concurrent`].
-    pub unsafe fn new_concurrent_exclusive(
-        graph: &'a ConcurrentGraph,
+    /// The backend may be a wrapper around a [`ConcurrentGraph`] (e.g. one that
+    /// records mutations for replication).
+    pub fn new_with_backend_exclusive(
+        graph: &'a mut (dyn GraphBackend + 'a),
         constraints: &'a mut ConstraintManager,
         fulltext: &'a mut FulltextManager,
         property_index: &'a mut PropertyIndex,
     ) -> Self {
-        let g: &dyn GraphBackend = graph;
         Self {
-            graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
+            graph: graph as *mut (dyn GraphBackend + 'a),
             readonly: false,
             _marker: std::marker::PhantomData,
             constraints: ManagerSlot::Exclusive(constraints),

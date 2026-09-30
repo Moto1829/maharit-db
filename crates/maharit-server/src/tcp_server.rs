@@ -25,6 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
+use crate::mutation_log::RecordingGraph;
 use crate::replication::{
     FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
 };
@@ -562,13 +563,20 @@ impl SharedManagers {
 
     /// Run `stmt` against `graph` with these managers.
     ///
-    /// Write statements must be executed while holding `write_gate`.
+    /// Write statements must be executed while holding `write_gate`. For writes
+    /// with `record_wal`, the returned log holds every graph mutation in
+    /// execution order (also when the statement fails midway, since the graph
+    /// is not rolled back and followers must see the same state).
     fn execute(
         &self,
         graph: &ConcurrentGraph,
         stmt: maharit_query::ast::Statement,
         is_write: bool,
-    ) -> Result<maharit_query::ResultSet, maharit_query::ExecuteError> {
+        record_wal: bool,
+    ) -> (
+        Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
+        Vec<WalEntryData>,
+    ) {
         // Lock order is always constraints → fulltext → property_index.
         // A poisoned lock only means another query panicked mid-execution; the
         // managers are still structurally valid, so keep serving.
@@ -579,11 +587,11 @@ impl SharedManagers {
                 .property_index
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
-            // executor uses the raw pointer only during this synchronous call.
-            let mut executor =
-                unsafe { Executor::new_concurrent_exclusive(graph, &mut cm, &mut fm, &mut pi) };
-            executor.execute(stmt)
+            let mut recorder = RecordingGraph::new(graph, record_wal);
+            let result =
+                Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
+                    .execute(stmt);
+            (result, recorder.into_log())
         } else {
             let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
             let fm = self.fulltext.read().unwrap_or_else(|e| e.into_inner());
@@ -591,9 +599,10 @@ impl SharedManagers {
                 .property_index
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            // SAFETY: as above.
+            // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
+            // executor uses the raw pointer only during this synchronous call.
             let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) };
-            executor.execute(stmt)
+            (executor.execute(stmt), Vec::new())
         }
     }
 }
@@ -1153,24 +1162,18 @@ async fn execute_streaming_query(
 
     let is_write = !is_read_only(&stmt);
 
-    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    // Serialize writers across execute → WAL emission (see SharedManagers).
     let write_guard = if is_write {
         Some(managers.write_gate.lock().await)
     } else {
         None
     };
 
-    // Snapshot node/edge IDs before execution for WAL diff (ConcurrentGraph: no lock needed).
-    let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
-        (
-            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
-            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
-        )
-    } else {
-        (HashSet::new(), HashSet::new())
-    };
-
-    let exec_result = managers.execute(graph, stmt, is_write);
+    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    if let Some(repl) = replication {
+        emit_wal_entries(wal, repl).await;
+    }
+    drop(write_guard);
 
     let result = match exec_result {
         Ok(r) => r,
@@ -1181,11 +1184,6 @@ async fn execute_streaming_query(
             return send_response(socket, &response, write_timeout).await;
         }
     };
-
-    if is_write && let Some(repl) = replication {
-        emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
-    }
-    drop(write_guard);
 
     // Convert rows to HashMap<String, serde_json::Value> 型情報維持
     let all_rows: Vec<HashMap<String, serde_json::Value>> = result
@@ -1369,29 +1367,20 @@ async fn execute_query_with_tx(
         return execute_query(graph, query, managers, replication, ast_cache).await;
     }
 
-    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    // Serialize writers across execute → WAL emission (see SharedManagers).
     let _write_guard = managers.write_gate.lock().await;
 
-    // Snapshot before execution for undo tracking and WAL diff.
+    // Snapshot before execution for undo tracking.
     let snapshot = take_concurrent_snapshot(graph);
-    let (node_ids_before, edge_ids_before) = if replication.is_some() {
-        (
-            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
-            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
-        )
-    } else {
-        (HashSet::new(), HashSet::new())
-    };
 
-    let exec_result = managers.execute(graph, stmt, is_write);
+    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    if let Some(repl) = replication {
+        emit_wal_entries(wal, repl).await;
+    }
 
     match exec_result {
         Ok(result) => {
             record_undo_diff_concurrent(graph, &snapshot, tx_id, tx_manager);
-
-            if let Some(repl) = replication {
-                emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
-            }
 
             let rows: Vec<HashMap<String, serde_json::Value>> = result
                 .rows
@@ -1436,27 +1425,16 @@ async fn execute_query(
 
     let is_write = !is_read_only(&stmt);
 
-    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    // Serialize writers across execute → WAL emission (see SharedManagers).
     let write_guard = if is_write {
         Some(managers.write_gate.lock().await)
     } else {
         None
     };
 
-    // Snapshot node/edge IDs before execution for WAL diff (no lock needed).
-    let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
-        (
-            graph.node_ids().into_iter().collect::<HashSet<NodeId>>(),
-            graph.edge_ids().into_iter().collect::<HashSet<EdgeId>>(),
-        )
-    } else {
-        (HashSet::new(), HashSet::new())
-    };
-
-    let exec_result = managers.execute(graph, stmt, is_write);
-
-    if is_write && let (Ok(_), Some(repl)) = (&exec_result, replication) {
-        emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    if let Some(repl) = replication {
+        emit_wal_entries(wal, repl).await;
     }
     drop(write_guard);
 
@@ -1483,97 +1461,11 @@ async fn execute_query(
     }
 }
 
-/// Compute a diff of node/edge sets before vs after a write operation and emit
-/// corresponding WAL entries to the replication manager.
-///
-/// Detects:
-/// - New nodes (created): emits `WalEntryData::CreateNode`
-/// - Deleted nodes: emits `WalEntryData::DeleteNode`
-/// - New edges (created): emits `WalEntryData::CreateEdge`
-/// - Deleted edges: emits `WalEntryData::DeleteEdge`
-///
-/// Property changes are not tracked automatically (a future improvement could
-/// compare property maps before and after).
-/// Serialize a `PropertyValue` to a JSON string for WAL transport.
-fn property_value_to_wal_string(val: &PropertyValue) -> String {
-    match val {
-        PropertyValue::Null => "null".to_string(),
-        PropertyValue::Bool(b) => b.to_string(),
-        PropertyValue::Int(n) => n.to_string(),
-        PropertyValue::Float(n) => n.to_string(),
-        PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
-        other => serde_json::to_string(&other.to_string()).unwrap_or_default(),
-    }
-}
-
-async fn emit_wal_diff(
-    graph: &dyn GraphBackend,
-    node_ids_before: &HashSet<NodeId>,
-    edge_ids_before: &HashSet<EdgeId>,
-    replication: &LeaderReplicationManager,
-) {
-    // Detect new and deleted nodes.
-    for node in graph.all_nodes() {
-        if !node_ids_before.contains(&node.id) {
-            replication
-                .append_wal_entry(WalEntryData::CreateNode {
-                    node_id: node.id,
-                    labels: node.labels.clone(),
-                })
-                .await;
-            // Replicate properties of the new node.
-            for (key, val) in node.properties.iter() {
-                let value = property_value_to_wal_string(val);
-                replication
-                    .append_wal_entry(WalEntryData::SetProperty {
-                        target_id: node.id,
-                        is_node: true,
-                        key: key.clone(),
-                        value,
-                    })
-                    .await;
-            }
-        }
-    }
-    for &old_id in node_ids_before {
-        if graph.get_node(old_id).is_none() {
-            replication
-                .append_wal_entry(WalEntryData::DeleteNode { node_id: old_id })
-                .await;
-        }
-    }
-
-    // Detect new and deleted edges.
-    for edge in graph.all_edges() {
-        if !edge_ids_before.contains(&edge.id) {
-            replication
-                .append_wal_entry(WalEntryData::CreateEdge {
-                    edge_id: edge.id,
-                    from: edge.from,
-                    to: edge.to,
-                    label: edge.label.clone(),
-                })
-                .await;
-            // Replicate properties of the new edge.
-            for (key, val) in edge.properties.iter() {
-                let value = property_value_to_wal_string(val);
-                replication
-                    .append_wal_entry(WalEntryData::SetProperty {
-                        target_id: edge.id,
-                        is_node: false,
-                        key: key.clone(),
-                        value,
-                    })
-                    .await;
-            }
-        }
-    }
-    for &old_id in edge_ids_before {
-        if graph.get_edge(old_id).is_none() {
-            replication
-                .append_wal_entry(WalEntryData::DeleteEdge { edge_id: old_id })
-                .await;
-        }
+/// Forward the mutations recorded during a write statement to the WAL, in
+/// execution order.
+async fn emit_wal_entries(entries: Vec<WalEntryData>, replication: &LeaderReplicationManager) {
+    for entry in entries {
+        replication.append_wal_entry(entry).await;
     }
 }
 
@@ -1954,37 +1846,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_emit_wal_diff_create_node() {
+    async fn test_emit_wal_entries_appends_in_order() {
         use crate::replication::{LeaderReplicationManager, ReplicationConfig};
 
         let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
-        let graph = ConcurrentGraph::new();
-        let empty_nodes: HashSet<NodeId> = HashSet::new();
-        let empty_edges: HashSet<EdgeId> = HashSet::new();
+        emit_wal_entries(
+            vec![
+                WalEntryData::CreateNode {
+                    node_id: 0,
+                    labels: vec!["Person".to_string()],
+                },
+                WalEntryData::DeleteNode { node_id: 0 },
+            ],
+            &repl,
+        )
+        .await;
 
-        graph.create_node_with_labels(vec!["Person".to_string()]);
-
-        emit_wal_diff(&graph, &empty_nodes, &empty_edges, &repl).await;
-
-        // WAL LSN should be 1 after one CreateNode entry.
-        assert_eq!(repl.get_stats().current_lsn, 1);
+        assert_eq!(repl.get_stats().current_lsn, 2);
     }
 
-    #[tokio::test]
-    async fn test_emit_wal_diff_delete_node() {
-        use crate::replication::{LeaderReplicationManager, ReplicationConfig};
-
-        let repl = Arc::new(LeaderReplicationManager::new(ReplicationConfig::default()));
+    /// SET / REMOVE / label changes on existing nodes must be captured for
+    /// replication (the old before/after ID-set diff missed them entirely).
+    #[test]
+    fn write_execution_records_updates_to_existing_elements() {
         let graph = ConcurrentGraph::new();
+        let managers = SharedManagers::new();
+        let parse = |q: &str| Parser::new(q).unwrap().parse().unwrap();
 
-        // Simulate: node 0 existed before but no longer does.
-        let before_nodes: HashSet<NodeId> = [0].iter().copied().collect();
-        let empty_edges: HashSet<EdgeId> = HashSet::new();
+        let (r, _) = managers.execute(&graph, parse("CREATE (:P {name: 'a', age: 1})"), true, true);
+        r.unwrap();
 
-        emit_wal_diff(&graph, &before_nodes, &empty_edges, &repl).await;
+        let (r, wal) =
+            managers.execute(&graph, parse("MATCH (n:P) SET n.age = 2, n:Q"), true, true);
+        r.unwrap();
+        assert!(wal.iter().any(|e| matches!(
+            e,
+            WalEntryData::SetProperty { key, value, .. } if key == "age" && value == "2"
+        )));
+        assert!(wal.iter().any(|e| matches!(
+            e,
+            WalEntryData::AddLabel { label, .. } if label == "Q"
+        )));
 
-        // One DeleteNode entry should have been emitted.
-        assert_eq!(repl.get_stats().current_lsn, 1);
+        let (r, wal) =
+            managers.execute(&graph, parse("MATCH (n:P) REMOVE n.name, n:P"), true, true);
+        r.unwrap();
+        assert!(wal.iter().any(|e| matches!(
+            e,
+            WalEntryData::RemoveProperty { key, .. } if key == "name"
+        )));
+        assert!(wal.iter().any(|e| matches!(
+            e,
+            WalEntryData::RemoveLabel { label, .. } if label == "P"
+        )));
+
+        // Without replication nothing is recorded.
+        let (r, wal) = managers.execute(&graph, parse("MATCH (n:P) SET n.age = 3"), true, false);
+        r.unwrap();
+        assert!(wal.is_empty());
     }
 
     // ── Integration tests (actual TCP socket communication) ──────────────────
