@@ -907,13 +907,60 @@ impl Parser {
             | Some(TokenKind::False)
             | Some(TokenKind::Null)
             | Some(TokenKind::Not)
-            | Some(TokenKind::Minus) => {
+            | Some(TokenKind::Minus)
+            | Some(TokenKind::Dash)
+            | Some(TokenKind::Case)
+            | Some(TokenKind::Parameter(_))
+            | Some(TokenKind::LParen)
+            | Some(TokenKind::LBrace) => {
                 let expr = self.parse_expression()?;
                 return Ok(ReturnItem::Expr(expr));
             }
             _ => {}
         }
 
+        let saved_pos = self.pos;
+        let item = self.parse_simple_return_item()?;
+        // `n.age + 1`, `toUpper(n.name) = 'X'`, `n.list[0]`…: an operator after a
+        // simple item means the whole item is an expression. Re-parse it as one
+        // (aggregates cannot appear inside expressions, so they stay as they are).
+        if !matches!(item, ReturnItem::Aggregate(_)) && self.at_expression_operator() {
+            self.pos = saved_pos;
+            return Ok(ReturnItem::Expr(self.parse_expression()?));
+        }
+        Ok(item)
+    }
+
+    /// Whether the next token continues an expression (binary operator,
+    /// comparison, predicate keyword or index access).
+    fn at_expression_operator(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            Some(
+                TokenKind::Plus
+                    | TokenKind::Dash
+                    | TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Eq
+                    | TokenKind::Neq
+                    | TokenKind::Lt
+                    | TokenKind::Gt
+                    | TokenKind::Lte
+                    | TokenKind::Gte
+                    | TokenKind::RegexMatch
+                    | TokenKind::Contains
+                    | TokenKind::Starts
+                    | TokenKind::Ends
+                    | TokenKind::In
+                    | TokenKind::Is
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::LBracket
+            )
+        )
+    }
+
+    fn parse_simple_return_item(&mut self) -> Result<ReturnItem, ParseError> {
         let saved_pos = self.pos;
         let var = self.expect_ident()?;
 
@@ -2285,9 +2332,18 @@ impl Parser {
 
     /// Parse subquery pattern body for EXISTS/COUNT: MATCH pattern [WHERE expr]
     fn parse_subquery_pattern(&mut self) -> Result<SubqueryPattern, ParseError> {
-        self.expect(TokenKind::Match)?;
-        let match_clause = self.parse_match_clause(false)?;
-        let patterns = match_clause.patterns;
+        // `EXISTS { MATCH (n)-->() WHERE … }` or the short form `EXISTS { (n)-->() }`
+        let patterns = if self.check(TokenKind::Match) {
+            self.expect(TokenKind::Match)?;
+            self.parse_match_clause(false)?.patterns
+        } else {
+            let mut patterns = vec![self.parse_pattern()?];
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                patterns.push(self.parse_pattern()?);
+            }
+            patterns
+        };
 
         let where_clause = if self.check(TokenKind::Where) {
             self.advance();
@@ -2335,10 +2391,23 @@ impl Parser {
     // ========== Pattern ==========
 
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // Path variable: `p = (a)-[..]->(b)`
+        let path_variable = match (
+            self.tokens.get(self.pos).map(|t| &t.kind),
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+        ) {
+            (Some(TokenKind::Ident(_)), Some(TokenKind::Eq)) => {
+                let name = self.expect_ident()?;
+                self.advance(); // consume '='
+                Some(name)
+            }
+            _ => None,
+        };
+
         let start = self.parse_node_pattern()?;
 
         // Check if it's a path pattern
-        if self.is_edge_start() {
+        if self.is_edge_start() || path_variable.is_some() {
             let mut segments = Vec::new();
 
             while self.is_edge_start() {
@@ -2347,7 +2416,11 @@ impl Parser {
                 segments.push(PathSegment { edge, node });
             }
 
-            Ok(Pattern::Path(PathPattern { start, segments }))
+            Ok(Pattern::Path(PathPattern {
+                variable: path_variable,
+                start,
+                segments,
+            }))
         } else {
             Ok(Pattern::Node(start))
         }
@@ -2605,11 +2678,26 @@ impl Parser {
             }
             Some(TokenKind::Is) => {
                 self.advance(); // consume IS
-                if self.check(TokenKind::Normalized) {
+                let negated = if self.check(TokenKind::Not) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                if self.check(TokenKind::Null) {
+                    self.advance();
+                    let op = if negated {
+                        UnaryOp::IsNotNull
+                    } else {
+                        UnaryOp::IsNull
+                    };
+                    return Ok(Expression::UnaryOp(op, Box::new(left)));
+                }
+                if !negated && self.check(TokenKind::Normalized) {
                     self.advance(); // consume NORMALIZED
                     return Ok(Expression::UnaryOp(UnaryOp::IsNormalized, Box::new(left)));
                 }
-                return Err(self.unexpected_token("NORMALIZED"));
+                return Err(self.unexpected_token("NULL, NOT NULL or NORMALIZED"));
             }
             _ => return Ok(left),
         };
@@ -2710,6 +2798,7 @@ impl Parser {
                                 segments.push(PathSegment { edge, node });
                             }
                             Pattern::Path(PathPattern {
+                                variable: None,
                                 start: start_node,
                                 segments,
                             })
@@ -2823,7 +2912,19 @@ impl Parser {
                                 Box::new(arg),
                             )));
                         }
-                        _ => {} // fall through to subquery/property/variable handling
+                        _ => {
+                            // Any other function: reuse the RETURN-item function
+                            // parser, which knows every scalar function.
+                            return match self.parse_aggregate_function(&var)? {
+                                ReturnItem::Function(f) => Ok(Expression::ScalarFn(f)),
+                                ReturnItem::Expr(e) => Ok(e),
+                                _ => Err(ParseError::UnexpectedToken {
+                                    expected: "scalar function".to_string(),
+                                    found: format!("aggregate function {var}()"),
+                                    span: self.current_span(),
+                                }),
+                            };
+                        }
                     }
                 }
                 // Check for EXISTS/COUNT/COLLECT subqueries (identifier followed by '{')

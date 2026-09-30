@@ -337,6 +337,10 @@ impl BindingValue {
 // 変数名インターナーは持たず、insert 時に `Arc::from(var)` で確保する。
 type Bindings = HashMap<Arc<str>, BindingValue>;
 
+/// Prefix of hidden variables given to anonymous nodes while matching a path.
+/// It contains a NUL character, so no query can refer to such a variable.
+const ANON_VAR_PREFIX: &str = "\u{0}anon";
+
 /// 共有マネージャ（制約・全文検索・プロパティ索引）の保持形態。
 ///
 /// サーバーはクエリ毎にマネージャを deep clone せず、読み取りクエリには共有参照、
@@ -2575,6 +2579,7 @@ impl<'a> Executor<'a> {
             .map(|p| match p {
                 Pattern::Node(np) => Pattern::Node(Self::augment_node_pattern(np, eqs)),
                 Pattern::Path(pp) => Pattern::Path(PathPattern {
+                    variable: pp.variable.clone(),
                     start: Self::augment_node_pattern(&pp.start, eqs),
                     segments: pp
                         .segments
@@ -3146,15 +3151,95 @@ impl<'a> Executor<'a> {
         pattern: &PathPattern,
         current_bindings: Vec<Bindings>,
     ) -> Result<Vec<Bindings>, ExecuteError> {
-        // Start with matching the start node
-        let mut bindings = self.match_node_pattern(&pattern.start, current_bindings)?;
+        // Each hop continues from the node matched by the previous hop, so every
+        // node on the path needs a binding. Anonymous nodes (`()`, `(:Label)`)
+        // get a hidden variable name that no query can spell, which is removed
+        // again once the whole path has matched.
+        // A path variable additionally needs every relationship bound.
+        let has_anonymous = pattern.start.variable.is_none()
+            || pattern.segments.iter().any(|s| s.node.variable.is_none())
+            || (pattern.variable.is_some()
+                && pattern.segments.iter().any(|s| s.edge.variable.is_none()));
+        let named;
+        let pattern = if has_anonymous {
+            let mut p = pattern.clone();
+            let mut n = 0;
+            let mut fresh = || {
+                n += 1;
+                Some(format!("{ANON_VAR_PREFIX}{n}"))
+            };
+            if p.start.variable.is_none() {
+                p.start.variable = fresh();
+            }
+            let bind_edges = p.variable.is_some();
+            for segment in &mut p.segments {
+                if segment.node.variable.is_none() {
+                    segment.node.variable = fresh();
+                }
+                if bind_edges && segment.edge.variable.is_none() {
+                    segment.edge.variable = fresh();
+                }
+            }
+            named = p;
+            &named
+        } else {
+            pattern
+        };
 
-        // Match each segment
+        let mut bindings = self.match_node_pattern(&pattern.start, current_bindings)?;
+        let mut prev = &pattern.start;
         for segment in &pattern.segments {
-            bindings = self.match_segment(segment, &pattern.start, bindings)?;
+            bindings = self.match_segment(segment, prev, bindings)?;
+            prev = &segment.node;
         }
 
+        if let Some(path_var) = &pattern.variable {
+            for b in &mut bindings {
+                let path = Self::assemble_path(pattern, b)?;
+                b.insert(Arc::from(path_var.as_str()), path);
+            }
+        }
+
+        if has_anonymous {
+            for b in &mut bindings {
+                b.retain(|k, _| !k.starts_with(ANON_VAR_PREFIX));
+            }
+        }
         Ok(bindings)
+    }
+
+    /// Build the value of a path variable from the node / relationship
+    /// bindings of a fully matched (and fully named) path pattern.
+    fn assemble_path(pattern: &PathPattern, b: &Bindings) -> Result<BindingValue, ExecuteError> {
+        let node_of = |var: &Option<String>| {
+            var.as_deref()
+                .and_then(|v| b.get(v))
+                .and_then(|v| v.as_node())
+                .ok_or_else(|| ExecuteError::TypeError("path node is not bound".to_string()))
+        };
+        let mut nodes = vec![node_of(&pattern.start.variable)?];
+        let mut edges = Vec::new();
+        for segment in &pattern.segments {
+            match segment.edge.variable.as_deref().and_then(|v| b.get(v)) {
+                Some(BindingValue::Edge(id)) => edges.push(*id),
+                // Variable-length hop: its nodes include the hop's start node.
+                Some(BindingValue::Path {
+                    nodes: hop_nodes,
+                    edges: hop_edges,
+                }) => {
+                    edges.extend(hop_edges.iter().copied());
+                    nodes.extend(hop_nodes.iter().skip(1).copied());
+                    continue;
+                }
+                _ => {
+                    return Err(ExecuteError::TypeError(
+                        "path relationship is not bound".to_string(),
+                    ));
+                }
+            }
+            nodes.push(node_of(&segment.node.variable)?);
+        }
+        Ok(BindingValue::Path { nodes, edges })
     }
 
     fn match_segment(
@@ -5906,6 +5991,25 @@ impl<'a> Executor<'a> {
                     }
                     _ => {}
                 }
+                // String concatenation: 'a' + 'b', 'n=' + 1
+                match (left, right) {
+                    (Value::String(a), Value::String(b)) => {
+                        return Ok(Value::String(format!("{a}{b}")));
+                    }
+                    (
+                        Value::String(a),
+                        other @ (Value::Int(_) | Value::Float(_) | Value::Bool(_)),
+                    ) => {
+                        return Ok(Value::String(format!("{a}{other}")));
+                    }
+                    (
+                        other @ (Value::Int(_) | Value::Float(_) | Value::Bool(_)),
+                        Value::String(b),
+                    ) => {
+                        return Ok(Value::String(format!("{other}{b}")));
+                    }
+                    _ => {}
+                }
                 self.arithmetic_op(left, right, |a, b| a + b, |a, b| a + b)
             }
             BinaryOp::Sub => {
@@ -6099,6 +6203,8 @@ impl<'a> Executor<'a> {
                     "negation requires number".to_string(),
                 )),
             },
+            UnaryOp::IsNull => Ok(Value::Bool(matches!(val, Value::Null))),
+            UnaryOp::IsNotNull => Ok(Value::Bool(!matches!(val, Value::Null))),
             UnaryOp::IsNormalized => match val {
                 Value::String(s) => {
                     use unicode_normalization::UnicodeNormalization;

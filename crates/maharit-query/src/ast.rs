@@ -278,6 +278,8 @@ pub struct NodePattern {
 /// パスパターン: (a)-[r:TYPE]->(b)
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathPattern {
+    /// パス変数: `MATCH p = (a)-->(b)` の `p`
+    pub variable: Option<String>,
     pub start: NodePattern,
     pub segments: Vec<PathSegment>,
 }
@@ -648,6 +650,10 @@ pub enum UnaryOp {
     Not,
     Neg,
     IsNormalized,
+    /// `expr IS NULL`
+    IsNull,
+    /// `expr IS NOT NULL`
+    IsNotNull,
 }
 
 /// リテラル値

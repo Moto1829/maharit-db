@@ -1,5 +1,7 @@
 pub mod ast;
 pub mod cache;
+#[cfg(test)]
+mod conformance_tests;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
