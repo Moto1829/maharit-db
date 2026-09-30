@@ -737,6 +737,11 @@ impl<'a> Executor<'a> {
     pub fn execute(&mut self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
         match stmt {
             Statement::Create(create) => self.execute_create(create),
+            Statement::CreateReturn(create, return_clause) => {
+                let (_, _, bindings) =
+                    self.execute_create_with_bindings(&create, &Bindings::new())?;
+                self.build_result_set(&return_clause, &[bindings])
+            }
             Statement::Match(m) => self.execute_match(m),
             Statement::Delete(d) => self.execute_delete(d),
             Statement::Union(u) => self.execute_union(u),
@@ -847,76 +852,12 @@ impl<'a> Executor<'a> {
     // ========== CREATE ==========
 
     fn execute_create(&mut self, create: CreateClause) -> Result<ResultSet, ExecuteError> {
-        let mut bindings = Bindings::new();
-        let mut created_nodes = 0;
-        let mut created_edges = 0;
-
-        for pattern in create.patterns {
-            match pattern {
-                Pattern::Node(node_pattern) => {
-                    self.create_node(&node_pattern, &mut bindings)?;
-                    created_nodes += 1;
-                }
-                Pattern::Path(path_pattern) => {
-                    // Create start node
-                    let start_id = self.create_node(&path_pattern.start, &mut bindings)?;
-                    created_nodes += 1;
-
-                    let mut current_id = start_id;
-
-                    for segment in path_pattern.segments {
-                        // Create end node
-                        let end_id = self.create_node(&segment.node, &mut bindings)?;
-                        created_nodes += 1;
-
-                        // Create edge
-                        let (from, to) = match segment.edge.direction {
-                            EdgeDirection::Outgoing => (current_id, end_id),
-                            EdgeDirection::Incoming => (end_id, current_id),
-                            EdgeDirection::Both => (current_id, end_id),
-                        };
-
-                        let edge_label = segment.edge.edge_type.unwrap_or_default();
-
-                        // Validate endpoint label constraints before creating edge
-                        self.constraints.validate_edge_create(
-                            self.graph_ref(),
-                            &edge_label,
-                            from,
-                            to,
-                        )?;
-
-                        let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
-
-                        // Evaluate and set edge properties
-                        let edge_props: Vec<(String, PropertyValue)> = segment
-                            .edge
-                            .properties
-                            .iter()
-                            .map(|(k, expr)| {
-                                let val = self.evaluate_expression(expr, &bindings)?;
-                                let prop_val = self.value_to_property(&val)?;
-                                Ok((k.clone(), prop_val))
-                            })
-                            .collect::<Result<_, ExecuteError>>()?;
-
-                        for (key, prop_val) in edge_props {
-                            self.graph_mut().set_edge_property(edge_id, &key, prop_val);
-                        }
-
-                        created_edges += 1;
-                        current_id = end_id;
-                    }
-                }
-            }
-        }
-
-        // Return summary
+        let (created_nodes, created_edges, _) =
+            self.execute_create_with_bindings(&create, &Bindings::new())?;
         let columns = vec!["created_nodes".to_string(), "created_edges".to_string()];
         let rows = vec![Row {
             columns: vec![Value::Int(created_nodes), Value::Int(created_edges)],
         }];
-
         Ok(ResultSet::new(columns, rows))
     }
 
@@ -1090,11 +1031,17 @@ impl<'a> Executor<'a> {
         // Execute CREATE for each binding set
         let mut created_nodes = 0i64;
         let mut created_edges = 0i64;
+        let mut result_bindings = Vec::with_capacity(all_bindings.len());
 
         for bindings in &all_bindings {
-            let (cn, ce) = self.execute_create_with_bindings(&mc.create_clause, bindings)?;
+            let (cn, ce, b) = self.execute_create_with_bindings(&mc.create_clause, bindings)?;
             created_nodes += cn;
             created_edges += ce;
+            result_bindings.push(b);
+        }
+
+        if let Some(return_clause) = &mc.return_clause {
+            return self.build_result_set(return_clause, &result_bindings);
         }
 
         let columns = vec!["created_nodes".to_string(), "created_edges".to_string()];
@@ -1108,7 +1055,7 @@ impl<'a> Executor<'a> {
         &mut self,
         create: &CreateClause,
         existing_bindings: &Bindings,
-    ) -> Result<(i64, i64), ExecuteError> {
+    ) -> Result<(i64, i64, Bindings), ExecuteError> {
         let mut bindings = existing_bindings.clone();
         let mut created_nodes = 0i64;
         let mut created_edges = 0i64;
@@ -1197,6 +1144,9 @@ impl<'a> Executor<'a> {
                         for (key, prop_val) in edge_props {
                             self.graph_mut().set_edge_property(edge_id, &key, prop_val);
                         }
+                        if let Some(var) = &segment.edge.variable {
+                            bindings.insert(Arc::from(var.as_str()), BindingValue::Edge(edge_id));
+                        }
 
                         created_edges += 1;
                         current_id = end_id;
@@ -1205,7 +1155,7 @@ impl<'a> Executor<'a> {
             }
         }
 
-        Ok((created_nodes, created_edges))
+        Ok((created_nodes, created_edges, bindings))
     }
 
     // ========== MATCH + SET ==========
@@ -1227,8 +1177,9 @@ impl<'a> Executor<'a> {
             });
         }
 
-        // Apply SET clause
+        // Apply SET clause, then any following SET / REMOVE clauses in order
         self.apply_set_clause(&ms.set_clause, &all_bindings)?;
+        self.apply_update_clauses(&ms.more_updates, &all_bindings)?;
 
         // Build result set
         if let Some(return_clause) = &ms.return_clause {
@@ -1540,48 +1491,11 @@ impl<'a> Executor<'a> {
             });
         }
 
-        // Apply REMOVE clause
+        // Apply REMOVE clause, then any following SET / REMOVE clauses in order
         for bindings in &all_bindings {
-            for item in &mr.remove_clause.items {
-                match item {
-                    RemoveItem::Property(var, prop) => {
-                        let binding_value = bindings
-                            .get(var.as_str())
-                            .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-
-                        match binding_value {
-                            BindingValue::Node(node_id) => {
-                                // Validate constraint before removing
-                                if let Some(node) = self.graph_ref().get_node(*node_id) {
-                                    self.constraints.validate_property_remove(&node, prop)?;
-                                }
-                                let removed = self.graph_mut().remove_node_property(*node_id, prop);
-                                if let Some(old) = removed {
-                                    self.reindex_node_property(*node_id, prop, Some(old), None);
-                                }
-                            }
-                            BindingValue::Edge(edge_id) => {
-                                self.graph_mut().remove_edge_property(*edge_id, prop);
-                            }
-                            _ => {
-                                return Err(ExecuteError::TypeError(
-                                    "REMOVE requires node or edge binding".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    RemoveItem::Label(var, label) => {
-                        let _binding_value = bindings
-                            .get(var.as_str())
-                            .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-                        if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node())
-                        {
-                            self.graph_mut().remove_node_label(node_id, label);
-                        }
-                    }
-                }
-            }
+            self.apply_remove_clause(&mr.remove_clause, bindings)?;
         }
+        self.apply_update_clauses(&mr.more_updates, &all_bindings)?;
 
         // Build result set
         if let Some(return_clause) = &mr.return_clause {
@@ -1629,11 +1543,16 @@ impl<'a> Executor<'a> {
             let mut created_nodes = 0i64;
             let mut created_edges = 0i64;
 
+            // Continue with the post-CREATE bindings so SET / RETURN can refer
+            // to the variables introduced by CREATE.
+            let mut created_bindings = Vec::with_capacity(all_bindings.len());
             for bindings in &all_bindings {
-                let (cn, ce) = self.execute_create_with_bindings(create_clause, bindings)?;
+                let (cn, ce, b) = self.execute_create_with_bindings(create_clause, bindings)?;
                 created_nodes += cn;
                 created_edges += ce;
+                created_bindings.push(b);
             }
+            let all_bindings = created_bindings;
 
             // Apply SET if present (after CREATE)
             if let Some(set_clause) = &uw.set_clause {
@@ -1743,6 +1662,24 @@ impl<'a> Executor<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn apply_update_clauses(
+        &mut self,
+        updates: &[UpdateClause],
+        all_bindings: &[Bindings],
+    ) -> Result<(), ExecuteError> {
+        for update in updates {
+            match update {
+                UpdateClause::Set(set) => self.apply_set_clause(set, all_bindings)?,
+                UpdateClause::Remove(remove) => {
+                    for bindings in all_bindings {
+                        self.apply_remove_clause(remove, bindings)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn apply_remove_clause(
@@ -2762,12 +2699,17 @@ impl<'a> Executor<'a> {
 
         // No aggregation: project bindings row-by-row
         let mut result: Vec<Bindings> = Vec::new();
+        let mut keys: Vec<Vec<Value>> = Vec::new();
 
         for binding in &bindings {
             let mut new_binding = Bindings::new();
+            let mut projected = Vec::with_capacity(with_clause.items.len());
 
             for (item, var_name) in with_clause.items.iter().zip(col_names.iter()) {
                 let value = self.evaluate_return_item(&item.expression, binding)?;
+                if with_clause.order_by.is_some() {
+                    projected.push(value.clone());
+                }
 
                 // Convert Value back to BindingValue for the new binding
                 match value {
@@ -2787,12 +2729,36 @@ impl<'a> Executor<'a> {
                 }
             }
 
+            if let Some(ref order_by) = with_clause.order_by {
+                let row = Row { columns: projected };
+                keys.push(self.order_keys(order_by, &col_names, &row, Some(binding))?);
+            }
             result.push(new_binding);
         }
 
-        // Apply DISTINCT if needed
+        // Apply DISTINCT if needed (keeping ORDER BY keys aligned)
         if with_clause.distinct {
-            result = self.apply_distinct_bindings(result);
+            let mut seen = std::collections::HashSet::new();
+            let has_keys = !keys.is_empty();
+            let mut kept = Vec::new();
+            let mut kept_keys = Vec::new();
+            let mut keys_iter = keys.into_iter();
+            for binding in result {
+                let key = has_keys.then(|| keys_iter.next().unwrap_or_default());
+                if seen.insert(Self::bindings_key(&binding)) {
+                    kept.push(binding);
+                    kept_keys.extend(key);
+                }
+            }
+            result = kept;
+            keys = kept_keys;
+        }
+
+        // Apply ORDER BY (was previously ignored for non-aggregating WITH)
+        if let Some(ref order_by) = with_clause.order_by {
+            let mut pairs: Vec<(Vec<Value>, Bindings)> = keys.into_iter().zip(result).collect();
+            pairs.sort_by(|a, b| self.compare_keys(&a.0, &b.0, order_by));
+            result = pairs.into_iter().map(|(_, b)| b).collect();
         }
 
         // Apply SKIP
@@ -2810,18 +2776,13 @@ impl<'a> Executor<'a> {
         Ok(result)
     }
 
-    fn apply_distinct_bindings(&self, bindings: Vec<Bindings>) -> Vec<Bindings> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        for binding in bindings {
-            let key = format!("{:?}", binding);
-            if seen.insert(key) {
-                result.push(binding);
-            }
-        }
-
-        result
+    /// DISTINCT 判定用のバインディングのキー。`HashMap` の走査順はインスタンスごとに
+    /// 異なるため（RandomState）、Debug 表示をそのまま使うと同じ内容でも別キーになる。
+    /// 変数名でソートしてから文字列化する。
+    fn bindings_key(binding: &Bindings) -> String {
+        let mut entries: Vec<_> = binding.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        format!("{:?}", entries)
     }
 
     fn aggregate_to_name(&self, agg: &AggregateFunction) -> String {
@@ -3463,8 +3424,10 @@ impl<'a> Executor<'a> {
             .map(|item| self.return_item_to_column_name(item))
             .collect();
 
-        // Build rows
+        // Build rows (and ORDER BY keys, which may refer to values that are
+        // not returned, e.g. `RETURN n.name ORDER BY n.age`).
         let mut rows = Vec::new();
+        let mut keys = Vec::new();
 
         for bindings in bindings_list {
             let mut row_values = Vec::new();
@@ -3473,14 +3436,31 @@ impl<'a> Executor<'a> {
                 row_values.push(self.evaluate_return_item(item, bindings)?);
             }
 
-            rows.push(Row {
+            let row = Row {
                 columns: row_values,
-            });
+            };
+            if let Some(ref order_by) = return_clause.order_by {
+                keys.push(self.order_keys(order_by, &columns, &row, Some(bindings))?);
+            }
+            rows.push(row);
         }
 
-        // Apply DISTINCT
+        // Apply DISTINCT (keeping each surviving row's ORDER BY keys aligned)
         if return_clause.distinct {
-            rows = self.apply_distinct(rows);
+            let mut seen = std::collections::HashSet::new();
+            let has_keys = !keys.is_empty();
+            let mut kept_rows = Vec::new();
+            let mut kept_keys = Vec::new();
+            let mut keys_iter = keys.into_iter();
+            for row in rows {
+                let key = has_keys.then(|| keys_iter.next().unwrap_or_default());
+                if seen.insert(self.row_to_key(&row)) {
+                    kept_rows.push(row);
+                    kept_keys.extend(key);
+                }
+            }
+            rows = kept_rows;
+            keys = kept_keys;
         }
 
         // Resolve SKIP and LIMIT expressions (integer literal or $parameter)
@@ -3503,17 +3483,7 @@ impl<'a> Executor<'a> {
                 (None, Some(limit)) => Some(limit as usize),
                 _ => None,
             };
-
-            // Use optimized TopN selection if we need fewer rows than we have
-            if let Some(n) = needed {
-                if n < rows.len() {
-                    rows = self.apply_order_by_topn(rows, order_by, &columns, n);
-                } else {
-                    self.apply_order_by(&mut rows, order_by, &columns);
-                }
-            } else {
-                self.apply_order_by(&mut rows, order_by, &columns);
-            }
+            rows = self.sort_rows_by_keys(rows, keys, order_by, needed);
         }
 
         // Apply SKIP
@@ -3534,20 +3504,6 @@ impl<'a> Executor<'a> {
         Ok(ResultSet::new(columns, rows))
     }
 
-    fn apply_distinct(&self, rows: Vec<Row>) -> Vec<Row> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        for row in rows {
-            let key = self.row_to_key(&row);
-            if seen.insert(key) {
-                result.push(row);
-            }
-        }
-
-        result
-    }
-
     fn row_to_key(&self, row: &Row) -> String {
         row.columns
             .iter()
@@ -3556,65 +3512,75 @@ impl<'a> Executor<'a> {
             .join("|")
     }
 
-    fn apply_order_by(&self, rows: &mut [Row], order_by: &OrderByClause, columns: &[String]) {
-        rows.sort_by(|a, b| self.compare_rows(a, b, order_by, columns));
-    }
-
-    /// Memory-efficient TopN selection using partial sort
-    /// Only keeps the top N rows, reducing memory usage for large result sets
-    fn apply_order_by_topn(
+    /// ORDER BY の各キーの値を求める。
+    ///
+    /// キーが返却列（列名が一致）ならその値を使う。そうでなければ射影前の
+    /// バインディング `source` から評価する（`RETURN n.name ORDER BY n.age`）。
+    /// `source` が無い（集計後）場合に返却列でないキーはエラーにする。以前は
+    /// 列が見つからないキーを黙って無視し、並べ替えずに結果を返していた。
+    fn order_keys(
         &self,
-        mut rows: Vec<Row>,
         order_by: &OrderByClause,
         columns: &[String],
-        n: usize,
-    ) -> Vec<Row> {
-        if rows.len() <= n {
-            self.apply_order_by(&mut rows, order_by, columns);
-            return rows;
-        }
-
-        // Use partial_sort via select_nth_unstable_by for efficiency
-        // This partitions the array so that the first n elements are the smallest
-        rows.select_nth_unstable_by(n, |a, b| self.compare_rows(a, b, order_by, columns));
-
-        // Truncate to keep only the top N
-        rows.truncate(n);
-
-        // Sort the top N elements
-        self.apply_order_by(&mut rows, order_by, columns);
-
-        rows
-    }
-
-    fn compare_rows(
-        &self,
-        a: &Row,
-        b: &Row,
-        order_by: &OrderByClause,
-        columns: &[String],
-    ) -> std::cmp::Ordering {
-        for item in &order_by.items {
-            let col_name = match &item.expression {
-                OrderByExpression::Variable(v) => v.clone(),
-                OrderByExpression::Property(v, p) => format!("{}.{}", v, p),
-            };
-
-            let col_idx = columns.iter().position(|c| c == &col_name);
-
-            if let Some(idx) = col_idx {
-                let cmp = self.compare_values_for_sort(
-                    &a.columns[idx],
-                    &b.columns[idx],
-                    item.direction,
-                    item.nulls_order,
-                );
-                if cmp != std::cmp::Ordering::Equal {
-                    return cmp;
+        row: &Row,
+        source: Option<&Bindings>,
+    ) -> Result<Vec<Value>, ExecuteError> {
+        order_by
+            .items
+            .iter()
+            .map(|item| {
+                let name = self.return_item_to_column_name(&item.expression);
+                if let Some(idx) = columns.iter().position(|c| *c == name) {
+                    return Ok(row.columns[idx].clone());
                 }
+                match source {
+                    Some(bindings) => self.evaluate_return_item(&item.expression, bindings),
+                    None => Err(ExecuteError::TypeError(format!(
+                        "ORDER BY {name}: with aggregation, ORDER BY can only refer to returned columns (add it to RETURN or use an alias)"
+                    ))),
+                }
+            })
+            .collect()
+    }
+
+    fn compare_keys(
+        &self,
+        a: &[Value],
+        b: &[Value],
+        order_by: &OrderByClause,
+    ) -> std::cmp::Ordering {
+        for (i, item) in order_by.items.iter().enumerate() {
+            let cmp = self.compare_values_for_sort(&a[i], &b[i], item.direction, item.nulls_order);
+            if cmp != std::cmp::Ordering::Equal {
+                return cmp;
             }
         }
         std::cmp::Ordering::Equal
+    }
+
+    /// `keys[i]` を `rows[i]` の並べ替えキーとしてソートする。`needed` があり行数より
+    /// 少なければ上位 `needed` 件だけを部分選択してからソートする（TopN 最適化）。
+    fn sort_rows_by_keys(
+        &self,
+        rows: Vec<Row>,
+        keys: Vec<Vec<Value>>,
+        order_by: &OrderByClause,
+        needed: Option<usize>,
+    ) -> Vec<Row> {
+        let mut pairs: Vec<(Vec<Value>, Row)> = keys.into_iter().zip(rows).collect();
+        let cmp =
+            |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| self.compare_keys(&a.0, &b.0, order_by);
+        if let Some(n) = needed
+            && n < pairs.len()
+        {
+            if n == 0 {
+                return Vec::new();
+            }
+            pairs.select_nth_unstable_by(n, cmp);
+            pairs.truncate(n);
+        }
+        pairs.sort_by(cmp);
+        pairs.into_iter().map(|(_, row)| row).collect()
     }
 
     fn compare_values_for_sort(
@@ -5093,15 +5059,13 @@ impl<'a> Executor<'a> {
                 _ => None,
             };
 
-            if let Some(n) = needed {
-                if n < rows.len() {
-                    rows = self.apply_order_by_topn(rows, order_by, &columns, n);
-                } else {
-                    self.apply_order_by(&mut rows, order_by, &columns);
-                }
-            } else {
-                self.apply_order_by(&mut rows, order_by, &columns);
-            }
+            // After grouping there is no single source row per result row,
+            // so keys must refer to returned columns.
+            let keys = rows
+                .iter()
+                .map(|row| self.order_keys(order_by, &columns, row, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            rows = self.sort_rows_by_keys(rows, keys, order_by, needed);
 
             if let Some(skip) = resolved_skip {
                 let skip = skip as usize;
@@ -12720,5 +12684,182 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(1));
         assert_eq!(result.rows[0].columns[1], Value::Int(2));
+    }
+
+    // ---- bug/118: silently ignored clauses ----
+
+    fn seed_people(graph: &mut Graph) {
+        for (name, age) in [("c", 3), ("a", 1), ("b", 2)] {
+            execute(
+                graph,
+                &format!("CREATE (:P {{name: '{name}', age: {age}}})"),
+            )
+            .unwrap();
+        }
+    }
+
+    fn first_column(result: &ResultSet) -> Vec<Value> {
+        result.rows.iter().map(|r| r.columns[0].clone()).collect()
+    }
+
+    fn strings(values: &[&str]) -> Vec<Value> {
+        values
+            .iter()
+            .map(|v| Value::String(v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn set_then_remove_in_one_statement_applies_both() {
+        let mut graph = Graph::new();
+        seed_people(&mut graph);
+        execute(
+            &mut graph,
+            "MATCH (n:P {name: 'a'}) SET n.age = 10 REMOVE n.name SET n:Q",
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (n:Q) RETURN n.age, n.name").unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].columns, vec![Value::Int(10), Value::Null]);
+
+        execute(&mut graph, "MATCH (n:Q) REMOVE n:Q SET n.name = 'z'").unwrap();
+        assert_eq!(
+            execute(&mut graph, "MATCH (n:Q) RETURN n")
+                .unwrap()
+                .rows
+                .len(),
+            0
+        );
+        let r = execute(&mut graph, "MATCH (n:P) WHERE n.age = 10 RETURN n.name").unwrap();
+        assert_eq!(first_column(&r), strings(&["z"]));
+    }
+
+    #[test]
+    fn order_by_key_not_in_return_is_applied() {
+        let mut graph = Graph::new();
+        seed_people(&mut graph);
+        let r = execute(&mut graph, "MATCH (n:P) RETURN n.name ORDER BY n.age").unwrap();
+        assert_eq!(first_column(&r), strings(&["a", "b", "c"]));
+        let r = execute(
+            &mut graph,
+            "MATCH (n:P) RETURN n.name ORDER BY n.age DESC LIMIT 2",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), strings(&["c", "b"]));
+    }
+
+    #[test]
+    fn order_by_function_expression() {
+        let mut graph = Graph::new();
+        for name in ["b", "C", "a"] {
+            execute(&mut graph, &format!("CREATE (:P {{name: '{name}'}})")).unwrap();
+        }
+        let r = execute(
+            &mut graph,
+            "MATCH (n:P) RETURN n.name ORDER BY toUpper(n.name)",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), strings(&["a", "b", "C"]));
+    }
+
+    #[test]
+    fn order_by_non_returned_key_with_aggregation_is_an_error() {
+        let mut graph = Graph::new();
+        seed_people(&mut graph);
+        let err = execute(
+            &mut graph,
+            "MATCH (n:P) RETURN n.name, count(*) ORDER BY n.age",
+        );
+        assert!(err.is_err(), "must not silently skip sorting: {err:?}");
+        // Referring to a returned column (or alias) works.
+        let r = execute(
+            &mut graph,
+            "MATCH (n:P) RETURN n.name AS nm, count(*) AS c ORDER BY nm DESC",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), strings(&["c", "b", "a"]));
+    }
+
+    #[test]
+    fn with_order_by_is_applied_without_aggregation() {
+        let mut graph = Graph::new();
+        seed_people(&mut graph);
+        let r = execute(
+            &mut graph,
+            "MATCH (n:P) WITH n ORDER BY n.age DESC RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), strings(&["c", "b", "a"]));
+        let r = execute(
+            &mut graph,
+            "MATCH (n:P) WITH n ORDER BY n.age LIMIT 2 RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), strings(&["a", "b"]));
+    }
+
+    #[test]
+    fn with_distinct_removes_duplicates() {
+        let mut graph = Graph::new();
+        for _ in 0..20 {
+            execute(&mut graph, "CREATE (:D {g: 1, h: 2, i: 3})").unwrap();
+        }
+        // Several columns: HashMap iteration order differs between binding maps,
+        // so a Debug-string key used to treat identical rows as distinct.
+        let r = execute(
+            &mut graph,
+            "MATCH (n:D) WITH DISTINCT n.g AS g, n.h AS h, n.i AS i RETURN g, h, i",
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1);
+    }
+
+    #[test]
+    fn create_return_projects_created_elements() {
+        let mut graph = Graph::new();
+        let r = execute(
+            &mut graph,
+            "CREATE (a:P {name: 'a'})-[r:R {w: 2}]->(b:P {name: 'b'}) RETURN a.name, r.w, b.name",
+        )
+        .unwrap();
+        assert_eq!(r.columns, vec!["a.name", "r.w", "b.name"]);
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::String("a".into()),
+                Value::Int(2),
+                Value::String("b".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn create_reuses_variable_bound_earlier_in_same_clause() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (a:A), (a)-[:R]->(b:B)").unwrap();
+        assert_eq!(graph.node_count(), 2, "`a` must not be created twice");
+        assert_eq!(graph.edge_count(), 1);
+    }
+
+    #[test]
+    fn match_create_return_and_unwind_create_return() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:P {name: 'a'})").unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (a:P {name: 'a'}) CREATE (a)-[r:R]->(b:Q {n: 1}) RETURN b.n",
+        )
+        .unwrap();
+        assert_eq!(first_column(&r), vec![Value::Int(1)]);
+
+        let r = execute(
+            &mut graph,
+            "UNWIND [1, 2, 3] AS x CREATE (n:U {v: x}) SET n.w = x RETURN n.w ORDER BY n.w DESC",
+        )
+        .unwrap();
+        assert_eq!(
+            first_column(&r),
+            vec![Value::Int(3), Value::Int(2), Value::Int(1)]
+        );
     }
 }

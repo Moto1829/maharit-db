@@ -375,7 +375,7 @@ impl PropertyHistogram {
 /// Build a query plan from a statement using graph statistics.
 pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan {
     let nodes = match stmt {
-        Statement::Create(create) => plan_create(create),
+        Statement::Create(create) | Statement::CreateReturn(create, _) => plan_create(create),
         Statement::Match(m) => plan_match_with_stats(m, stats),
         Statement::Delete(d) => plan_delete_with_stats(d, stats),
         Statement::Union(u) => plan_union_with_stats(u, stats),
@@ -456,7 +456,7 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
 /// Build a query plan from a statement (without executing)
 pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPlan {
     let nodes = match stmt {
-        Statement::Create(create) => plan_create(create),
+        Statement::Create(create) | Statement::CreateReturn(create, _) => plan_create(create),
         Statement::Match(m) => plan_match(m, node_count, edge_count),
         Statement::Delete(d) => plan_delete(d, node_count),
         Statement::Union(u) => plan_union(u, node_count, edge_count),

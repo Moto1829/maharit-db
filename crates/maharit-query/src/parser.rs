@@ -125,16 +125,28 @@ impl Parser {
     }
 
     /// 文をパース
+    ///
+    /// 入力全体を 1 文として解釈する。文の後ろに解釈できないトークンが残る場合は
+    /// エラーにする（以前は黙って捨てていたため、例えば
+    /// `MATCH … SET … REMOVE …` の REMOVE が無視されても成功扱いになっていた）。
     pub fn parse(&mut self) -> Result<Statement, ParseError> {
+        let stmt = self.parse_statement()?;
+        match self.peek_kind() {
+            None | Some(TokenKind::Eof) => Ok(stmt),
+            Some(_) => Err(self.unexpected_token("end of query")),
+        }
+    }
+
+    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
         // Handle EXPLAIN / PROFILE prefixes
         if self.check(TokenKind::Explain) {
             self.advance();
-            let inner = self.parse()?;
+            let inner = self.parse_statement()?;
             return Ok(Statement::Explain(Box::new(inner)));
         }
         if self.check(TokenKind::Profile) {
             self.advance();
-            let inner = self.parse()?;
+            let inner = self.parse_statement()?;
             return Ok(Statement::Profile(Box::new(inner)));
         }
 
@@ -282,7 +294,23 @@ impl Parser {
             patterns.push(self.parse_pattern()?);
         }
 
-        Ok(Statement::Create(CreateClause { patterns }))
+        let create = CreateClause { patterns };
+        if self.check(TokenKind::Return) {
+            self.advance();
+            let return_clause = self.parse_return_clause()?;
+            return Ok(Statement::CreateReturn(create, return_clause));
+        }
+        Ok(Statement::Create(create))
+    }
+
+    /// 省略可能な RETURN 句
+    fn parse_optional_return(&mut self) -> Result<Option<ReturnClause>, ParseError> {
+        if self.check(TokenKind::Return) {
+            self.advance();
+            Ok(Some(self.parse_return_clause()?))
+        } else {
+            Ok(None)
+        }
     }
 
     // ========== MATCH ==========
@@ -309,15 +337,18 @@ impl Parser {
         // Check for MATCH + CREATE
         if self.check(TokenKind::Create) {
             let create = self.parse_create_clause()?;
+            let return_clause = self.parse_optional_return()?;
             return Ok(Statement::MatchCreate(MatchCreateStatement {
                 segments: vec![first_segment.clone()],
                 where_clause: first_segment.where_clause,
                 create_clause: create,
+                return_clause,
             }));
         }
 
         // Check for MATCH + SET (standalone, not for DELETE)
         if let Some(set_clause) = set_clause {
+            let more_updates = self.parse_trailing_updates()?;
             let return_clause = if self.check(TokenKind::Return) {
                 self.advance();
                 Some(self.parse_return_clause()?)
@@ -328,6 +359,7 @@ impl Parser {
                 segments: vec![first_segment.clone()],
                 where_clause: first_segment.where_clause,
                 set_clause,
+                more_updates,
                 return_clause,
             }));
         }
@@ -335,6 +367,7 @@ impl Parser {
         // Check for MATCH + REMOVE
         if self.check(TokenKind::Remove) {
             let remove_clause = self.parse_remove_clause()?;
+            let more_updates = self.parse_trailing_updates()?;
             let return_clause = if self.check(TokenKind::Return) {
                 self.advance();
                 Some(self.parse_return_clause()?)
@@ -345,6 +378,7 @@ impl Parser {
                 segments: vec![first_segment.clone()],
                 where_clause: first_segment.where_clause,
                 remove_clause,
+                more_updates,
                 return_clause,
             }));
         }
@@ -368,6 +402,7 @@ impl Parser {
                 }
                 // Check for SET after inner segment
                 if let Some(set_cl) = set_cl {
+                    let more_updates = self.parse_trailing_updates()?;
                     let return_clause = if self.check(TokenKind::Return) {
                         self.advance();
                         Some(self.parse_return_clause()?)
@@ -379,22 +414,26 @@ impl Parser {
                         segments,
                         where_clause: segment.where_clause,
                         set_clause: set_cl,
+                        more_updates,
                         return_clause,
                     }));
                 }
                 // Check for CREATE after inner segment
                 if self.check(TokenKind::Create) {
                     let create = self.parse_create_clause()?;
+                    let return_clause = self.parse_optional_return()?;
                     segments.push(segment.clone());
                     return Ok(Statement::MatchCreate(MatchCreateStatement {
                         segments,
                         where_clause: segment.where_clause,
                         create_clause: create,
+                        return_clause,
                     }));
                 }
                 // Check for REMOVE after inner segment
                 if self.check(TokenKind::Remove) {
                     let remove_clause = self.parse_remove_clause()?;
+                    let more_updates = self.parse_trailing_updates()?;
                     let return_clause = if self.check(TokenKind::Return) {
                         self.advance();
                         Some(self.parse_return_clause()?)
@@ -406,6 +445,7 @@ impl Parser {
                         segments,
                         where_clause: segment.where_clause,
                         remove_clause,
+                        more_updates,
                         return_clause,
                     }));
                 }
@@ -765,12 +805,7 @@ impl Parser {
     }
 
     fn parse_order_by_item(&mut self) -> Result<OrderByItem, ParseError> {
-        let var = self.expect_ident()?;
-
-        let expression = match self.try_consume_dot_property()? {
-            Some(prop) => OrderByExpression::Property(var, prop),
-            None => OrderByExpression::Variable(var),
-        };
+        let expression = self.parse_return_item()?;
 
         let direction = if self.check(TokenKind::Desc) {
             self.advance();
@@ -1411,6 +1446,20 @@ impl Parser {
     }
 
     // ========== REMOVE ==========
+
+    /// SET / REMOVE 句の後に続く SET / REMOVE 句を記述順にパースする。
+    fn parse_trailing_updates(&mut self) -> Result<Vec<UpdateClause>, ParseError> {
+        let mut updates = Vec::new();
+        loop {
+            if self.check(TokenKind::Set) {
+                updates.push(UpdateClause::Set(self.parse_set_clause()?));
+            } else if self.check(TokenKind::Remove) {
+                updates.push(UpdateClause::Remove(self.parse_remove_clause()?));
+            } else {
+                return Ok(updates);
+            }
+        }
+    }
 
     fn parse_remove_clause(&mut self) -> Result<RemoveClause, ParseError> {
         self.expect(TokenKind::Remove)?;
@@ -4639,5 +4688,86 @@ mod tests {
         assert!(result.is_err());
         // errors フィールドにエラーが含まれること
         assert!(!result.errors.is_empty());
+    }
+
+    /// 文の後ろに解釈できないトークンが残る入力はエラーにする（bug/118）。
+    /// 以前は黙って捨てていたため、書いた句が無視されても成功扱いになっていた。
+    #[test]
+    fn trailing_tokens_are_rejected_for_every_statement_kind() {
+        let cases = [
+            "MATCH (n) RETURN n junk",
+            "MATCH (n) RETURN n.name ORDER BY n.name )",
+            "MATCH (n) RETURN n LIMIT 1 2",
+            "CREATE (n:P) extra",
+            "CREATE (n:P {a: 1}) RETURN n junk",
+            "MATCH (n) DELETE n n",
+            "MATCH (n) DETACH DELETE n junk",
+            "MATCH (n) SET n.a = 1 )",
+            "MATCH (n) REMOVE n.a )",
+            "MERGE (n:A) extra",
+            "UNWIND [1] AS x CREATE (:A) )",
+            "RETURN 1 2",
+            "CREATE INDEX ON :A(k) foo",
+            "DROP INDEX ON :A(k) bar",
+            "SHOW CONSTRAINTS x",
+            "EXPLAIN MATCH (n) RETURN n junk",
+            "PROFILE MATCH (n) RETURN n junk",
+            "MATCH (n) RETURN n UNION MATCH (m) RETURN m junk",
+            "MATCH (n) WITH n RETURN n junk",
+        ];
+        for q in cases {
+            let result = Parser::new(q).and_then(|mut p| p.parse());
+            assert!(
+                result.is_err(),
+                "trailing tokens must be rejected: {q} -> {result:?}"
+            );
+        }
+    }
+
+    /// 末尾チェックの導入で正しい文が壊れていないこと。
+    #[test]
+    fn complete_statements_still_parse() {
+        let cases = [
+            "MATCH (n) RETURN n",
+            "MATCH (n:P) WHERE n.a = 1 RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2",
+            "MATCH (n) RETURN id(n) ORDER BY id(n)",
+            "MATCH (n) RETURN n.name, count(*) AS c ORDER BY c DESC",
+            "MATCH (n) SET n.a = 1 REMOVE n.b SET n:L RETURN n",
+            "MATCH (n) REMOVE n:L SET n.a = 2",
+            "MATCH (n) WITH n ORDER BY n.a LIMIT 3 RETURN n",
+            "CREATE (a:A)-[:R]->(b:B)",
+            "MERGE (n:A {k: 1}) ON CREATE SET n.c = 1 ON MATCH SET n.m = 1",
+            "UNWIND [1, 2] AS x CREATE (:A {k: x})",
+            "MATCH (n) DETACH DELETE n",
+            "EXPLAIN MATCH (n) RETURN n",
+            "MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m",
+            "CREATE INDEX ON :A(k)",
+            "SHOW CONSTRAINTS",
+            "RETURN 1",
+        ];
+        for q in cases {
+            let result = Parser::new(q).and_then(|mut p| p.parse());
+            assert!(
+                result.is_ok(),
+                "valid statement rejected: {q} -> {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_and_remove_clauses_can_be_chained() {
+        let stmt = Parser::new("MATCH (n:P) SET n.a = 1 REMOVE n.b SET n:Q RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
+        match stmt {
+            Statement::MatchSet(ms) => {
+                assert_eq!(ms.more_updates.len(), 2);
+                assert!(matches!(ms.more_updates[0], UpdateClause::Remove(_)));
+                assert!(matches!(ms.more_updates[1], UpdateClause::Set(_)));
+                assert!(ms.return_clause.is_some());
+            }
+            other => panic!("expected MatchSet, got {other:?}"),
+        }
     }
 }

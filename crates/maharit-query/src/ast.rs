@@ -28,6 +28,7 @@ pub fn is_read_only(stmt: &Statement) -> bool {
 
         // Everything else mutates the graph or schema
         Statement::Create(_) => false,
+        Statement::CreateReturn(..) => false,
         Statement::Delete(_) => false,
         Statement::MatchCreate(_) => false,
         Statement::MatchSet(_) => false,
@@ -53,6 +54,8 @@ pub fn is_read_only(stmt: &Statement) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Create(CreateClause),
+    /// CREATE … RETURN …（作成した要素を返す）
+    CreateReturn(CreateClause, ReturnClause),
     Match(MatchStatement),
     Delete(DeleteStatement),
     Union(UnionStatement),
@@ -337,18 +340,11 @@ pub struct OrderByClause {
 /// ORDER BY項目
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByItem {
-    pub expression: OrderByExpression,
+    /// 並べ替えキー。RETURN 項目と同じ文法（変数・プロパティ・関数・集計・式）。
+    /// RETURN の列名と一致すればその列の値で、一致しなければ射影前の行から評価して並べ替える。
+    pub expression: ReturnItem,
     pub direction: OrderDirection,
     pub nulls_order: NullsOrder,
-}
-
-/// ORDER BY式
-#[derive(Debug, Clone, PartialEq)]
-pub enum OrderByExpression {
-    /// 変数: ORDER BY n
-    Variable(String),
-    /// プロパティ: ORDER BY n.name
-    Property(String, String),
 }
 
 /// ソート方向
@@ -673,6 +669,8 @@ pub struct MatchCreateStatement {
     pub where_clause: Option<Expression>,
     /// CREATE句
     pub create_clause: CreateClause,
+    /// RETURN句（省略可）
+    pub return_clause: Option<ReturnClause>,
 }
 
 /// MATCH + SET 複合文
@@ -684,8 +682,17 @@ pub struct MatchSetStatement {
     pub where_clause: Option<Expression>,
     /// SET句
     pub set_clause: SetClause,
+    /// SET の後に続く SET / REMOVE 句（`SET … REMOVE … SET …`）。記述順に適用する
+    pub more_updates: Vec<UpdateClause>,
     /// RETURN句（省略可）
     pub return_clause: Option<ReturnClause>,
+}
+
+/// MATCH の後に続く更新句
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateClause {
+    Set(SetClause),
+    Remove(RemoveClause),
 }
 
 /// MERGE文
@@ -714,6 +721,8 @@ pub struct MatchRemoveStatement {
     pub where_clause: Option<Expression>,
     /// REMOVE句
     pub remove_clause: RemoveClause,
+    /// REMOVE の後に続く SET / REMOVE 句。記述順に適用する
+    pub more_updates: Vec<UpdateClause>,
     /// RETURN句（省略可）
     pub return_clause: Option<ReturnClause>,
 }
