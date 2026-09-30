@@ -7,6 +7,8 @@ pub mod metrics;
 pub mod mutation_log;
 mod repl;
 pub mod replication;
+#[cfg(test)]
+mod replication_diff_test;
 pub mod tcp_server;
 pub mod tls;
 pub mod tracing_setup;

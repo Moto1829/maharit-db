@@ -16,7 +16,7 @@
 
 ## 補強内容
 
-### 1. レプリケーションの差分テスト（最優先）
+### 1. レプリケーションの差分テスト（最優先） ✅ 2026-09-30 完了
 - リーダーにランダムな書き込み列（CREATE / SET / REMOVE / ラベル / DELETE / DETACH DELETE / tx+COMMIT / tx+ROLLBACK / 失敗する文）を流し、
   フォロワーのグラフがリーダーと完全一致（ID・ラベル・プロパティ・エッジ）することを検証する
 - 乱数シードを固定し、失敗時はシードと操作列を出力して再現できるようにする（`rand` + 固定シード、proptest でも可）
@@ -38,3 +38,21 @@
 ## 受け入れ条件
 - [ ] 1〜4 のテストを追加し、既知の修正前コード（bug/114, 116, 117, 120 の直前コミット）で失敗することを確認
 - [ ] `cargo test --workspace` の実行時間が大きく増えない（差分テストは件数をパラメータ化し、CI では多め・ローカルは少なめ）
+
+## 進捗
+
+### 1. レプリケーションの差分テスト — 完了 (2026-09-30)
+`crates/maharit-server/src/replication_diff_test.rs` の `leader_and_follower_converge_under_random_writes`
+
+- 実リーダー（TcpServer + LeaderReplicationManager）と実フォロワーを起動し、4 クライアントが並行にランダム書き込み
+  （CREATE / SET / ラベル付け外し / REMOVE / Float / エッジ作成・更新・削除 / DETACH DELETE / 途中失敗する UNWIND+UNIQUE /
+  BEGIN→COMMIT or ROLLBACK）。値域を狭くして衝突を多発させる
+- 検証: ① フォロワーとリーダーのグラフ完全一致（ID・ラベル・プロパティ・エッジ）② リーダーの索引検索 == 全件走査
+  ③ フォロワー接続維持 ④ ワークロードが空振りしていない（成功文 ≥ 1/3）
+- 依存追加なし（SplitMix64）。失敗時はシードと再現コマンド、各クライアントの操作ログを出力
+- 既定 5 seeds × 200 ops × 4 clients ≈ 5 秒。`MAHARIT_DIFF_SEEDS=$(seq -s, 1 100)` で長時間実行（100 seeds 通過）
+- **過去の修正前コードで検出できることを確認**（8 seeds × 150 ops）:
+  - bug/116 修正前: 8/8 失敗 / bug/120 修正前: 8/8 失敗 / bug/117 修正前: 7/8 失敗
+- **新規バグを 1 件発見・修正**: WAL broadcast バッファ溢れ（bug/122）
+
+残り: 2（並行ストレスの不変条件チェック拡充）、3（パーサー負のテスト, bug/118 と併せて）、4（Cypher 適合, bug/119 と併せて）、5（CI, task 77）

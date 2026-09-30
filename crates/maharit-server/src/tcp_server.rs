@@ -2277,31 +2277,7 @@ mod tests {
         tx_query(&mut s, tx, "MATCH (n:P {name: 'b'}) DETACH DELETE n").await;
         rollback(&mut s, tx).await;
 
-        let snapshot = |g: &ConcurrentGraph| {
-            let mut nodes: Vec<_> = g
-                .all_nodes()
-                .into_iter()
-                .map(|n| {
-                    let mut labels = n.labels.clone();
-                    labels.sort();
-                    let mut props: Vec<_> = n
-                        .properties
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v:?}"))
-                        .collect();
-                    props.sort();
-                    (n.id, labels, props)
-                })
-                .collect();
-            nodes.sort();
-            let mut edges: Vec<_> = g
-                .all_edges()
-                .into_iter()
-                .map(|e| (e.id, e.from, e.to, e.label))
-                .collect();
-            edges.sort();
-            (nodes, edges)
-        };
+        let snapshot = crate::replication_diff_test::fingerprint;
 
         let expected = snapshot(&leader_graph);
         assert_eq!(expected.0.len(), 2);
