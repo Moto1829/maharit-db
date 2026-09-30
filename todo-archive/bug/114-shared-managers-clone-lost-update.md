@@ -53,13 +53,34 @@ UNIQUE 制約チェックも各クエリが古いスナップショットを見�
 
 ## 受け入れ条件
 
-- [ ] 並行書き込み（例: 8 並列で CREATE を各 1000 件）後、PropertyIndex/Fulltext の件数がグラフと一致するテストを追加
-- [ ] 並行 CREATE で UNIQUE 制約違反がすり抜けないこと
-- [ ] 読み取り専用クエリでマネージャの clone が発生しないこと
-- [ ] `scripts/concurrent_test.py` / `scripts/constraint_test.py` がグリーン
+- [x] 並行書き込み（例: 8 並列で CREATE を各 1000 件）後、PropertyIndex/Fulltext の件数がグラフと一致するテストを追加
+- [x] 並行 CREATE で UNIQUE 制約違反がすり抜けないこと
+- [x] 読み取り専用クエリでマネージャの clone が発生しないこと
+- [x] `scripts/concurrent_test.py` / `scripts/constraint_test.py` がグリーン
 - [ ] `benchmark.py` で読み取りクエリのレイテンシが悪化していないこと（改善が期待される）
 
 ## 対象ファイル
 
 - `crates/maharit-server/src/tcp_server.rs`（3 箇所）
 - `crates/maharit-query/src/executor.rs`（`new_concurrent_with_managers` / `into_managers`）
+
+## 完了内容 (2026-09-30)
+
+- `Executor` のマネージャ保持を `ManagerSlot`（Owned / Shared / Exclusive）に変更
+  - `new_concurrent_shared`（読み取り: 共有参照、clone なし。万一の更新は copy-on-write で私的コピーに閉じる）
+  - `new_concurrent_exclusive`（書き込み: 排他参照で共有マネージャを直接更新）
+- `tcp_server.rs`: 3 つの `Arc<Mutex<…>>` を `SharedManagers`（3 つの `RwLock` + `write_gate: tokio::sync::Mutex<()>`）に統合
+  - 読み取り: read ロックで並行実行
+  - 書き込み: `write_gate` で直列化（スナップショット → 実行 → WAL 送出まで保持し、レプリケーション順序も実行順と一致）
+  - poison したロックは `into_inner()` で継続利用
+  - 失敗した書き込みでもインデックス更新はグラフ変更と同様に残る（以前はグラフだけ変わりインデックスは破棄され不整合だった）
+- 回帰テスト追加（multi_thread ランタイム）:
+  - `concurrent_writes_keep_property_index_consistent`（8 並列 × 40 CREATE 後に全件が索引経由で引ける）
+  - `concurrent_creates_respect_unique_constraint`（16 並列で同一 UNIQUE 値 → 成功は 1 件のみ）
+  - 旧実装では両テストとも失敗することを確認（320 件中 200 件超が索引から消失）
+- 検証: `cargo test --workspace` 1110 passed / E2E smoke 32, concurrent 19, constraint 26, query_feature 63 全通過
+- 未実施: `benchmark.py` による読み取りレイテンシ比較
+
+### 既知の残課題（本タスク範囲外）
+- tx の ROLLBACK はグラフのみ undo し、インデックス/制約の変更は巻き戻さない（従来から同じ）
+- フォロワーが WAL を適用する際、フォロワー側の PropertyIndex/Fulltext は更新されない

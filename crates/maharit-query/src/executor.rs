@@ -337,6 +337,52 @@ impl BindingValue {
 // 変数名インターナーは持たず、insert 時に `Arc::from(var)` で確保する。
 type Bindings = HashMap<Arc<str>, BindingValue>;
 
+/// 共有マネージャ（制約・全文検索・プロパティ索引）の保持形態。
+///
+/// サーバーはクエリ毎にマネージャを deep clone せず、読み取りクエリには共有参照、
+/// 書き込みクエリには排他参照を渡す。`Shared` に対する可変アクセスは
+/// copy-on-write で `Owned` に昇格するため、万一読み取り経路で更新が起きても
+/// 共有状態は壊れない（その更新は当該 Executor 内に閉じる）。
+enum ManagerSlot<'a, T: Clone> {
+    Owned(T),
+    Shared(&'a T),
+    Exclusive(&'a mut T),
+}
+
+impl<T: Clone> ManagerSlot<'_, T> {
+    fn into_owned(self) -> T {
+        match self {
+            ManagerSlot::Owned(t) => t,
+            ManagerSlot::Shared(t) => t.clone(),
+            ManagerSlot::Exclusive(t) => t.clone(),
+        }
+    }
+}
+
+impl<T: Clone> std::ops::Deref for ManagerSlot<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            ManagerSlot::Owned(t) => t,
+            ManagerSlot::Shared(t) => t,
+            ManagerSlot::Exclusive(t) => t,
+        }
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for ManagerSlot<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        if let ManagerSlot::Shared(t) = self {
+            *self = ManagerSlot::Owned((*t).clone());
+        }
+        match self {
+            ManagerSlot::Owned(t) => t,
+            ManagerSlot::Exclusive(t) => t,
+            ManagerSlot::Shared(_) => unreachable!(),
+        }
+    }
+}
+
 /// クエリエグゼキュータ
 pub struct Executor<'a> {
     /// Raw pointer to the graph backend.  Always non-null and valid for lifetime `'a`.
@@ -358,9 +404,9 @@ pub struct Executor<'a> {
     graph: *mut dyn GraphBackend,
     readonly: bool,
     _marker: std::marker::PhantomData<&'a ()>,
-    constraints: ConstraintManager,
-    fulltext: FulltextManager,
-    property_index: PropertyIndex,
+    constraints: ManagerSlot<'a, ConstraintManager>,
+    fulltext: ManagerSlot<'a, FulltextManager>,
+    property_index: ManagerSlot<'a, PropertyIndex>,
     params: HashMap<String, Value>,
     /// 現在処理中セグメントの WHERE から抽出した範囲述語のヒント
     /// `(変数名, プロパティ名, 演算子, 比較値)`。索引がある数値プロパティの
@@ -384,9 +430,9 @@ impl<'a> Executor<'a> {
             graph: g as *mut dyn GraphBackend,
             readonly: false,
             _marker: std::marker::PhantomData,
-            constraints: ConstraintManager::new(),
-            fulltext: FulltextManager::new(),
-            property_index: PropertyIndex::new(),
+            constraints: ManagerSlot::Owned(ConstraintManager::new()),
+            fulltext: ManagerSlot::Owned(FulltextManager::new()),
+            property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
         }
@@ -419,9 +465,9 @@ impl<'a> Executor<'a> {
             graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
             readonly: true,
             _marker: std::marker::PhantomData,
-            constraints: ConstraintManager::new(),
-            fulltext: FulltextManager::new(),
-            property_index: PropertyIndex::new(),
+            constraints: ManagerSlot::Owned(ConstraintManager::new()),
+            fulltext: ManagerSlot::Owned(FulltextManager::new()),
+            property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
         }
@@ -445,9 +491,9 @@ impl<'a> Executor<'a> {
             graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
             readonly: false,
             _marker: std::marker::PhantomData,
-            constraints: ConstraintManager::new(),
-            fulltext: FulltextManager::new(),
-            property_index: PropertyIndex::new(),
+            constraints: ManagerSlot::Owned(ConstraintManager::new()),
+            fulltext: ManagerSlot::Owned(FulltextManager::new()),
+            property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
         }
@@ -470,9 +516,68 @@ impl<'a> Executor<'a> {
             graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
             readonly: false,
             _marker: std::marker::PhantomData,
-            constraints,
-            fulltext,
-            property_index,
+            constraints: ManagerSlot::Owned(constraints),
+            fulltext: ManagerSlot::Owned(fulltext),
+            property_index: ManagerSlot::Owned(property_index),
+            params: HashMap::new(),
+            range_hints: Vec::new(),
+        }
+    }
+
+    /// Create an `Executor` for a [`ConcurrentGraph`] that borrows the shared
+    /// managers instead of owning a copy.
+    ///
+    /// Intended for read-only statements: the managers are only read, so the
+    /// caller can hold read locks and run many such executors concurrently
+    /// without cloning indexes per query. (An unexpected mutation is applied to
+    /// a private copy and never reaches the shared managers.)
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as [`new_concurrent`].
+    pub unsafe fn new_concurrent_shared(
+        graph: &'a ConcurrentGraph,
+        constraints: &'a ConstraintManager,
+        fulltext: &'a FulltextManager,
+        property_index: &'a PropertyIndex,
+    ) -> Self {
+        let g: &dyn GraphBackend = graph;
+        Self {
+            graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
+            readonly: false,
+            _marker: std::marker::PhantomData,
+            constraints: ManagerSlot::Shared(constraints),
+            fulltext: ManagerSlot::Shared(fulltext),
+            property_index: ManagerSlot::Shared(property_index),
+            params: HashMap::new(),
+            range_hints: Vec::new(),
+        }
+    }
+
+    /// Create an `Executor` for a [`ConcurrentGraph`] that updates the shared
+    /// managers in place (no clone-in / write-back).
+    ///
+    /// Intended for write statements while the caller holds exclusive locks on
+    /// the managers. Index updates stay in step with graph mutations even when
+    /// the statement fails midway (the graph is not rolled back either).
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as [`new_concurrent`].
+    pub unsafe fn new_concurrent_exclusive(
+        graph: &'a ConcurrentGraph,
+        constraints: &'a mut ConstraintManager,
+        fulltext: &'a mut FulltextManager,
+        property_index: &'a mut PropertyIndex,
+    ) -> Self {
+        let g: &dyn GraphBackend = graph;
+        Self {
+            graph: (g as *const dyn GraphBackend) as *mut dyn GraphBackend,
+            readonly: false,
+            _marker: std::marker::PhantomData,
+            constraints: ManagerSlot::Exclusive(constraints),
+            fulltext: ManagerSlot::Exclusive(fulltext),
+            property_index: ManagerSlot::Exclusive(property_index),
             params: HashMap::new(),
             range_hints: Vec::new(),
         }
@@ -486,7 +591,11 @@ impl<'a> Executor<'a> {
     /// `CREATE INDEX` and subsequent index-accelerated lookups work over the
     /// network path, not just within a single Executor instance).
     pub fn into_managers(self) -> (ConstraintManager, FulltextManager, PropertyIndex) {
-        (self.constraints, self.fulltext, self.property_index)
+        (
+            self.constraints.into_owned(),
+            self.fulltext.into_owned(),
+            self.property_index.into_owned(),
+        )
     }
 
     /// Return a shared reference to the graph backend.

@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
@@ -517,10 +517,9 @@ pub struct TcpServer {
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
-    /// Shared constraint manager: persists across all query executions.
-    constraints: Arc<Mutex<ConstraintManager>>,
-    /// Shared fulltext index manager: persists across all query executions.
-    fulltext: Arc<Mutex<FulltextManager>>,
+    /// Shared constraint / fulltext / property-index managers: persist across
+    /// all query executions.
+    managers: Arc<SharedManagers>,
     /// Optional leader replication manager: when set, write operations are
     /// automatically replicated to followers via WAL entries.
     replication: Option<Arc<LeaderReplicationManager>>,
@@ -532,10 +531,71 @@ pub struct TcpServer {
     /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
     /// hot request path. Keyed by normalized query text.
     ast_cache: Arc<Mutex<AstCache>>,
-    /// Shared property (B-tree) index: persists across all query executions so
-    /// that `CREATE INDEX` and subsequent index-accelerated lookups survive
-    /// between requests instead of being discarded per Executor.
-    property_index: Arc<Mutex<PropertyIndex>>,
+}
+
+/// Schema/index state shared by every query on the server.
+///
+/// Read-only queries borrow the managers under read locks (no per-query clone).
+/// Write queries are serialized by `write_gate` and update the managers in place
+/// under write locks, so concurrent writers can no longer overwrite each other's
+/// index updates (lost update) and UNIQUE checks see every committed write.
+/// The gate is an async mutex so it can also cover the WAL emission that follows
+/// execution, keeping replication order identical to execution order.
+struct SharedManagers {
+    constraints: RwLock<ConstraintManager>,
+    fulltext: RwLock<FulltextManager>,
+    /// Shared property (B-tree) index so that `CREATE INDEX` and subsequent
+    /// index-accelerated lookups survive between requests.
+    property_index: RwLock<PropertyIndex>,
+    write_gate: tokio::sync::Mutex<()>,
+}
+
+impl SharedManagers {
+    fn new() -> Self {
+        Self {
+            constraints: RwLock::new(ConstraintManager::new()),
+            fulltext: RwLock::new(FulltextManager::new()),
+            property_index: RwLock::new(PropertyIndex::new()),
+            write_gate: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Run `stmt` against `graph` with these managers.
+    ///
+    /// Write statements must be executed while holding `write_gate`.
+    fn execute(
+        &self,
+        graph: &ConcurrentGraph,
+        stmt: maharit_query::ast::Statement,
+        is_write: bool,
+    ) -> Result<maharit_query::ResultSet, maharit_query::ExecuteError> {
+        // Lock order is always constraints → fulltext → property_index.
+        // A poisoned lock only means another query panicked mid-execution; the
+        // managers are still structurally valid, so keep serving.
+        if is_write {
+            let mut cm = self.constraints.write().unwrap_or_else(|e| e.into_inner());
+            let mut fm = self.fulltext.write().unwrap_or_else(|e| e.into_inner());
+            let mut pi = self
+                .property_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
+            // executor uses the raw pointer only during this synchronous call.
+            let mut executor =
+                unsafe { Executor::new_concurrent_exclusive(graph, &mut cm, &mut fm, &mut pi) };
+            executor.execute(stmt)
+        } else {
+            let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
+            let fm = self.fulltext.read().unwrap_or_else(|e| e.into_inner());
+            let pi = self
+                .property_index
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            // SAFETY: as above.
+            let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) };
+            executor.execute(stmt)
+        }
+    }
 }
 
 /// Capacity (number of distinct queries) of the shared AST cache.
@@ -550,13 +610,11 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
-            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
-            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
+            managers: Arc::new(SharedManagers::new()),
             replication: None,
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
-            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -568,13 +626,11 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
-            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
-            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
+            managers: Arc::new(SharedManagers::new()),
             replication: None,
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
-            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -586,13 +642,11 @@ impl TcpServer {
             stats: Arc::new(ServerStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
-            constraints: Arc::new(Mutex::new(ConstraintManager::new())),
-            fulltext: Arc::new(Mutex::new(FulltextManager::new())),
+            managers: Arc::new(SharedManagers::new()),
             replication: None,
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
-            property_index: Arc::new(Mutex::new(PropertyIndex::new())),
         }
     }
 
@@ -682,14 +736,12 @@ impl TcpServer {
                     let stats = Arc::clone(&self.stats);
                     let shutdown = Arc::clone(&self.shutdown);
                     let tx_manager = Arc::clone(&self.tx_manager);
-                    let constraints = Arc::clone(&self.constraints);
-                    let fulltext = Arc::clone(&self.fulltext);
+                    let managers = Arc::clone(&self.managers);
                     let config = self.config.clone();
                     let replication = self.replication.clone();
                     let follower = self.follower.clone();
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
-                    let property_index = Arc::clone(&self.property_index);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -699,14 +751,12 @@ impl TcpServer {
                             stats.clone(),
                             shutdown,
                             tx_manager,
-                            constraints,
-                            fulltext,
+                            managers,
                             config,
                             replication,
                             follower,
                             auth,
                             ast_cache,
-                            property_index,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -752,14 +802,12 @@ async fn handle_connection(
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
     tx_manager: Arc<TransactionManager>,
-    constraints: Arc<Mutex<ConstraintManager>>,
-    fulltext: Arc<Mutex<FulltextManager>>,
+    managers: Arc<SharedManagers>,
     config: ServerConfig,
     replication: Option<Arc<LeaderReplicationManager>>,
     follower: Option<Arc<FollowerReplicationManager>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
-    property_index: Arc<Mutex<PropertyIndex>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
@@ -858,11 +906,9 @@ async fn handle_connection(
                                     &query,
                                     id,
                                     &tx_manager,
-                                    &constraints,
-                                    &fulltext,
+                                    &managers,
                                     replication.as_deref(),
                                     &ast_cache,
-                                    &property_index,
                                 )
                                 .await
                             }
@@ -870,11 +916,9 @@ async fn handle_connection(
                                 execute_query(
                                     &graph,
                                     &query,
-                                    &constraints,
-                                    &fulltext,
+                                    &managers,
                                     replication.as_deref(),
                                     &ast_cache,
-                                    &property_index,
                                 )
                                 .await
                             }
@@ -908,11 +952,9 @@ async fn handle_connection(
                         &query,
                         chunk_size,
                         config.write_timeout,
-                        &constraints,
-                        &fulltext,
+                        &managers,
                         replication.as_deref(),
                         &ast_cache,
-                        &property_index,
                     )
                     .await
                     {
@@ -1093,11 +1135,9 @@ async fn execute_streaming_query(
     query: &str,
     chunk_size: usize,
     write_timeout: Duration,
-    constraints: &Arc<Mutex<ConstraintManager>>,
-    fulltext: &Arc<Mutex<FulltextManager>>,
+    managers: &SharedManagers,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
-    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> std::io::Result<()> {
     // Parse the query (reusing a cached AST when available). Bind the result to
     // a local so the mutex guard is released before any `.await` below.
@@ -1114,6 +1154,13 @@ async fn execute_streaming_query(
 
     let is_write = !is_read_only(&stmt);
 
+    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    let write_guard = if is_write {
+        Some(managers.write_gate.lock().await)
+    } else {
+        None
+    };
+
     // Snapshot node/edge IDs before execution for WAL diff (ConcurrentGraph: no lock needed).
     let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
         (
@@ -1124,24 +1171,7 @@ async fn execute_streaming_query(
         (HashSet::new(), HashSet::new())
     };
 
-    // Clone shared managers into the executor for this query.
-    let cm = constraints.lock().unwrap().clone();
-    let fm = fulltext.lock().unwrap().clone();
-    let pi = property_index.lock().unwrap().clone();
-
-    // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
-    // uses the raw pointer only during the synchronous execute() call below.
-    let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
-        let result = executor.execute(stmt);
-        if result.is_ok() {
-            let (new_cm, new_fm, new_pi) = executor.into_managers();
-            *constraints.lock().unwrap() = new_cm;
-            *fulltext.lock().unwrap() = new_fm;
-            *property_index.lock().unwrap() = new_pi;
-        }
-        result
-    };
+    let exec_result = managers.execute(graph, stmt, is_write);
 
     let result = match exec_result {
         Ok(r) => r,
@@ -1156,6 +1186,7 @@ async fn execute_streaming_query(
     if is_write && let Some(repl) = replication {
         emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
     }
+    drop(write_guard);
 
     // Convert rows to HashMap<String, serde_json::Value> 型情報維持
     let all_rows: Vec<HashMap<String, serde_json::Value>> = result
@@ -1320,11 +1351,9 @@ async fn execute_query_with_tx(
     query: &str,
     tx_id: u64,
     tx_manager: &TransactionManager,
-    constraints: &Arc<Mutex<ConstraintManager>>,
-    fulltext: &Arc<Mutex<FulltextManager>>,
+    managers: &SharedManagers,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
-    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> Response {
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
         Ok(s) => s,
@@ -1338,17 +1367,11 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(
-            graph,
-            query,
-            constraints,
-            fulltext,
-            replication,
-            ast_cache,
-            property_index,
-        )
-        .await;
+        return execute_query(graph, query, managers, replication, ast_cache).await;
     }
+
+    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    let _write_guard = managers.write_gate.lock().await;
 
     // Snapshot before execution for undo tracking and WAL diff.
     let snapshot = take_concurrent_snapshot(graph);
@@ -1361,23 +1384,7 @@ async fn execute_query_with_tx(
         (HashSet::new(), HashSet::new())
     };
 
-    // Clone shared managers into the executor for this query.
-    let cm = constraints.lock().unwrap().clone();
-    let fm = fulltext.lock().unwrap().clone();
-    let pi = property_index.lock().unwrap().clone();
-
-    // SAFETY: ConcurrentGraph has interior mutability via DashMap.
-    let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
-        let result = executor.execute(stmt);
-        if result.is_ok() {
-            let (new_cm, new_fm, new_pi) = executor.into_managers();
-            *constraints.lock().unwrap() = new_cm;
-            *fulltext.lock().unwrap() = new_fm;
-            *property_index.lock().unwrap() = new_pi;
-        }
-        result
-    };
+    let exec_result = managers.execute(graph, stmt, is_write);
 
     match exec_result {
         Ok(result) => {
@@ -1414,11 +1421,9 @@ async fn execute_query_with_tx(
 async fn execute_query(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
-    constraints: &Arc<Mutex<ConstraintManager>>,
-    fulltext: &Arc<Mutex<FulltextManager>>,
+    managers: &SharedManagers,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
-    property_index: &Arc<Mutex<PropertyIndex>>,
 ) -> Response {
     // Reuse a previously parsed AST for identical query text.
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
@@ -1432,6 +1437,13 @@ async fn execute_query(
 
     let is_write = !is_read_only(&stmt);
 
+    // Serialize writers across snapshot → execute → WAL emission (see SharedManagers).
+    let write_guard = if is_write {
+        Some(managers.write_gate.lock().await)
+    } else {
+        None
+    };
+
     // Snapshot node/edge IDs before execution for WAL diff (no lock needed).
     let (node_ids_before, edge_ids_before) = if is_write && replication.is_some() {
         (
@@ -1442,28 +1454,12 @@ async fn execute_query(
         (HashSet::new(), HashSet::new())
     };
 
-    // Clone shared managers into the executor for this query.
-    let cm = constraints.lock().unwrap().clone();
-    let fm = fulltext.lock().unwrap().clone();
-    let pi = property_index.lock().unwrap().clone();
-
-    // SAFETY: ConcurrentGraph has interior mutability via DashMap; the executor
-    // uses the raw pointer only during the synchronous execute() call.
-    let exec_result = {
-        let mut executor = unsafe { Executor::new_concurrent_with_managers(graph, cm, fm, pi) };
-        let result = executor.execute(stmt);
-        if result.is_ok() {
-            let (new_cm, new_fm, new_pi) = executor.into_managers();
-            *constraints.lock().unwrap() = new_cm;
-            *fulltext.lock().unwrap() = new_fm;
-            *property_index.lock().unwrap() = new_pi;
-        }
-        result
-    };
+    let exec_result = managers.execute(graph, stmt, is_write);
 
     if is_write && let (Ok(_), Some(repl)) = (&exec_result, replication) {
         emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
     }
+    drop(write_guard);
 
     match exec_result {
         Ok(result) => {
@@ -2104,6 +2100,95 @@ mod tests {
         }
     }
 
+    async fn query(stream: &mut TcpStream, q: &str) -> Response {
+        send_recv(
+            stream,
+            &Request::Query {
+                query: q.to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await
+    }
+
+    /// Concurrent writers must not overwrite each other's property-index
+    /// updates. Previously each query cloned the index and wrote the whole copy
+    /// back, so the last writer silently dropped the others' entries.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_writes_keep_property_index_consistent() {
+        let addr = start_test_server().await;
+        let mut setup = TcpStream::connect(addr).await.unwrap();
+        query(&mut setup, "CREATE INDEX ON :Item(k)").await;
+
+        const WRITERS: i64 = 8;
+        const PER_WRITER: i64 = 40;
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            handles.push(tokio::spawn(async move {
+                let mut s = TcpStream::connect(addr).await.unwrap();
+                for i in 0..PER_WRITER {
+                    let k = w * PER_WRITER + i;
+                    match query(&mut s, &format!("CREATE (:Item {{k: {k}}})")).await {
+                        Response::Result { .. } => {}
+                        other => panic!("CREATE failed: {:?}", other),
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Every node must be reachable through the index-backed equality lookup.
+        let mut missing = Vec::new();
+        for k in 0..WRITERS * PER_WRITER {
+            match query(
+                &mut setup,
+                &format!("MATCH (n:Item) WHERE n.k = {k} RETURN n.k"),
+            )
+            .await
+            {
+                Response::Result { rows } if rows.len() == 1 => {}
+                _ => missing.push(k),
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "index lost entries for k = {:?}",
+            missing
+        );
+    }
+
+    /// Concurrent CREATEs of the same UNIQUE value: exactly one may succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_creates_respect_unique_constraint() {
+        let addr = start_test_server().await;
+        let mut setup = TcpStream::connect(addr).await.unwrap();
+        query(
+            &mut setup,
+            "CREATE CONSTRAINT uniq_sku FOR (p:Product) REQUIRE p.sku IS UNIQUE",
+        )
+        .await;
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            handles.push(tokio::spawn(async move {
+                let mut s = TcpStream::connect(addr).await.unwrap();
+                matches!(
+                    query(&mut s, "CREATE (:Product {sku: 'SKU-1'})").await,
+                    Response::Result { .. }
+                )
+            }));
+        }
+        let mut ok = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 1, "exactly one CREATE must pass the UNIQUE check");
+    }
     #[tokio::test]
     async fn integration_property_index_persists_across_requests() {
         let addr = start_test_server().await;
