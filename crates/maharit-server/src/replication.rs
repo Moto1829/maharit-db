@@ -442,7 +442,7 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
 
 /// Handle a single follower connection on the leader side.
 async fn handle_follower_connection(
-    mut socket: TcpStream,
+    socket: TcpStream,
     config: ReplicationConfig,
     lsn: Arc<AtomicU64>,
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
@@ -450,7 +450,7 @@ async fn handle_follower_connection(
     mut wal_rx: broadcast::Receiver<(u64, WalEntryData)>,
     graph: Option<Arc<RwLock<Graph>>>,
 ) -> Result<(), ReplicationError> {
-    let (mut reader, mut writer) = socket.split();
+    let (mut reader, mut writer) = socket.into_split();
 
     // ── Handshake ────────────────────────────────────────────────────────────
     let msg = recv_message(&mut reader).await?;
@@ -527,6 +527,22 @@ async fn handle_follower_connection(
     let heartbeat_interval = Duration::from_secs(config.heartbeat_interval_secs);
     let mut hb_ticker = interval(heartbeat_interval);
 
+    // Read follower messages on a dedicated task. `recv_message` is not
+    // cancellation-safe (it may have consumed part of a frame when dropped), so
+    // it must never be polled directly as a `select!` branch: when a WAL send or
+    // heartbeat won the race mid-read, the partial frame was lost and the
+    // stream desynchronised (task120). `mpsc::Receiver::recv` is cancel-safe.
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(64);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let result = recv_message(&mut reader).await;
+            let failed = result.is_err();
+            if msg_tx.send(result).await.is_err() || failed {
+                break;
+            }
+        }
+    });
+
     // ── Main loop ────────────────────────────────────────────────────────────
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -542,7 +558,8 @@ async fn handle_follower_connection(
                     timestamp: current_timestamp(),
                     lsn: lsn.load(Ordering::SeqCst),
                 };
-                if send_message(&mut writer, &hb).await.is_err() {
+                if let Err(e) = send_message(&mut writer, &hb).await {
+                    tracing::warn!(follower = %follower_id, error = %e, "replication: heartbeat send failed, dropping follower");
                     break;
                 }
             }
@@ -555,12 +572,17 @@ async fn handle_follower_connection(
                             lsn: entry_lsn,
                             entry: entry_data,
                         };
-                        if send_message(&mut writer, &wal_msg).await.is_err() {
+                        if let Err(e) = send_message(&mut writer, &wal_msg).await {
+                            tracing::warn!(follower = %follower_id, error = %e, "replication: WAL send failed, dropping follower");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("Follower {} lagged by {} entries", follower_id, n);
+                        // Entries were skipped: continuing would leave the
+                        // follower silently diverged, so drop it instead.
+                        tracing::error!(follower = %follower_id, skipped = n, "replication: follower lagged behind the WAL buffer, dropping follower");
+                        eprintln!("Follower {} lagged by {} entries; disconnecting", follower_id, n);
+                        break;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
@@ -568,9 +590,14 @@ async fn handle_follower_connection(
                 }
             }
 
-            // Incoming message from the follower
-            read_result = recv_message(&mut reader) => {
+            // Incoming message from the follower (via the reader task)
+            read_result = msg_rx.recv() => {
                 match read_result {
+                    None => {
+                        tracing::warn!(follower = %follower_id, "replication: follower reader task ended");
+                        break;
+                    }
+                    Some(read_result) => match read_result {
                     Ok(ReplicationMessage::HeartbeatAck { follower_id: fid, lsn: ack_lsn }) => {
                         let mut guard = followers.write().await;
                         if let Some(state) = guard.get_mut(&fid) {
@@ -585,13 +612,20 @@ async fn handle_follower_connection(
                             state.last_heartbeat = Instant::now();
                         }
                     }
-                    Ok(_) | Err(_) => {
+                    Ok(other) => {
+                        tracing::warn!(follower = %follower_id, message = ?other, "replication: unexpected message from follower, dropping follower");
                         break;
                     }
+                    Err(e) => {
+                        tracing::warn!(follower = %follower_id, error = %e, "replication: follower connection closed");
+                        break;
+                    }
+                    },
                 }
             }
         }
     }
+    reader_task.abort();
 
     // Mark the follower as disconnected.
     {
@@ -871,7 +905,9 @@ async fn run_follower_receive_loop(
     loop {
         let msg = match recv_message(&mut reader).await {
             Ok(m) => m,
-            Err(_) => {
+            Err(e) => {
+                tracing::warn!(error = %e, "replication: connection to leader lost");
+                eprintln!("Replication: connection to leader lost: {}", e);
                 is_leader_alive.store(false, Ordering::SeqCst);
                 break;
             }
@@ -1845,6 +1881,149 @@ mod tests {
     }
 
     // 20. Verify that a follower promotes itself after receiving a PromoteToLeader message
+    /// Deterministic reproduction of task120: the follower's ACK frame arrives
+    /// in two TCP segments and a WAL entry is broadcast in between. The leader
+    /// must not lose the partially read frame (the old `select!` dropped the
+    /// half-finished `recv_message` future, desynchronising the stream).
+    #[tokio::test]
+    async fn test_leader_survives_split_ack_frame() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+        let leader = LeaderReplicationManager::new(ReplicationConfig {
+            heartbeat_interval_secs: 3600, // keep heartbeats out of the way
+            ..ReplicationConfig::default()
+        });
+        leader.start_with_listener(listener).await.unwrap();
+
+        let socket = TcpStream::connect(leader_addr).await.unwrap();
+        let (mut reader, mut writer) = socket.into_split();
+        send_message(
+            &mut writer,
+            &ReplicationMessage::Handshake {
+                follower_id: "f-split".to_string(),
+                current_lsn: 1,
+                auth_token: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_message(&mut reader).await.unwrap(),
+            ReplicationMessage::HandshakeAck { .. }
+        ));
+        // The first interval tick fires immediately: consume that heartbeat.
+        assert!(matches!(
+            recv_message(&mut reader).await.unwrap(),
+            ReplicationMessage::Heartbeat { .. }
+        ));
+
+        // Write only the first half of a WalAck frame.
+        let ack = serde_json::to_vec(&ReplicationMessage::WalAck {
+            follower_id: "f-split".to_string(),
+            lsn: 1,
+        })
+        .unwrap();
+        let mut frame = (ack.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&ack);
+        let (head, tail) = frame.split_at(6);
+        writer.write_all(head).await.unwrap();
+        writer.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A WAL entry wins the select! while the ACK is half read.
+        leader
+            .append_wal_entry(WalEntryData::DeleteNode { node_id: 1 })
+            .await;
+        assert!(matches!(
+            recv_message(&mut reader).await.unwrap(),
+            ReplicationMessage::WalEntry { lsn: 1, .. }
+        ));
+
+        // Finish the ACK, then send another WAL entry: the stream must still be in sync.
+        writer.write_all(tail).await.unwrap();
+        writer.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        leader
+            .append_wal_entry(WalEntryData::DeleteNode { node_id: 2 })
+            .await;
+        let next = tokio::time::timeout(Duration::from_secs(2), recv_message(&mut reader))
+            .await
+            .expect("leader stopped streaming after a split ACK frame");
+        assert!(matches!(
+            next,
+            Ok(ReplicationMessage::WalEntry { lsn: 2, .. })
+        ));
+        assert_eq!(leader.get_follower_count(), 1);
+    }
+
+    /// A burst of WAL entries must all reach a real follower. The leader used to
+    /// read follower ACKs with a non-cancellation-safe future inside
+    /// `tokio::select!`; whenever a WAL send won the race mid-read, bytes were
+    /// lost, the stream desynchronised and the leader silently dropped the
+    /// follower (task120).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_wal_burst_fully_replicated() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+        let leader = LeaderReplicationManager::new(ReplicationConfig::default());
+        leader.start_with_listener(listener).await.unwrap();
+
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+        let follower = FollowerReplicationManager::with_concurrent_graph(
+            ReplicationConfig {
+                role: NodeRole::Follower,
+                node_id: "f-burst".to_string(),
+                replication_bind_address: "127.0.0.1:0".to_string(),
+                leader_address: Some(leader_addr.to_string()),
+                heartbeat_interval_secs: 1,
+                heartbeat_timeout_secs: 5,
+                shared_secret: None,
+            },
+            Arc::clone(&follower_graph),
+        );
+        follower.start().await.unwrap();
+
+        // Wait until the leader has registered the follower.
+        for _ in 0..50 {
+            if leader.get_follower_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(leader.get_follower_count(), 1);
+
+        const N: u64 = 500;
+        for id in 0..N {
+            leader
+                .append_wal_entry(WalEntryData::CreateNode {
+                    node_id: id,
+                    labels: vec!["B".to_string()],
+                })
+                .await;
+            if id % 10 == 0 {
+                // Interleave with the follower's ACK traffic.
+                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_micros(200)).await;
+            }
+        }
+
+        for _ in 0..100 {
+            if follower_graph.node_count() as u64 == N {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(follower_graph.node_count() as u64, N);
+        assert_eq!(follower.get_current_lsn(), N);
+        assert_eq!(
+            leader.get_follower_count(),
+            1,
+            "follower must stay connected"
+        );
+    }
+
     #[tokio::test]
     async fn test_promote_to_leader() {
         // Bind a mock leader listener on an ephemeral port
