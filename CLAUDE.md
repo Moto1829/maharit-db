@@ -14,7 +14,7 @@ cargo build                          # debug
 cargo build --release -p maharit-server   # 本番バイナリ（target/release/maharit）
 
 # Workspace 全テスト
-cargo test                           # 全クレート
+cargo test --workspace               # 全クレート（--workspace 無しはルートパッケージのみ）
 cargo test -p maharit-query          # 単一クレート
 cargo test -p maharit-query executor::tests::test_match   # 単一テスト（名前部分一致）
 cargo test -- --nocapture            # println! を表示
