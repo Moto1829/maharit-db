@@ -10,7 +10,7 @@
 ## 実装内容
 
 ### フェーズ1: GitHub Actions リリースパイプライン
-- [x] `.github/workflows/release.yml` を作成
+- [ ] `.github/workflows/release.yml` を作成（※ 2026-09-30 確認: 完了扱いだったがファイル・履歴とも存在しない。未実装）
   - `v*` タグ push 時にトリガー
   - ターゲット: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
   - `cross` または GitHub-hosted runners でクロスコンパイル
