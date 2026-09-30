@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use maharit_core::{
-    Constraint, ConstraintError, ConstraintManager, ConstraintType, ConcurrentGraph, Edge,
+    ConcurrentGraph, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge,
     FulltextError, FulltextManager, Graph, GraphBackend, IndexDefinition, NodeId, PropertyIndex,
     PropertyType, PropertyValue, traversal,
 };
@@ -35,7 +35,11 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
@@ -174,10 +178,22 @@ impl std::fmt::Display for Value {
             }
             Value::DateTime(ms) => {
                 let (y, mo, d, h, mi, s, frac) = maharit_core::temporal::millis_to_datetime(*ms);
-                write!(f, "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, mi, s, frac)
+                write!(
+                    f,
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    y, mo, d, h, mi, s, frac
+                )
             }
-            Value::Duration { months, days, millis } => {
-                write!(f, "{}", maharit_core::temporal::duration_to_string(*months, *days, *millis))
+            Value::Duration {
+                months,
+                days,
+                millis,
+            } => {
+                write!(
+                    f,
+                    "{}",
+                    maharit_core::temporal::duration_to_string(*months, *days, *millis)
+                )
             }
             Value::Map(map) => {
                 write!(f, "{{")?;
@@ -213,10 +229,8 @@ impl Value {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
             Value::Map(map) => {
-                let obj: serde_json::Map<String, serde_json::Value> = map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.to_json()))
-                    .collect();
+                let obj: serde_json::Map<String, serde_json::Value> =
+                    map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
                 serde_json::Value::Object(obj)
             }
             // 非プリミティブ型は Display 文字列で表現（後方互換、UI で読み取り可能）
@@ -249,7 +263,11 @@ impl From<&PropertyValue> for Value {
             PropertyValue::String(s) => Value::String(s.clone()),
             PropertyValue::Date(d) => Value::Date(*d),
             PropertyValue::DateTime(ms) => Value::DateTime(*ms),
-            PropertyValue::Duration { months, days, millis } => Value::Duration {
+            PropertyValue::Duration {
+                months,
+                days,
+                millis,
+            } => Value::Duration {
                 months: *months,
                 days: *days,
                 millis: *millis,
@@ -489,7 +507,10 @@ impl<'a> Executor<'a> {
     /// this is always safe because writes use DashMap interior mutability.
     #[inline]
     fn graph_mut(&mut self) -> &mut dyn GraphBackend {
-        debug_assert!(!self.readonly, "write operation called on read-only executor");
+        debug_assert!(
+            !self.readonly,
+            "write operation called on read-only executor"
+        );
         // SAFETY: In non-readonly mode the pointer was derived from either
         // `&mut Graph` (exclusive lock held by caller) or `&ConcurrentGraph`
         // (interior mutability via DashMap).  In both cases producing `&mut`
@@ -752,8 +773,12 @@ impl<'a> Executor<'a> {
                         let edge_label = segment.edge.edge_type.unwrap_or_default();
 
                         // Validate endpoint label constraints before creating edge
-                        self.constraints
-                            .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
+                        self.constraints.validate_edge_create(
+                            self.graph_ref(),
+                            &edge_label,
+                            from,
+                            to,
+                        )?;
 
                         let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
@@ -813,13 +838,14 @@ impl<'a> Executor<'a> {
 
         // Validate constraints before creating (using primary label)
         self.constraints
-            .validate_node_create(self.graph_ref(),&primary_label, &props, None)?;
+            .validate_node_create(self.graph_ref(), &primary_label, &props, None)?;
 
         let node_id = self.graph_mut().create_node_with_labels(labels.clone());
 
         // Set properties
         for (key, prop_val) in &evaluated_props {
-            self.graph_mut().set_node_property(node_id, key, prop_val.clone());
+            self.graph_mut()
+                .set_node_property(node_id, key, prop_val.clone());
         }
 
         // Index in fulltext indexes (using primary label for now)
@@ -1041,8 +1067,12 @@ impl<'a> Executor<'a> {
                         let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
 
                         // Validate endpoint label constraints before creating edge
-                        self.constraints
-                            .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
+                        self.constraints.validate_edge_create(
+                            self.graph_ref(),
+                            &edge_label,
+                            from,
+                            to,
+                        )?;
 
                         let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
@@ -1149,7 +1179,8 @@ impl<'a> Executor<'a> {
                                 );
                             }
                             BindingValue::Edge(edge_id) => {
-                                self.graph_mut().set_edge_property(*edge_id, property, prop_value);
+                                self.graph_mut()
+                                    .set_edge_property(*edge_id, property, prop_value);
                             }
                             _ => {
                                 return Err(ExecuteError::TypeError(
@@ -1179,7 +1210,10 @@ impl<'a> Executor<'a> {
                                 for (key, prop_val) in &evaluated {
                                     if let Some(node) = self.graph_ref().get_node(*node_id) {
                                         self.constraints.validate_property_set(
-                                            self.graph_ref(), &node, key, prop_val,
+                                            self.graph_ref(),
+                                            &node,
+                                            key,
+                                            prop_val,
                                         )?;
                                     }
                                 }
@@ -1190,7 +1224,12 @@ impl<'a> Executor<'a> {
                                         &key,
                                         prop_val.clone(),
                                     );
-                                    self.reindex_node_property(*node_id, &key, old, Some(&prop_val));
+                                    self.reindex_node_property(
+                                        *node_id,
+                                        &key,
+                                        old,
+                                        Some(&prop_val),
+                                    );
                                 }
                             }
                             BindingValue::Edge(edge_id) => {
@@ -1341,8 +1380,12 @@ impl<'a> Executor<'a> {
                     let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
 
                     // Validate endpoint label constraints before creating edge
-                    self.constraints
-                        .validate_edge_create(self.graph_ref(),&edge_label, from, to)?;
+                    self.constraints.validate_edge_create(
+                        self.graph_ref(),
+                        &edge_label,
+                        from,
+                        to,
+                    )?;
 
                     let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
@@ -1406,8 +1449,7 @@ impl<'a> Executor<'a> {
                                 if let Some(node) = self.graph_ref().get_node(*node_id) {
                                     self.constraints.validate_property_remove(&node, prop)?;
                                 }
-                                let removed =
-                                    self.graph_mut().remove_node_property(*node_id, prop);
+                                let removed = self.graph_mut().remove_node_property(*node_id, prop);
                                 if let Some(old) = removed {
                                     self.reindex_node_property(*node_id, prop, Some(old), None);
                                 }
@@ -1426,7 +1468,8 @@ impl<'a> Executor<'a> {
                         let _binding_value = bindings
                             .get(var.as_str())
                             .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
-                        if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node()) {
+                        if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node())
+                        {
                             self.graph_mut().remove_node_label(node_id, label);
                         }
                     }
@@ -1468,7 +1511,10 @@ impl<'a> Executor<'a> {
         let mut all_bindings: Vec<Bindings> = Vec::new();
         for item in &items {
             let mut bindings = Bindings::new();
-            bindings.insert(Arc::from(uw.variable.as_str()), BindingValue::Scalar(item.clone()));
+            bindings.insert(
+                Arc::from(uw.variable.as_str()),
+                BindingValue::Scalar(item.clone()),
+            );
             all_bindings.push(bindings);
         }
 
@@ -1533,7 +1579,10 @@ impl<'a> Executor<'a> {
 
         for item in &items {
             let mut bindings = outer_bindings.clone();
-            bindings.insert(Arc::from(stmt.variable.as_str()), BindingValue::Scalar(item.clone()));
+            bindings.insert(
+                Arc::from(stmt.variable.as_str()),
+                BindingValue::Scalar(item.clone()),
+            );
 
             for clause in &stmt.clauses {
                 self.execute_foreach_clause(clause, &bindings)?;
@@ -1842,7 +1891,10 @@ impl<'a> Executor<'a> {
 
     // ========== PROPERTY INDEX ==========
 
-    fn execute_create_index(&mut self, ci: CreateIndexStatement) -> Result<ResultSet, ExecuteError> {
+    fn execute_create_index(
+        &mut self,
+        ci: CreateIndexStatement,
+    ) -> Result<ResultSet, ExecuteError> {
         let def = IndexDefinition::new(ci.label.clone(), ci.property.clone());
         self.property_index.create_index(def);
 
@@ -1859,7 +1911,8 @@ impl<'a> Executor<'a> {
             if let Some(node) = self.graph_ref().get_node(node_id)
                 && let Some(val) = node.get_property(&ci.property)
             {
-                self.property_index.index_property(node_id, &ci.property, val);
+                self.property_index
+                    .index_property(node_id, &ci.property, val);
             }
         }
 
@@ -1918,9 +1971,7 @@ impl<'a> Executor<'a> {
         pc: ProcedureCallStatement,
     ) -> Result<ResultSet, ExecuteError> {
         match pc.procedure.as_str() {
-            "db.index.fulltext.search" => {
-                self.execute_fulltext_search_procedure(pc)
-            }
+            "db.index.fulltext.search" => self.execute_fulltext_search_procedure(pc),
             other => Err(ExecuteError::TypeError(format!(
                 "unknown procedure: {}",
                 other
@@ -1954,7 +2005,7 @@ impl<'a> Executor<'a> {
                 return Err(ExecuteError::TypeError(
                     "db.index.fulltext.search: first argument must be a string (index name)"
                         .to_string(),
-                ))
+                ));
             }
         };
 
@@ -1964,7 +2015,7 @@ impl<'a> Executor<'a> {
                 return Err(ExecuteError::TypeError(
                     "db.index.fulltext.search: second argument must be a string (query)"
                         .to_string(),
-                ))
+                ));
             }
         };
 
@@ -1983,10 +2034,7 @@ impl<'a> Executor<'a> {
         for result in &search_results {
             let mut bindings = Bindings::new();
             // Always bind "node" and "score" so RETURN items can reference them
-            bindings.insert(
-                Arc::from("node"),
-                BindingValue::Node(result.node_id),
-            );
+            bindings.insert(Arc::from("node"), BindingValue::Node(result.node_id));
             bindings.insert(
                 Arc::from("score"),
                 BindingValue::Scalar(Value::Float(result.score)),
@@ -2085,7 +2133,11 @@ impl<'a> Executor<'a> {
             Value::String(s) => Ok(PropertyValue::String(s.clone())),
             Value::Date(d) => Ok(PropertyValue::Date(*d)),
             Value::DateTime(ms) => Ok(PropertyValue::DateTime(*ms)),
-            Value::Duration { months, days, millis } => Ok(PropertyValue::Duration {
+            Value::Duration {
+                months,
+                days,
+                millis,
+            } => Ok(PropertyValue::Duration {
                 months: *months,
                 days: *days,
                 millis: *millis,
@@ -2107,32 +2159,27 @@ impl<'a> Executor<'a> {
 
         // Detect an early-termination limit: applicable only when there is no ORDER BY
         // and no aggregation, since both require collecting all rows before outputting.
-        let has_aggregation = m
-            .return_clause
-            .items
-            .iter()
-            .any(Self::is_aggregate);
+        let has_aggregation = m.return_clause.items.iter().any(Self::is_aggregate);
 
-        let early_limit: Option<usize> =
-            if !has_aggregation && m.return_clause.order_by.is_none() {
-                m.return_clause
-                    .limit
-                    .as_ref()
-                    .and_then(|e| self.resolve_skip_limit(e).ok())
-                    .map(|n| {
-                        // Include SKIP in the early cutoff so ORDER-agnostic queries
-                        // still yield the correct slice.
-                        let skip = m
-                            .return_clause
-                            .skip
-                            .as_ref()
-                            .and_then(|e| self.resolve_skip_limit(e).ok())
-                            .unwrap_or(0) as usize;
-                        n as usize + skip
-                    })
-            } else {
-                None
-            };
+        let early_limit: Option<usize> = if !has_aggregation && m.return_clause.order_by.is_none() {
+            m.return_clause
+                .limit
+                .as_ref()
+                .and_then(|e| self.resolve_skip_limit(e).ok())
+                .map(|n| {
+                    // Include SKIP in the early cutoff so ORDER-agnostic queries
+                    // still yield the correct slice.
+                    let skip = m
+                        .return_clause
+                        .skip
+                        .as_ref()
+                        .and_then(|e| self.resolve_skip_limit(e).ok())
+                        .unwrap_or(0) as usize;
+                    n as usize + skip
+                })
+        } else {
+            None
+        };
 
         // Process each segment, applying the early cutoff after each one.
         let mut all_bindings: Vec<Bindings> = vec![Bindings::new()];
@@ -2208,7 +2255,12 @@ impl<'a> Executor<'a> {
             .map(|it| self.return_item_to_column_name(it))
             .collect();
         let row_values = vec![Value::Int(cnt); rc.items.len()];
-        Some(ResultSet::new(columns, vec![Row { columns: row_values }]))
+        Some(ResultSet::new(
+            columns,
+            vec![Row {
+                columns: row_values,
+            }],
+        ))
     }
 
     /// True if `item` is `count(*)` or `count(v)` where `v` is `node_var`
@@ -2302,7 +2354,10 @@ impl<'a> Executor<'a> {
             for inner_row in &inner_result.rows {
                 let mut merged = outer.clone();
                 for (col_name, col_val) in col_names.iter().zip(inner_row.columns.iter()) {
-                    merged.insert(Arc::from(col_name.as_str()), BindingValue::Scalar(col_val.clone()));
+                    merged.insert(
+                        Arc::from(col_name.as_str()),
+                        BindingValue::Scalar(col_val.clone()),
+                    );
                 }
                 result.push(merged);
             }
@@ -2393,10 +2448,7 @@ impl<'a> Executor<'a> {
 
     /// WHERE 式からトップレベルで AND 連結された `var.prop = <const>` の等価述語を
     /// 収集する。OR / NOT などの下には降りない（誤って絞り込まないため）。
-    fn collect_pushable_equalities(
-        expr: &Expression,
-        out: &mut Vec<(String, String, Expression)>,
-    ) {
+    fn collect_pushable_equalities(expr: &Expression, out: &mut Vec<(String, String, Expression)>) {
         match expr {
             Expression::BinaryOp(l, BinaryOp::And, r) => {
                 Self::collect_pushable_equalities(l, out);
@@ -2447,7 +2499,10 @@ impl<'a> Executor<'a> {
                 Self::collect_range_predicates(r, out);
             }
             Expression::BinaryOp(l, op, r)
-                if matches!(op, BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte) =>
+                if matches!(
+                    op,
+                    BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Lte | BinaryOp::Gte
+                ) =>
             {
                 match (l.as_ref(), r.as_ref()) {
                     (Expression::Property(v, p), rhs) => {
@@ -2493,10 +2548,7 @@ impl<'a> Executor<'a> {
 
     /// ノードパターンの変数に一致する等価述語をプロパティ制約として追加する。
     /// 既存のインラインプロパティは上書きしない（両方を AND として扱う）。
-    fn augment_node_pattern(
-        np: &NodePattern,
-        eqs: &[(String, String, Expression)],
-    ) -> NodePattern {
+    fn augment_node_pattern(np: &NodePattern, eqs: &[(String, String, Expression)]) -> NodePattern {
         let var = match &np.variable {
             Some(v) => v,
             None => return np.clone(),
@@ -2504,7 +2556,9 @@ impl<'a> Executor<'a> {
         let mut properties = np.properties.clone();
         for (v, prop, val) in eqs {
             if v == var {
-                properties.entry(prop.clone()).or_insert_with(|| val.clone());
+                properties
+                    .entry(prop.clone())
+                    .or_insert_with(|| val.clone());
             }
         }
         NodePattern {
@@ -2582,11 +2636,14 @@ impl<'a> Executor<'a> {
                                 new_binding.insert(Arc::from(col.as_str()), BindingValue::Node(id));
                             }
                             Value::Path { nodes, edges } => {
-                                new_binding
-                                    .insert(Arc::from(col.as_str()), BindingValue::Path { nodes, edges });
+                                new_binding.insert(
+                                    Arc::from(col.as_str()),
+                                    BindingValue::Path { nodes, edges },
+                                );
                             }
                             other => {
-                                new_binding.insert(Arc::from(col.as_str()), BindingValue::Scalar(other));
+                                new_binding
+                                    .insert(Arc::from(col.as_str()), BindingValue::Scalar(other));
                             }
                         }
                     }
@@ -2612,11 +2669,14 @@ impl<'a> Executor<'a> {
                         new_binding.insert(Arc::from(var_name.as_str()), BindingValue::Node(id));
                     }
                     Value::Path { nodes, edges } => {
-                        new_binding
-                            .insert(Arc::from(var_name.as_str()), BindingValue::Path { nodes, edges });
+                        new_binding.insert(
+                            Arc::from(var_name.as_str()),
+                            BindingValue::Path { nodes, edges },
+                        );
                     }
                     other => {
-                        new_binding.insert(Arc::from(var_name.as_str()), BindingValue::Scalar(other));
+                        new_binding
+                            .insert(Arc::from(var_name.as_str()), BindingValue::Scalar(other));
                     }
                 }
             }
@@ -2908,12 +2968,12 @@ impl<'a> Executor<'a> {
         // `node_matches_pattern` re-verifies labels/properties and the WHERE
         // retain re-checks the exact predicate, so a candidate *superset* is
         // always safe.
-        let all_node_ids: Vec<NodeId> = self
-            .range_index_candidates(pattern)
-            .unwrap_or_else(|| match pattern.labels.first() {
-                Some(label) => self.graph_ref().nodes_by_label(label),
-                None => self.graph_ref().node_ids(),
-            });
+        let all_node_ids: Vec<NodeId> =
+            self.range_index_candidates(pattern)
+                .unwrap_or_else(|| match pattern.labels.first() {
+                    Some(label) => self.graph_ref().nodes_by_label(label),
+                    None => self.graph_ref().node_ids(),
+                });
 
         for bindings in current_bindings {
             // Check if variable is already bound
@@ -2939,12 +2999,16 @@ impl<'a> Executor<'a> {
                         && let Expression::Literal(lit) = prop_expr
                     {
                         let prop_val = PropertyValue::from(lit.clone());
-                        let candidate_ids = self.property_index.find_by_property(prop_key, &prop_val);
+                        let candidate_ids =
+                            self.property_index.find_by_property(prop_key, &prop_val);
                         for node_id in candidate_ids {
                             if self.node_matches_pattern(node_id, pattern, &bindings)? {
                                 let mut new_bindings = bindings.clone();
                                 if let Some(var) = &pattern.variable {
-                                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
+                                    new_bindings.insert(
+                                        Arc::from(var.as_str()),
+                                        BindingValue::Node(node_id),
+                                    );
                                 }
                                 result.push(new_bindings);
                             }
@@ -2998,7 +3062,8 @@ impl<'a> Executor<'a> {
                     if self.node_matches_pattern(node_id, pattern, &bindings)? {
                         let mut new_bindings = bindings.clone();
                         if let Some(var) = &pattern.variable {
-                            new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
+                            new_bindings
+                                .insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
                         }
                         result.push(new_bindings);
                     }
@@ -3279,10 +3344,7 @@ impl<'a> Executor<'a> {
         bindings_list: &[Bindings],
     ) -> Result<ResultSet, ExecuteError> {
         // Check if any aggregation is present
-        let has_aggregation = return_clause
-            .items
-            .iter()
-            .any(Self::is_aggregate);
+        let has_aggregation = return_clause.items.iter().any(Self::is_aggregate);
 
         if has_aggregation {
             return self.build_aggregated_result_set(return_clause, bindings_list);
@@ -3754,14 +3816,20 @@ impl<'a> Executor<'a> {
                     match binding_value {
                         BindingValue::Node(node_id) => {
                             if let Some(node) = self.graph_ref().get_node(*node_id) {
-                                Ok(node.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                                Ok(node
+                                    .get_property(prop)
+                                    .map(Value::from)
+                                    .unwrap_or(Value::Null))
                             } else {
                                 Ok(Value::Null)
                             }
                         }
                         BindingValue::Edge(edge_id) => {
                             if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
-                                Ok(edge.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                                Ok(edge
+                                    .get_property(prop)
+                                    .map(Value::from)
+                                    .unwrap_or(Value::Null))
                             } else {
                                 Ok(Value::Null)
                             }
@@ -3878,7 +3946,7 @@ impl<'a> Executor<'a> {
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
-                if let Some(path) = traversal::shortest_path(self.graph_ref(),start_id, end_id) {
+                if let Some(path) = traversal::shortest_path(self.graph_ref(), start_id, end_id) {
                     let edges = self.extract_edge_ids(&path.nodes);
                     Ok(Value::Path {
                         nodes: path.nodes,
@@ -3898,7 +3966,7 @@ impl<'a> Executor<'a> {
                     .and_then(|v| v.as_node())
                     .ok_or_else(|| ExecuteError::UndefinedVariable(end.clone()))?;
 
-                let paths = traversal::all_shortest_paths(self.graph_ref(),start_id, end_id);
+                let paths = traversal::all_shortest_paths(self.graph_ref(), start_id, end_id);
                 let path_values: Vec<Value> = paths
                     .into_iter()
                     .map(|path| {
@@ -4688,12 +4756,13 @@ impl<'a> Executor<'a> {
                     Some(expr) => {
                         let val = self.evaluate_expression(expr, bindings)?;
                         match val {
-                            Value::String(s) => {
-                                match temporal::parse_date(&s) {
-                                    Some(d) => Ok(Value::Date(d)),
-                                    None => Err(ExecuteError::TypeError(format!("invalid date string: {}", s))),
-                                }
-                            }
+                            Value::String(s) => match temporal::parse_date(&s) {
+                                Some(d) => Ok(Value::Date(d)),
+                                None => Err(ExecuteError::TypeError(format!(
+                                    "invalid date string: {}",
+                                    s
+                                ))),
+                            },
                             Value::Date(d) => Ok(Value::Date(d)),
                             Value::Map(map) => {
                                 let get_i32 = |key: &str| -> Option<i32> {
@@ -4708,7 +4777,9 @@ impl<'a> Executor<'a> {
                                 let days = temporal::ymd_to_days(year, month, day);
                                 Ok(Value::Date(days))
                             }
-                            _ => Err(ExecuteError::TypeError("date() requires a string or map argument".to_string())),
+                            _ => Err(ExecuteError::TypeError(
+                                "date() requires a string or map argument".to_string(),
+                            )),
                         }
                     }
                 }
@@ -4727,14 +4798,17 @@ impl<'a> Executor<'a> {
                     Some(expr) => {
                         let val = self.evaluate_expression(expr, bindings)?;
                         match val {
-                            Value::String(s) => {
-                                match temporal::parse_datetime(&s) {
-                                    Some(ms) => Ok(Value::DateTime(ms)),
-                                    None => Err(ExecuteError::TypeError(format!("invalid datetime string: {}", s))),
-                                }
-                            }
+                            Value::String(s) => match temporal::parse_datetime(&s) {
+                                Some(ms) => Ok(Value::DateTime(ms)),
+                                None => Err(ExecuteError::TypeError(format!(
+                                    "invalid datetime string: {}",
+                                    s
+                                ))),
+                            },
                             Value::DateTime(ms) => Ok(Value::DateTime(ms)),
-                            _ => Err(ExecuteError::TypeError("datetime() requires a string argument".to_string())),
+                            _ => Err(ExecuteError::TypeError(
+                                "datetime() requires a string argument".to_string(),
+                            )),
                         }
                     }
                 }
@@ -4743,12 +4817,17 @@ impl<'a> Executor<'a> {
                 use maharit_core::temporal;
                 let val = self.evaluate_expression(expr, bindings)?;
                 match val {
-                    Value::String(s) => {
-                        match temporal::parse_duration(&s) {
-                            Some((months, days, millis)) => Ok(Value::Duration { months, days, millis }),
-                            None => Err(ExecuteError::TypeError(format!("invalid duration string: {}", s))),
-                        }
-                    }
+                    Value::String(s) => match temporal::parse_duration(&s) {
+                        Some((months, days, millis)) => Ok(Value::Duration {
+                            months,
+                            days,
+                            millis,
+                        }),
+                        None => Err(ExecuteError::TypeError(format!(
+                            "invalid duration string: {}",
+                            s
+                        ))),
+                    },
                     Value::Map(map) => {
                         let get_i64 = |key: &str| -> i64 {
                             match map.get(key) {
@@ -4766,17 +4845,17 @@ impl<'a> Executor<'a> {
                         let milliseconds = get_i64("milliseconds");
                         let total_months = (years * 12 + months_v) as i32;
                         let total_days = (weeks * 7 + days) as i32;
-                        let total_millis = hours * 3_600_000
-                            + minutes * 60_000
-                            + seconds * 1_000
-                            + milliseconds;
+                        let total_millis =
+                            hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + milliseconds;
                         Ok(Value::Duration {
                             months: total_months,
                             days: total_days,
                             millis: total_millis,
                         })
                     }
-                    _ => Err(ExecuteError::TypeError("duration() requires a string or map argument".to_string())),
+                    _ => Err(ExecuteError::TypeError(
+                        "duration() requires a string or map argument".to_string(),
+                    )),
                 }
             }
         }
@@ -4826,7 +4905,12 @@ impl<'a> Executor<'a> {
                 let value = self.evaluate_aggregate(item, bindings_list)?;
                 row_values.push(value);
             }
-            return Ok(ResultSet::new(columns, vec![Row { columns: row_values }]));
+            return Ok(ResultSet::new(
+                columns,
+                vec![Row {
+                    columns: row_values,
+                }],
+            ));
         }
 
         // GROUP BY: group binding indices by serialized key values
@@ -4857,10 +4941,8 @@ impl<'a> Executor<'a> {
             let indices = &group_map[key_strs];
 
             // Collect this group's bindings
-            let group_bindings: Vec<Bindings> = indices
-                .iter()
-                .map(|&i| bindings_list[i].clone())
-                .collect();
+            let group_bindings: Vec<Bindings> =
+                indices.iter().map(|&i| bindings_list[i].clone()).collect();
 
             let mut row_values = vec![Value::Null; return_clause.items.len()];
 
@@ -4881,7 +4963,9 @@ impl<'a> Executor<'a> {
                 }
             }
 
-            rows.push(Row { columns: row_values });
+            rows.push(Row {
+                columns: row_values,
+            });
         }
 
         // Apply ORDER BY / SKIP / LIMIT on the grouped result
@@ -5312,10 +5396,7 @@ impl<'a> Executor<'a> {
 
     /// SKIP / LIMIT の式を評価して非負整数に変換するヘルパー。
     /// 整数リテラルまたはパラメータ参照に対応する。
-    fn resolve_skip_limit(
-        &self,
-        expr: &Expression,
-    ) -> Result<u64, ExecuteError> {
+    fn resolve_skip_limit(&self, expr: &Expression) -> Result<u64, ExecuteError> {
         let val = self.evaluate_expression(expr, &Bindings::new())?;
         match val {
             Value::Int(n) if n >= 0 => Ok(n as u64),
@@ -5361,7 +5442,11 @@ impl<'a> Executor<'a> {
                 };
                 Ok(v)
             }
-            Value::Duration { months, days, millis } => {
+            Value::Duration {
+                months,
+                days,
+                millis,
+            } => {
                 let v = match field {
                     "years" => Value::Int((*months / 12) as i64),
                     "months" => Value::Int((*months % 12) as i64),
@@ -5410,14 +5495,20 @@ impl<'a> Executor<'a> {
                             .graph_ref()
                             .get_node(*node_id)
                             .ok_or_else(|| ExecuteError::TypeError("node not found".to_string()))?;
-                        Ok(node.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                        Ok(node
+                            .get_property(prop)
+                            .map(Value::from)
+                            .unwrap_or(Value::Null))
                     }
                     BindingValue::Edge(edge_id) => {
                         let edge = self
                             .graph_ref()
                             .get_edge(*edge_id)
                             .ok_or_else(|| ExecuteError::TypeError("edge not found".to_string()))?;
-                        Ok(edge.get_property(prop).map(Value::from).unwrap_or(Value::Null))
+                        Ok(edge
+                            .get_property(prop)
+                            .map(Value::from)
+                            .unwrap_or(Value::Null))
                     }
                     BindingValue::Scalar(scalar_val) => {
                         if let Value::Map(map) = scalar_val {
@@ -5590,7 +5681,10 @@ impl<'a> Executor<'a> {
                 let mut count = 0usize;
                 for item in &items {
                     let mut local_bindings = bindings.clone();
-                    local_bindings.insert(Arc::from(variable.as_str()), BindingValue::Scalar(item.clone()));
+                    local_bindings.insert(
+                        Arc::from(variable.as_str()),
+                        BindingValue::Scalar(item.clone()),
+                    );
                     let pred_val = self.evaluate_expression(predicate, &local_bindings)?;
                     if matches!(pred_val, Value::Bool(true)) {
                         count += 1;
@@ -5711,18 +5805,33 @@ impl<'a> Executor<'a> {
                 }
                 // テンポラル演算: Date + Duration, DateTime + Duration
                 match (left, right) {
-                    (Value::Date(d), Value::Duration { months, days, millis }) => {
+                    (
+                        Value::Date(d),
+                        Value::Duration {
+                            months,
+                            days,
+                            millis,
+                        },
+                    ) => {
                         use maharit_core::temporal;
                         let new_days = temporal::add_duration_to_date(*d, *months, *days, *millis);
                         return Ok(Value::Date(new_days));
                     }
-                    (Value::DateTime(ms), Value::Duration { months, days, millis }) => {
+                    (
+                        Value::DateTime(ms),
+                        Value::Duration {
+                            months,
+                            days,
+                            millis,
+                        },
+                    ) => {
                         use maharit_core::temporal;
                         let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
                         let base_days = temporal::ymd_to_days(y, mo, day);
                         let new_days = temporal::add_duration_to_date(base_days, *months, *days, 0);
                         let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
-                        let new_ms = temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) + millis;
+                        let new_ms =
+                            temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) + millis;
                         return Ok(Value::DateTime(new_ms));
                     }
                     _ => {}
@@ -5734,24 +5843,49 @@ impl<'a> Executor<'a> {
                 match (left, right) {
                     (Value::Date(a), Value::Date(b)) => {
                         let diff_days = a - b;
-                        return Ok(Value::Duration { months: 0, days: diff_days, millis: 0 });
+                        return Ok(Value::Duration {
+                            months: 0,
+                            days: diff_days,
+                            millis: 0,
+                        });
                     }
                     (Value::DateTime(a), Value::DateTime(b)) => {
                         let diff_ms = a - b;
-                        return Ok(Value::Duration { months: 0, days: 0, millis: diff_ms });
+                        return Ok(Value::Duration {
+                            months: 0,
+                            days: 0,
+                            millis: diff_ms,
+                        });
                     }
-                    (Value::Date(d), Value::Duration { months, days, millis }) => {
+                    (
+                        Value::Date(d),
+                        Value::Duration {
+                            months,
+                            days,
+                            millis,
+                        },
+                    ) => {
                         use maharit_core::temporal;
-                        let new_days = temporal::add_duration_to_date(*d, -*months, -*days, -*millis);
+                        let new_days =
+                            temporal::add_duration_to_date(*d, -*months, -*days, -*millis);
                         return Ok(Value::Date(new_days));
                     }
-                    (Value::DateTime(ms), Value::Duration { months, days, millis }) => {
+                    (
+                        Value::DateTime(ms),
+                        Value::Duration {
+                            months,
+                            days,
+                            millis,
+                        },
+                    ) => {
                         use maharit_core::temporal;
                         let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
                         let base_days = temporal::ymd_to_days(y, mo, day);
-                        let new_days = temporal::add_duration_to_date(base_days, -*months, -*days, 0);
+                        let new_days =
+                            temporal::add_duration_to_date(base_days, -*months, -*days, 0);
                         let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
-                        let new_ms = temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) - millis;
+                        let new_ms =
+                            temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) - millis;
                         return Ok(Value::DateTime(new_ms));
                     }
                     _ => {}
@@ -5820,10 +5954,18 @@ impl<'a> Executor<'a> {
             (Value::Node(a), Value::Node(b)) => a == b,
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::DateTime(a), Value::DateTime(b)) => a == b,
-            (Value::Duration { months: ma, days: da, millis: msa },
-             Value::Duration { months: mb, days: db, millis: msb }) => {
-                ma == mb && da == db && msa == msb
-            }
+            (
+                Value::Duration {
+                    months: ma,
+                    days: da,
+                    millis: msa,
+                },
+                Value::Duration {
+                    months: mb,
+                    days: db,
+                    millis: msb,
+                },
+            ) => ma == mb && da == db && msa == msb,
             _ => false,
         }
     }
@@ -6095,14 +6237,24 @@ mod tests {
 
         let n = |ex: &mut Executor<'_>, q: &str| execute_with(ex, q).unwrap().rows.len();
         assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age > 30 RETURN n"), 2); // 40,50
-        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age >= 30 RETURN n"), 3); // 30,40,50
+        assert_eq!(
+            n(&mut executor, "MATCH (n:P) WHERE n.age >= 30 RETURN n"),
+            3
+        ); // 30,40,50
         assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age < 30 RETURN n"), 2); // 10,20
-        assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age <= 20 RETURN n"), 2); // 10,20
+        assert_eq!(
+            n(&mut executor, "MATCH (n:P) WHERE n.age <= 20 RETURN n"),
+            2
+        ); // 10,20
         // Literal on the left (operator must be flipped).
         assert_eq!(n(&mut executor, "MATCH (n:P) WHERE 30 < n.age RETURN n"), 2); // 40,50
 
         // After SET the index must stay correct (maintenance + range pushdown).
-        execute_with(&mut executor, "MATCH (n:P) WHERE n.age = 10 SET n.age = 100").unwrap();
+        execute_with(
+            &mut executor,
+            "MATCH (n:P) WHERE n.age = 10 SET n.age = 100",
+        )
+        .unwrap();
         assert_eq!(n(&mut executor, "MATCH (n:P) WHERE n.age > 60 RETURN n"), 1); // only 100
     }
 
@@ -6165,7 +6317,11 @@ mod tests {
         // Inline property must still filter: Osaka = 1.
         assert_eq!(
             count_of(
-                &execute(&mut graph, "MATCH (n:Person {city: 'Osaka'}) RETURN count(*)").unwrap()
+                &execute(
+                    &mut graph,
+                    "MATCH (n:Person {city: 'Osaka'}) RETURN count(*)"
+                )
+                .unwrap()
             ),
             1
         );
@@ -6182,11 +6338,8 @@ mod tests {
             "MATCH (n:Person) WHERE n.city = 'Osaka' RETURN n.name",
         )
         .unwrap();
-        let via_inline = execute(
-            &mut graph,
-            "MATCH (n:Person {city: 'Osaka'}) RETURN n.name",
-        )
-        .unwrap();
+        let via_inline =
+            execute(&mut graph, "MATCH (n:Person {city: 'Osaka'}) RETURN n.name").unwrap();
         assert_eq!(via_where.rows.len(), via_inline.rows.len());
         assert_eq!(via_where.rows.len(), 1);
     }
@@ -7582,9 +7735,21 @@ mod tests {
     #[test]
     fn test_with_group_count() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (:Person {name: "Alice", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (:Person {name: "Charlie", city: "Tokyo"})"#).unwrap();
-        execute(&mut graph, r#"CREATE (:Person {name: "Bob", city: "Osaka"})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Alice", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Charlie", city: "Tokyo"})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Person {name: "Bob", city: "Osaka"})"#,
+        )
+        .unwrap();
 
         let result = execute(
             &mut graph,
@@ -7594,18 +7759,32 @@ mod tests {
 
         assert_eq!(result.row_count(), 2, "Expected 2 groups (Tokyo, Osaka)");
         // First row: Tokyo with cnt=2
-        assert_eq!(result.rows[0].columns[0], Value::String("Tokyo".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("Tokyo".to_string())
+        );
         assert_eq!(result.rows[0].columns[1], Value::Int(2));
         // Second row: Osaka with cnt=1
-        assert_eq!(result.rows[1].columns[0], Value::String("Osaka".to_string()));
+        assert_eq!(
+            result.rows[1].columns[0],
+            Value::String("Osaka".to_string())
+        );
         assert_eq!(result.rows[1].columns[1], Value::Int(1));
     }
 
     #[test]
     fn test_with_group_sum() {
         let mut graph = Graph::new();
-        execute(&mut graph, r#"CREATE (:Sale {region: "East", amount: 100})"#).unwrap();
-        execute(&mut graph, r#"CREATE (:Sale {region: "East", amount: 200})"#).unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Sale {region: "East", amount: 100})"#,
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            r#"CREATE (:Sale {region: "East", amount: 200})"#,
+        )
+        .unwrap();
         execute(&mut graph, r#"CREATE (:Sale {region: "West", amount: 50})"#).unwrap();
 
         let result = execute(
@@ -7873,11 +8052,7 @@ mod tests {
     fn test_same_variable_matched_twice_uses_cache() {
         // 同一変数を MATCH 内で2パターン参照した場合、2回目は既存バインドを流用
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (a:Person {name: "Alice", age: 30})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (a:Person {name: "Alice", age: 30})"#).unwrap();
         execute(
             &mut graph,
             r#"CREATE (b:Person {name: "Alice", age: 25})"#, // name 同じ・age 違う
@@ -8812,12 +8987,11 @@ mod tests {
 
     #[test]
     fn test_parse_required_label_constraint() {
-        let stmt = Parser::new(
-            "CREATE CONSTRAINT employee_is_person FOR (n:Employee) REQUIRE n:Person",
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt =
+            Parser::new("CREATE CONSTRAINT employee_is_person FOR (n:Employee) REQUIRE n:Person")
+                .unwrap()
+                .parse()
+                .unwrap();
         if let Statement::CreateConstraint(cc) = stmt {
             assert_eq!(cc.name, "employee_is_person");
             assert_eq!(cc.label, "Employee");
@@ -8881,12 +9055,11 @@ mod tests {
 
     #[test]
     fn test_parse_endpoint_label_constraint() {
-        let stmt = Parser::new(
-            "CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)",
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt =
+            Parser::new("CREATE CONSTRAINT knows_persons FOR (p:Person)-[r:KNOWS]->(q:Person)")
+                .unwrap()
+                .parse()
+                .unwrap();
         if let Statement::CreateConstraint(cc) = stmt {
             assert_eq!(cc.name, "knows_persons");
             assert_eq!(cc.label, "KNOWS");
@@ -9334,16 +9507,8 @@ mod tests {
     #[test]
     fn test_phrase_search_order_matters() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Article {body: "graph database"})"#,
-        )
-        .unwrap();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Article {body: "database graph"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Article {body: "graph database"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (n:Article {body: "database graph"})"#).unwrap();
 
         // "graph database" must match only the first document (order matters)
         let result = execute(
@@ -9550,35 +9715,29 @@ mod tests {
 
         executor
             .execute(
-                Parser::new(
-                    r#"CREATE FULLTEXT INDEX idx FOR (n:Doc) ON (n.text)"#,
-                )
-                .unwrap()
-                .parse()
-                .unwrap(),
+                Parser::new(r#"CREATE FULLTEXT INDEX idx FOR (n:Doc) ON (n.text)"#)
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
             )
             .unwrap();
 
         // Document with "graph" appearing many times should rank higher
         executor
             .execute(
-                Parser::new(
-                    r#"CREATE (n:Doc {text: "graph graph graph graph graph"})"#,
-                )
-                .unwrap()
-                .parse()
-                .unwrap(),
+                Parser::new(r#"CREATE (n:Doc {text: "graph graph graph graph graph"})"#)
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
             )
             .unwrap();
 
         executor
             .execute(
-                Parser::new(
-                    r#"CREATE (n:Doc {text: "graph systems"})"#,
-                )
-                .unwrap()
-                .parse()
-                .unwrap(),
+                Parser::new(r#"CREATE (n:Doc {text: "graph systems"})"#)
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
             )
             .unwrap();
 
@@ -9603,12 +9762,11 @@ mod tests {
 
     #[test]
     fn test_parse_procedure_call() {
-        let stmt = Parser::new(
-            r#"CALL db.index.fulltext.search('my_idx', 'query') YIELD node, score"#,
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let stmt =
+            Parser::new(r#"CALL db.index.fulltext.search('my_idx', 'query') YIELD node, score"#)
+                .unwrap()
+                .parse()
+                .unwrap();
 
         if let Statement::ProcedureCall(pc) = stmt {
             assert_eq!(pc.procedure, "db.index.fulltext.search");
@@ -10491,8 +10649,11 @@ mod tests {
         // A descending range must also be bounded correctly.
         let mut graph = Graph::new();
         execute(&mut graph, "CREATE (n:T)").unwrap();
-        let err = execute(&mut graph, "MATCH (n:T) RETURN range(9000000000000000000, 0, -1)")
-            .unwrap_err();
+        let err = execute(
+            &mut graph,
+            "MATCH (n:T) RETURN range(9000000000000000000, 0, -1)",
+        )
+        .unwrap_err();
         assert!(matches!(err, ExecuteError::TypeError(_)));
     }
 
@@ -10838,11 +10999,7 @@ mod tests {
     fn test_skip_and_limit_with_params() {
         let mut graph = Graph::new();
         for i in 1..=5i64 {
-            execute(
-                &mut graph,
-                &format!(r#"CREATE (n:Item {{val: {}}})"#, i),
-            )
-            .unwrap();
+            execute(&mut graph, &format!(r#"CREATE (n:Item {{val: {}}})"#, i)).unwrap();
         }
 
         let stmt =
@@ -11498,11 +11655,7 @@ mod tests {
     #[test]
     fn test_create_node_with_multiple_labels() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person:Employee {name: "Alice"})"#).unwrap();
 
         assert_eq!(graph.node_count(), 1);
         let node = graph.nodes().next().unwrap();
@@ -11514,23 +11667,11 @@ mod tests {
     #[test]
     fn test_match_multiple_labels_and_condition() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (a:Person:Employee {name: "Alice"})"#,
-        )
-        .unwrap();
-        execute(
-            &mut graph,
-            r#"CREATE (b:Person {name: "Bob"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (a:Person:Employee {name: "Alice"})"#).unwrap();
+        execute(&mut graph, r#"CREATE (b:Person {name: "Bob"})"#).unwrap();
 
         // Only Alice has both Person AND Employee
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:Person:Employee) RETURN n.name"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:Person:Employee) RETURN n.name"#).unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(
             result.rows[0].columns[0],
@@ -11541,30 +11682,20 @@ mod tests {
     #[test]
     fn test_match_single_label_on_multilabel_node() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person:Employee {name: "Alice"})"#).unwrap();
 
         // Node with multiple labels should match on any single label
-        let result1 =
-            execute(&mut graph, r#"MATCH (n:Person) RETURN n.name"#).unwrap();
+        let result1 = execute(&mut graph, r#"MATCH (n:Person) RETURN n.name"#).unwrap();
         assert_eq!(result1.row_count(), 1);
 
-        let result2 =
-            execute(&mut graph, r#"MATCH (n:Employee) RETURN n.name"#).unwrap();
+        let result2 = execute(&mut graph, r#"MATCH (n:Employee) RETURN n.name"#).unwrap();
         assert_eq!(result2.row_count(), 1);
     }
 
     #[test]
     fn test_set_label_on_multilabel_node() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person {name: "Alice"})"#).unwrap();
 
         // Add two labels sequentially
         execute(&mut graph, r#"MATCH (n:Person) SET n:Employee"#).unwrap();
@@ -11586,11 +11717,7 @@ mod tests {
         )
         .unwrap();
 
-        execute(
-            &mut graph,
-            r#"MATCH (n:Manager) REMOVE n:Manager"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"MATCH (n:Manager) REMOVE n:Manager"#).unwrap();
 
         let node = graph.nodes().next().unwrap();
         assert!(node.has_label("Person"), "Should still have Person");
@@ -11602,17 +11729,9 @@ mod tests {
     #[test]
     fn test_labels_function_multiple_labels() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:Person:Employee {name: "Alice"})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:Person:Employee {name: "Alice"})"#).unwrap();
 
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n:Person) RETURN labels(n)"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n:Person) RETURN labels(n)"#).unwrap();
         assert_eq!(result.row_count(), 1);
         match &result.rows[0].columns[0] {
             Value::List(labels) => {
@@ -11627,11 +11746,7 @@ mod tests {
     #[test]
     fn test_create_match_three_labels() {
         let mut graph = Graph::new();
-        execute(
-            &mut graph,
-            r#"CREATE (n:A:B:C {val: 42})"#,
-        )
-        .unwrap();
+        execute(&mut graph, r#"CREATE (n:A:B:C {val: 42})"#).unwrap();
 
         let node = graph.nodes().next().unwrap();
         assert!(node.has_label("A"));
@@ -11716,10 +11831,7 @@ mod tests {
             result.rows[0].columns[0],
             Value::String("Alice".to_string())
         );
-        assert_eq!(
-            result.rows[0].columns[1],
-            Value::String("Bob".to_string())
-        );
+        assert_eq!(result.rows[0].columns[1], Value::String("Bob".to_string()));
     }
 
     #[test]
@@ -11755,11 +11867,7 @@ mod tests {
         execute(&mut graph, r#"CREATE (b:Robot {name: "R2D2"})"#).unwrap();
 
         // WHERE (n:Person) as standalone pattern predicate
-        let result = execute(
-            &mut graph,
-            r#"MATCH (n) WHERE (n:Person) RETURN n.name"#,
-        )
-        .unwrap();
+        let result = execute(&mut graph, r#"MATCH (n) WHERE (n:Person) RETURN n.name"#).unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(
             result.rows[0].columns[0],
@@ -11803,11 +11911,7 @@ mod tests {
         graph.create_edge(a, b, "TO").unwrap();
 
         // Two patterns: node pattern + path pattern
-        let result = execute(
-            &mut graph,
-            "MATCH (a:A), (a)-[:TO]->(b:B) RETURN a.v, b.v",
-        )
-        .unwrap();
+        let result = execute(&mut graph, "MATCH (a:A), (a)-[:TO]->(b:B) RETURN a.v, b.v").unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(1));
         assert_eq!(result.rows[0].columns[1], Value::Int(2));
@@ -11900,7 +12004,11 @@ mod tests {
         execute(&mut graph, "CREATE (n:T)").unwrap();
         let result = execute(&mut graph, "MATCH (n:T) RETURN duration(\"P1Y2M3D\")").unwrap();
         match &result.rows[0].columns[0] {
-            Value::Duration { months, days, millis } => {
+            Value::Duration {
+                months,
+                days,
+                millis,
+            } => {
                 assert_eq!(*months, 14); // 1*12 + 2
                 assert_eq!(*days, 3);
                 assert_eq!(*millis, 0);
@@ -11915,7 +12023,11 @@ mod tests {
         execute(&mut graph, "CREATE (n:T)").unwrap();
         let result = execute(&mut graph, "MATCH (n:T) RETURN duration(\"PT2H30M\")").unwrap();
         match &result.rows[0].columns[0] {
-            Value::Duration { months, days, millis } => {
+            Value::Duration {
+                months,
+                days,
+                millis,
+            } => {
                 assert_eq!(*months, 0);
                 assert_eq!(*days, 0);
                 assert_eq!(*millis, 2 * 3_600_000 + 30 * 60_000);
@@ -11928,12 +12040,10 @@ mod tests {
     fn test_date_comparison() {
         let mut graph = Graph::new();
         let nid = graph.create_node("Event");
-        graph
-            .get_node_mut(nid)
-            .unwrap()
-            .set_property("date", PropertyValue::Date(
-                maharit_core::temporal::ymd_to_days(2024, 6, 15)
-            ));
+        graph.get_node_mut(nid).unwrap().set_property(
+            "date",
+            PropertyValue::Date(maharit_core::temporal::ymd_to_days(2024, 6, 15)),
+        );
         // Should match: 2024-06-15 >= 2024-01-01
         let result = execute(
             &mut graph,
@@ -11982,7 +12092,11 @@ mod tests {
         )
         .unwrap();
         match &result.rows[0].columns[0] {
-            Value::Duration { months: 0, days: 9, millis: 0 } => {}
+            Value::Duration {
+                months: 0,
+                days: 9,
+                millis: 0,
+            } => {}
             other => panic!("expected Duration{{days:9}}, got {:?}", other),
         }
     }
@@ -12007,7 +12121,8 @@ mod tests {
         let result = execute(
             &mut graph,
             r#"MATCH (n:T) WITH date("2024-06-15") AS d RETURN d.year, d.month, d.day"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(2024));
         assert_eq!(result.rows[0].columns[1], Value::Int(6));
@@ -12039,12 +12154,12 @@ mod tests {
             r#"MATCH (n:T) WITH duration("P1Y2M3DT4H5M6S") AS dur RETURN dur.years, dur.months, dur.days, dur.hours, dur.minutes, dur.seconds"#,
         ).unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].columns[0], Value::Int(1));  // years
-        assert_eq!(result.rows[0].columns[1], Value::Int(2));  // months (within year)
-        assert_eq!(result.rows[0].columns[2], Value::Int(3));  // days
-        assert_eq!(result.rows[0].columns[3], Value::Int(4));  // hours
-        assert_eq!(result.rows[0].columns[4], Value::Int(5));  // minutes
-        assert_eq!(result.rows[0].columns[5], Value::Int(6));  // seconds
+        assert_eq!(result.rows[0].columns[0], Value::Int(1)); // years
+        assert_eq!(result.rows[0].columns[1], Value::Int(2)); // months (within year)
+        assert_eq!(result.rows[0].columns[2], Value::Int(3)); // days
+        assert_eq!(result.rows[0].columns[3], Value::Int(4)); // hours
+        assert_eq!(result.rows[0].columns[4], Value::Int(5)); // minutes
+        assert_eq!(result.rows[0].columns[5], Value::Int(6)); // seconds
     }
 
     #[test]
@@ -12081,12 +12196,16 @@ mod tests {
         let mut graph = Graph::new();
         let nid = graph.create_node_with_labels(vec!["Event".to_string()]);
         let days = maharit_core::temporal::ymd_to_days(2024, 6, 15);
-        graph.get_node_mut(nid).unwrap().set_property("date", PropertyValue::Date(days));
+        graph
+            .get_node_mut(nid)
+            .unwrap()
+            .set_property("date", PropertyValue::Date(days));
         // MATCH event, carry date through WITH, filter on year, return month
         let result = execute(
             &mut graph,
             r#"MATCH (e:Event) WITH e.date AS d WHERE d.year = 2024 RETURN d.month"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].columns[0], Value::Int(6));
     }
@@ -12099,25 +12218,46 @@ mod tests {
         let mut executor = Executor::new(&mut graph);
 
         // Create index
-        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         // Create some nodes
-        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 30})").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 30})")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("CREATE (n:Person {name: 'Bob', age: 25})").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Bob', age: 25})")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 35})").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice', age: 35})")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         // Re-create index to pick up existing nodes
-        let stmt = Parser::new("DROP INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("DROP INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         // Query using indexed property
-        let stmt = Parser::new("MATCH (n:Person {name: 'Alice'}) RETURN n.name").unwrap().parse().unwrap();
+        let stmt = Parser::new("MATCH (n:Person {name: 'Alice'}) RETURN n.name")
+            .unwrap()
+            .parse()
+            .unwrap();
         let rs = executor.execute(stmt).unwrap();
         assert_eq!(rs.row_count(), 2);
     }
@@ -12127,9 +12267,15 @@ mod tests {
         let mut graph = Graph::new();
         let mut executor = Executor::new(&mut graph);
 
-        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("CREATE INDEX ON :Employee(email)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Employee(email)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         let stmt = Parser::new("SHOW INDEXES").unwrap().parse().unwrap();
@@ -12142,9 +12288,15 @@ mod tests {
         let mut graph = Graph::new();
         let mut executor = Executor::new(&mut graph);
 
-        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("DROP INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("DROP INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         let stmt = Parser::new("SHOW INDEXES").unwrap().parse().unwrap();
@@ -12158,20 +12310,28 @@ mod tests {
         let mut executor = Executor::new(&mut graph);
 
         // Create index first
-        let stmt = Parser::new("CREATE INDEX ON :Person(name)").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE INDEX ON :Person(name)")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         // Create nodes - they should be automatically indexed
-        let stmt = Parser::new("CREATE (n:Person {name: 'Alice'})").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Alice'})")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
-        let stmt = Parser::new("CREATE (n:Person {name: 'Bob'})").unwrap().parse().unwrap();
+        let stmt = Parser::new("CREATE (n:Person {name: 'Bob'})")
+            .unwrap()
+            .parse()
+            .unwrap();
         executor.execute(stmt).unwrap();
 
         // Verify index has the entries
-        let alices = executor.property_index().find_by_property(
-            "name",
-            &PropertyValue::String("Alice".to_string()),
-        );
+        let alices = executor
+            .property_index()
+            .find_by_property("name", &PropertyValue::String("Alice".to_string()));
         assert_eq!(alices.len(), 1);
     }
 
@@ -12277,7 +12437,10 @@ mod tests {
         .unwrap();
         assert_eq!(result.row_count(), 3);
         assert_eq!(result.rows[0].columns[0], Value::Int(1));
-        assert_eq!(result.rows[0].columns[1], Value::String("Alice".to_string()));
+        assert_eq!(
+            result.rows[0].columns[1],
+            Value::String("Alice".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::Int(2));
         assert_eq!(result.rows[2].columns[0], Value::Int(3));
     }
@@ -12378,20 +12541,34 @@ mod tests {
             &mut graph,
             r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name, city: item.city})"#,
         );
-        assert!(result.is_ok(), "UNWIND with inline JSON map literal failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "UNWIND with inline JSON map literal failed: {:?}",
+            result
+        );
         assert_eq!(graph.node_count(), 2);
 
         let result = execute(
             &mut graph,
             "MATCH (n:UnwindBench) RETURN n.id, n.name, n.city ORDER BY n.id",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.row_count(), 2);
         assert_eq!(result.rows[0].columns[0], Value::Int(0));
-        assert_eq!(result.rows[0].columns[1], Value::String("Alice0".to_string()));
-        assert_eq!(result.rows[0].columns[2], Value::String("Tokyo".to_string()));
+        assert_eq!(
+            result.rows[0].columns[1],
+            Value::String("Alice0".to_string())
+        );
+        assert_eq!(
+            result.rows[0].columns[2],
+            Value::String("Tokyo".to_string())
+        );
         assert_eq!(result.rows[1].columns[0], Value::Int(1));
         assert_eq!(result.rows[1].columns[1], Value::String("Bob1".to_string()));
-        assert_eq!(result.rows[1].columns[2], Value::String("Osaka".to_string()));
+        assert_eq!(
+            result.rows[1].columns[2],
+            Value::String("Osaka".to_string())
+        );
     }
 
     // ========== Standalone RETURN tests (Task 89) ==========
@@ -12418,7 +12595,10 @@ mod tests {
             .unwrap();
         let result = Executor::new(&mut graph).execute(stmt).unwrap();
         assert_eq!(result.columns, vec!["greeting"]);
-        assert_eq!(result.rows[0].columns[0], Value::String("hello".to_string()));
+        assert_eq!(
+            result.rows[0].columns[0],
+            Value::String("hello".to_string())
+        );
     }
 
     #[test]

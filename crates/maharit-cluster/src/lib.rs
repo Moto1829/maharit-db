@@ -23,10 +23,8 @@ pub mod strategy;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
-pub use coordinator::{ClusterCoordinator, ClusterConfig, Row, RowValue, ShardConfig};
+pub use coordinator::{ClusterConfig, ClusterCoordinator, Row, RowValue, ShardConfig};
 pub use router::{EdgeLocation, QueryRouter, RoutingDecision, classify_edge};
-pub use shard::{
-    RebalancePlan, ShardError, ShardId, ShardInfo, ShardMap, ShardMove, ShardStatus,
-};
-pub use strategy::{HashSharding, LabelSharding, RangeSharding, ShardingStrategy};
+pub use shard::{RebalancePlan, ShardError, ShardId, ShardInfo, ShardMap, ShardMove, ShardStatus};
 pub use shard_client::ShardClient;
+pub use strategy::{HashSharding, LabelSharding, RangeSharding, ShardingStrategy};

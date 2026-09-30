@@ -274,10 +274,12 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -383,10 +385,7 @@ impl InvertedIndex {
         // Build position map for this document
         let mut token_positions: HashMap<String, Vec<usize>> = HashMap::new();
         for (pos, token) in tokens.iter().enumerate() {
-            token_positions
-                .entry(token.clone())
-                .or_default()
-                .push(pos);
+            token_positions.entry(token.clone()).or_default().push(pos);
         }
 
         // Update inverted index
@@ -498,11 +497,7 @@ impl InvertedIndex {
     }
 
     /// Collect all document IDs that match any token within the given edit distance.
-    fn documents_with_fuzzy_token(
-        &self,
-        term: &str,
-        max_distance: usize,
-    ) -> HashSet<DocumentId> {
+    fn documents_with_fuzzy_token(&self, term: &str, max_distance: usize) -> HashSet<DocumentId> {
         let mut result = HashSet::new();
         for (index_token, postings) in &self.index {
             if levenshtein_distance(term, index_token) <= max_distance {
@@ -588,27 +583,26 @@ impl FulltextIndex {
 
         // Phase 1: tokenize each document (parallel when large enough).
         // Returns Vec<(DocumentId, Vec<String /*tokens*/>)>
-        let tokenized: Vec<(DocumentId, Vec<String>)> = if documents.len()
-            >= PARALLEL_BUILD_THRESHOLD
-        {
-            documents
-                .par_iter()
-                .map(|&(node_id, property, text)| {
-                    let doc_id = DocumentId::new(node_id, property);
-                    let tokens = Tokenizer::tokenize_cached(text);
-                    (doc_id, tokens)
-                })
-                .collect()
-        } else {
-            documents
-                .iter()
-                .map(|&(node_id, property, text)| {
-                    let doc_id = DocumentId::new(node_id, property);
-                    let tokens = Tokenizer::tokenize(text);
-                    (doc_id, tokens)
-                })
-                .collect()
-        };
+        let tokenized: Vec<(DocumentId, Vec<String>)> =
+            if documents.len() >= PARALLEL_BUILD_THRESHOLD {
+                documents
+                    .par_iter()
+                    .map(|&(node_id, property, text)| {
+                        let doc_id = DocumentId::new(node_id, property);
+                        let tokens = Tokenizer::tokenize_cached(text);
+                        (doc_id, tokens)
+                    })
+                    .collect()
+            } else {
+                documents
+                    .iter()
+                    .map(|&(node_id, property, text)| {
+                        let doc_id = DocumentId::new(node_id, property);
+                        let tokens = Tokenizer::tokenize(text);
+                        (doc_id, tokens)
+                    })
+                    .collect()
+            };
 
         // Phase 2: write tokenized results into the inverted index sequentially.
         for (doc_id, tokens) in tokenized {
@@ -628,18 +622,11 @@ impl FulltextIndex {
             // Build position map for this document.
             let mut token_positions: HashMap<String, Vec<usize>> = HashMap::new();
             for (pos, token) in tokens.iter().enumerate() {
-                token_positions
-                    .entry(token.clone())
-                    .or_default()
-                    .push(pos);
+                token_positions.entry(token.clone()).or_default().push(pos);
             }
 
             for (token, positions) in token_positions {
-                let entry = self
-                    .inverted_index
-                    .index
-                    .entry(token)
-                    .or_default();
+                let entry = self.inverted_index.index.entry(token).or_default();
                 entry.retain(|tp| tp.doc_id != doc_id);
                 entry.push(TokenPosition {
                     doc_id: doc_id.clone(),
@@ -761,9 +748,7 @@ impl FulltextIndex {
         }
 
         // Candidate documents must contain all tokens (AND filter)
-        let mut candidate_docs = self
-            .inverted_index
-            .documents_with_token(&phrase_tokens[0]);
+        let mut candidate_docs = self.inverted_index.documents_with_token(&phrase_tokens[0]);
         for token in phrase_tokens.iter().skip(1) {
             let with_token = self.inverted_index.documents_with_token(token);
             candidate_docs.retain(|d| with_token.contains(d));
@@ -851,9 +836,7 @@ impl FulltextIndex {
                 return HashSet::new();
             }
             // Candidate docs must contain all tokens
-            let mut candidate_docs = self
-                .inverted_index
-                .documents_with_token(&phrase_tokens[0]);
+            let mut candidate_docs = self.inverted_index.documents_with_token(&phrase_tokens[0]);
             for token in phrase_tokens.iter().skip(1) {
                 let with_token = self.inverted_index.documents_with_token(token);
                 candidate_docs.retain(|d| with_token.contains(d));
@@ -861,9 +844,7 @@ impl FulltextIndex {
             // Filter by consecutive positioning
             return candidate_docs
                 .iter()
-                .filter(|doc_id| {
-                    self.inverted_index.is_phrase_in_doc(&phrase_tokens, doc_id)
-                })
+                .filter(|doc_id| self.inverted_index.is_phrase_in_doc(&phrase_tokens, doc_id))
                 .map(|doc_id| doc_id.node_id)
                 .collect();
         }
@@ -967,7 +948,9 @@ impl FulltextManager {
                 // Clone properties list to avoid borrow conflict
                 let index_props: Vec<String> = index.properties().to_vec();
                 for property_name in &index_props {
-                    if let Some(PropertyValue::String(text)) = properties.get(property_name.as_str()) {
+                    if let Some(PropertyValue::String(text)) =
+                        properties.get(property_name.as_str())
+                    {
                         index.add_document(node_id, property_name, text);
                     }
                 }
@@ -983,10 +966,7 @@ impl FulltextManager {
     /// # Arguments
     ///
     /// * `nodes` – Slice of `(node_id, label, properties)` tuples.
-    pub fn build_index_bulk(
-        &mut self,
-        nodes: &[(NodeId, &str, HashMap<String, PropertyValue>)],
-    ) {
+    pub fn build_index_bulk(&mut self, nodes: &[(NodeId, &str, HashMap<String, PropertyValue>)]) {
         // Group documents by (index_name) so we can call build_index once per index.
         // We collect owned strings to satisfy lifetime requirements.
         let mut per_index: HashMap<String, Vec<(NodeId, String, String)>> = HashMap::new();

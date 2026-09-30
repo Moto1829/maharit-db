@@ -403,7 +403,9 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
                 PropertyValue::Int(n) => n.to_string(),
                 PropertyValue::Float(n) => n.to_string(),
                 PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
-                PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                PropertyValue::Date(_)
+                | PropertyValue::DateTime(_)
+                | PropertyValue::Duration { .. } => {
                     serde_json::to_string(&val.to_string()).unwrap_or_default()
                 }
             };
@@ -430,7 +432,9 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
                 PropertyValue::Int(n) => n.to_string(),
                 PropertyValue::Float(n) => n.to_string(),
                 PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
-                PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
+                PropertyValue::Date(_)
+                | PropertyValue::DateTime(_)
+                | PropertyValue::Duration { .. } => {
                     serde_json::to_string(&val.to_string()).unwrap_or_default()
                 }
             };
@@ -764,7 +768,9 @@ fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
         WalEntryData::DeleteNode { node_id } => {
             graph.delete_node(*node_id);
         }
-        WalEntryData::CreateEdge { from, to, label, .. } => {
+        WalEntryData::CreateEdge {
+            from, to, label, ..
+        } => {
             if let Err(e) = graph.create_edge(*from, *to, label) {
                 eprintln!("WAL apply: create_edge failed: {}", e);
             }
@@ -1277,8 +1283,7 @@ mod tests {
         let graph = Arc::new(RwLock::new(Graph::new()));
         {
             let mut g = graph.write().await;
-            let id =
-                g.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
+            let id = g.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
             g.get_node_mut(id)
                 .unwrap()
                 .set_property("name", PropertyValue::String("Alice".to_string()));
@@ -1348,7 +1353,10 @@ mod tests {
     }
 
     /// Start a `TcpServer` on a random port and return the bound address.
-    async fn start_query_server(graph: Arc<ConcurrentGraph>, repl: Option<Arc<LeaderReplicationManager>>) -> std::net::SocketAddr {
+    async fn start_query_server(
+        graph: Arc<ConcurrentGraph>,
+        repl: Option<Arc<LeaderReplicationManager>>,
+    ) -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1515,7 +1523,8 @@ mod tests {
 
         // Leader: start query server with replication wired in
         let leader_graph = Arc::new(ConcurrentGraph::new());
-        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let leader_addr =
+            start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
 
         // Follower: start query server against the follower's graph
         let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
@@ -1526,7 +1535,8 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Test {name: 'Alice'}) RETURN n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -1540,15 +1550,22 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Test) RETURN n.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
 
         match resp {
             Response::Result { rows } => {
-                assert!(!rows.is_empty(), "follower should have the node created on leader");
-                assert_eq!(rows[0].get("n.name").and_then(|v| v.as_str()), Some("Alice"));
+                assert!(
+                    !rows.is_empty(),
+                    "follower should have the node created on leader"
+                );
+                assert_eq!(
+                    rows[0].get("n.name").and_then(|v| v.as_str()),
+                    Some("Alice")
+                );
             }
             other => panic!("expected Result from follower, got {:?}", other),
         }
@@ -1560,7 +1577,8 @@ mod tests {
         let (_, follower_graph) = start_follower_replication(repl_addr).await;
 
         let leader_graph = Arc::new(ConcurrentGraph::new());
-        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let leader_addr =
+            start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
         let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
 
         // Write node with string + integer + bool properties
@@ -1569,7 +1587,8 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Prop {s: 'hello', i: 99, b: true}) RETURN n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -1581,8 +1600,13 @@ mod tests {
         // String property
         let resp = repl_send_recv(
             &mut fconn,
-            &Request::Query { query: "MATCH (n:Prop) RETURN n.s".to_string(), tx_id: None, session_token: None },
-        ).await;
+            &Request::Query {
+                query: "MATCH (n:Prop) RETURN n.s".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty());
@@ -1594,8 +1618,13 @@ mod tests {
         // Integer property
         let resp = repl_send_recv(
             &mut fconn,
-            &Request::Query { query: "MATCH (n:Prop) RETURN n.i".to_string(), tx_id: None, session_token: None },
-        ).await;
+            &Request::Query {
+                query: "MATCH (n:Prop) RETURN n.i".to_string(),
+                tx_id: None,
+                session_token: None,
+            },
+        )
+        .await;
         match resp {
             Response::Result { rows } => {
                 assert!(!rows.is_empty());
@@ -1611,7 +1640,8 @@ mod tests {
         let (_, follower_graph) = start_follower_replication(repl_addr).await;
 
         let leader_graph = Arc::new(ConcurrentGraph::new());
-        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let leader_addr =
+            start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
         let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
 
         // Create two nodes and an edge on the leader
@@ -1621,7 +1651,15 @@ mod tests {
             "CREATE (n:Dst {name: 'dst'})",
             "MATCH (a:Src {name: 'src'}), (b:Dst {name: 'dst'}) CREATE (a)-[:LINK]->(b)",
         ] {
-            repl_send_recv(&mut lconn, &Request::Query { query: q.to_string(), tx_id: None, session_token: None }).await;
+            repl_send_recv(
+                &mut lconn,
+                &Request::Query {
+                    query: q.to_string(),
+                    tx_id: None,
+                    session_token: None,
+                },
+            )
+            .await;
         }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1632,7 +1670,8 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (a:Src)-[:LINK]->(b:Dst) RETURN b.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -1651,7 +1690,8 @@ mod tests {
         let (_, follower_graph) = start_follower_replication(repl_addr).await;
 
         let leader_graph = Arc::new(ConcurrentGraph::new());
-        let leader_addr = start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
+        let leader_addr =
+            start_query_server(Arc::clone(&leader_graph), Some(Arc::clone(&leader_repl))).await;
         let follower_addr = start_query_server(Arc::clone(&follower_graph), None).await;
 
         let mut lconn = tokio::net::TcpStream::connect(leader_addr).await.unwrap();
@@ -1661,7 +1701,8 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Del {name: 'gone'}) RETURN n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -1671,7 +1712,8 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "MATCH (n:Del {name: 'gone'}) DETACH DELETE n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -1684,13 +1726,17 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Del) RETURN n.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
         match resp {
             Response::Result { rows } => {
-                assert!(rows.is_empty(), "deleted node should not appear on follower");
+                assert!(
+                    rows.is_empty(),
+                    "deleted node should not appear on follower"
+                );
             }
             other => panic!("expected Result, got {:?}", other),
         }
@@ -1710,10 +1756,8 @@ mod tests {
             heartbeat_timeout_secs: 5,
             shared_secret: None,
         };
-        let follower_repl = FollowerReplicationManager::with_concurrent_graph(
-            config,
-            Arc::clone(&follower_graph),
-        );
+        let follower_repl =
+            FollowerReplicationManager::with_concurrent_graph(config, Arc::clone(&follower_graph));
 
         // The follower replication manager's graph and the TcpServer's graph must be the same Arc
         assert!(
@@ -1772,13 +1816,22 @@ mod tests {
         // Wait for handshake to complete (is_leader_alive → true).
         // PromoteToLeader won't arrive for another ~200 ms, so this is safe.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(manager.is_leader_alive(), "leader should be alive after handshake");
+        assert!(
+            manager.is_leader_alive(),
+            "leader should be alive after handshake"
+        );
         assert!(!manager.is_promoted(), "should not be promoted yet");
 
         // Wait for the PromoteToLeader message to be processed (arrives at ~200 ms).
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(manager.is_promoted(), "follower should be promoted after PromoteToLeader");
-        assert!(!manager.is_leader_alive(), "is_leader_alive should be false after promotion");
+        assert!(
+            manager.is_promoted(),
+            "follower should be promoted after PromoteToLeader"
+        );
+        assert!(
+            !manager.is_leader_alive(),
+            "is_leader_alive should be false after promotion"
+        );
     }
 
     // 21. Verify that the heartbeat watchdog marks the leader as dead when no heartbeat arrives
@@ -1827,7 +1880,10 @@ mod tests {
 
         // After handshake the leader should be considered alive
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(manager.is_leader_alive(), "leader should be alive after handshake");
+        assert!(
+            manager.is_leader_alive(),
+            "leader should be alive after handshake"
+        );
 
         // After heartbeat_timeout_secs + one watchdog-tick second the leader should be dead
         tokio::time::sleep(Duration::from_secs(timeout_secs + 1)).await;

@@ -78,11 +78,7 @@ impl JsonImporter {
             let labels: Vec<String> = if json_node.label.is_empty() {
                 vec![]
             } else {
-                json_node
-                    .label
-                    .split(':')
-                    .map(|s| s.to_string())
-                    .collect()
+                json_node.label.split(':').map(|s| s.to_string()).collect()
             };
             let node_id = graph.create_node_with_labels(labels);
             id_map.insert(json_node.id.clone(), node_id);
@@ -151,11 +147,7 @@ impl JsonImporter {
             let labels: Vec<String> = if adj_node.label.is_empty() {
                 vec![]
             } else {
-                adj_node
-                    .label
-                    .split(':')
-                    .map(|s| s.to_string())
-                    .collect()
+                adj_node.label.split(':').map(|s| s.to_string()).collect()
             };
             let node_id = graph.create_node_with_labels(labels);
             id_map.insert(adj_node.id.clone(), node_id);
@@ -261,9 +253,9 @@ impl JsonExporter {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             PropertyValue::String(s) => serde_json::Value::String(s.clone()),
-            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
-                serde_json::Value::String(value.to_string())
-            }
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::Duration { .. } => serde_json::Value::String(value.to_string()),
         }
     }
 

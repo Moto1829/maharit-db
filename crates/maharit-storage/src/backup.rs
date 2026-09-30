@@ -345,11 +345,8 @@ impl Backup {
         Self::write_string(&mut writer, &metadata.description)?;
 
         // Collect index definitions and serialize graph + indexes together
-        let index_defs: Vec<IndexDefinition> = property_index
-            .list_indexes()
-            .into_iter()
-            .cloned()
-            .collect();
+        let index_defs: Vec<IndexDefinition> =
+            property_index.list_indexes().into_iter().cloned().collect();
         let graph_data = Self::serialize_graph(graph, &index_defs)?;
 
         Self::write_compressed(&mut writer, &graph_data, options.compression)?;
@@ -645,7 +642,11 @@ impl Backup {
     }
 
     /// Compress `data` with the chosen algorithm and write to `writer`.
-    fn write_compressed<W: Write>(writer: &mut W, data: &[u8], compression: CompressionType) -> Result<()> {
+    fn write_compressed<W: Write>(
+        writer: &mut W,
+        data: &[u8],
+        compression: CompressionType,
+    ) -> Result<()> {
         match compression {
             CompressionType::None => {
                 writer.write_all(data)?;
@@ -657,8 +658,7 @@ impl Backup {
                 writer.write_all(&compressed)?;
             }
             CompressionType::Zstd => {
-                let compressed = zstd::encode_all(data, 3)
-                    .map_err(std::io::Error::other)?;
+                let compressed = zstd::encode_all(data, 3).map_err(std::io::Error::other)?;
                 writer.write_all(&compressed)?;
             }
         }
@@ -684,8 +684,8 @@ impl Backup {
                 let mut r = reader;
                 let mut compressed = Vec::new();
                 r.read_to_end(&mut compressed)?;
-                let decompressed = zstd::decode_all(compressed.as_slice())
-                    .map_err(std::io::Error::other)?;
+                let decompressed =
+                    zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
                 Ok(decompressed)
             }
         }
@@ -743,7 +743,11 @@ impl Backup {
                 writer.write_all(&[6u8])?;
                 writer.write_all(&ms.to_le_bytes())?;
             }
-            PropertyValue::Duration { months, days, millis } => {
+            PropertyValue::Duration {
+                months,
+                days,
+                millis,
+            } => {
                 writer.write_all(&[7u8])?;
                 writer.write_all(&months.to_le_bytes())?;
                 writer.write_all(&days.to_le_bytes())?;
@@ -841,7 +845,11 @@ impl Backup {
                 let days = i32::from_le_bytes(buf4);
                 reader.read_exact(&mut buf8)?;
                 let millis = i64::from_le_bytes(buf8);
-                Ok(PropertyValue::Duration { months, days, millis })
+                Ok(PropertyValue::Duration {
+                    months,
+                    days,
+                    millis,
+                })
             }
             t => Err(BackupError::CorruptedData(format!(
                 "unknown property type: {}",
@@ -1038,10 +1046,7 @@ impl Backup {
 
     /// Restore a graph by first loading `base_path` (full backup) and then
     /// applying the changes recorded in `incremental_path`.
-    pub fn restore_incremental(
-        base_path: &str,
-        incremental_path: &str,
-    ) -> Result<Graph> {
+    pub fn restore_incremental(base_path: &str, incremental_path: &str) -> Result<Graph> {
         // Load base backup
         let mut graph = Self::restore(base_path)?;
 
@@ -1221,8 +1226,7 @@ impl Backup {
                 } => {
                     let actual_from = id_map.get(from).copied().unwrap_or(*from);
                     let actual_to = id_map.get(to).copied().unwrap_or(*to);
-                    if graph.get_node(actual_from).is_some()
-                        && graph.get_node(actual_to).is_some()
+                    if graph.get_node(actual_from).is_some() && graph.get_node(actual_to).is_some()
                     {
                         let _ = graph.create_edge(actual_from, actual_to, label.as_str());
                     }
@@ -1768,11 +1772,10 @@ mod tests {
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let scheduler = BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(
-            move |_meta| {
+        let scheduler =
+            BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(move |_meta| {
                 counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            },
-        ));
+            }));
 
         // Run scheduler for just over 2 seconds; expect at least 2 backups
         let handle = tokio::spawn(scheduler.start(Arc::clone(&graph)));
@@ -1782,11 +1785,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&dir_clone)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("backup_")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("backup_"))
             .collect();
 
         assert!(
@@ -1816,11 +1815,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&output_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("backup_")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("backup_"))
             .collect();
 
         assert!(
@@ -1844,11 +1839,10 @@ mod tests {
         let results: Arc<Mutex<Vec<BackupMetadata>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
 
-        let scheduler = BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(
-            move |meta| {
+        let scheduler =
+            BackupScheduler::new(1, output_dir.clone(), 10).on_complete(Box::new(move |meta| {
                 results_clone.lock().unwrap().push(meta.clone());
-            },
-        ));
+            }));
 
         let handle = tokio::spawn(scheduler.start(Arc::clone(&graph)));
         tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -2112,12 +2106,8 @@ mod tests {
         assert_eq!(restored_t3.node_count(), 1, "expected only Beta at t+3");
 
         // PITR to future timestamp (should give same as t+3, i.e. latest state).
-        let restored_future = Backup::restore_to_point_in_time(
-            &base_backup_path,
-            &wal_path,
-            u64::MAX,
-        )
-        .unwrap();
+        let restored_future =
+            Backup::restore_to_point_in_time(&base_backup_path, &wal_path, u64::MAX).unwrap();
         assert_eq!(
             restored_future.node_count(),
             1,
@@ -2207,8 +2197,8 @@ mod tests {
         assert_eq!(defs[0].property, "name");
 
         // Index data should be queryable
-        let alice_nodes = restored_index
-            .find_by_property("name", &PropertyValue::String("Alice".to_string()));
+        let alice_nodes =
+            restored_index.find_by_property("name", &PropertyValue::String("Alice".to_string()));
         assert!(!alice_nodes.is_empty());
 
         std::fs::remove_file(&path).ok();
@@ -2216,7 +2206,6 @@ mod tests {
 
     #[test]
     fn test_restore_old_format_without_index_section() {
-
         // Restore without index should work (returns empty index)
         let mut graph = Graph::new();
         graph.create_node_with_labels(vec!["Node".to_string()]);

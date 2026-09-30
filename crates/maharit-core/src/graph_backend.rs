@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
+use crate::GraphError;
 use crate::concurrent_graph::ConcurrentGraph;
 use crate::graph::{Edge, EdgeId, Graph, Node, NodeId};
 use crate::property::PropertyValue;
-use crate::GraphError;
 
 /// グラフ操作の抽象インターフェース。
 ///
@@ -162,15 +162,11 @@ impl GraphBackend for Graph {
     }
 
     fn outgoing_edges(&self, node_id: NodeId) -> Vec<Edge> {
-        Graph::get_outgoing_edges(self, node_id)
-            .cloned()
-            .collect()
+        Graph::get_outgoing_edges(self, node_id).cloned().collect()
     }
 
     fn incoming_edges(&self, node_id: NodeId) -> Vec<Edge> {
-        Graph::get_incoming_edges(self, node_id)
-            .cloned()
-            .collect()
+        Graph::get_incoming_edges(self, node_id).cloned().collect()
     }
 
     fn has_incident_edges(&self, node_id: NodeId) -> bool {
@@ -254,7 +250,8 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn get_node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
-        self.with_node(id, |n| n.get_property(key).cloned()).flatten()
+        self.with_node(id, |n| n.get_property(key).cloned())
+            .flatten()
     }
 
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
@@ -296,8 +293,7 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn has_incident_edges(&self, node_id: NodeId) -> bool {
-        !self.get_outgoing_edges(node_id).is_empty()
-            || !self.get_incoming_edges(node_id).is_empty()
+        !self.get_outgoing_edges(node_id).is_empty() || !self.get_incoming_edges(node_id).is_empty()
     }
 
     fn node_count(&self) -> usize {

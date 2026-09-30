@@ -7,8 +7,8 @@
 //! - `/health/ready` - Readiness probe (is the server accepting queries?)
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -304,9 +304,7 @@ async fn handle_http_request(
             let ready = health.is_ready();
 
             // Run custom checks (if any).
-            let custom_checks = health_registry
-                .map(|r| r.run_checks())
-                .unwrap_or_default();
+            let custom_checks = health_registry.map(|r| r.run_checks()).unwrap_or_default();
             let all_custom_healthy = custom_checks.values().all(|s| s.is_healthy());
 
             // Overall status: degraded if readiness probe fails, unhealthy if any custom
@@ -690,16 +688,12 @@ mod tests {
         let registry = Arc::new(HealthRegistry::new());
         registry.register("disk_space", || HealthStatus::Healthy);
 
-        let (addr, shutdown) =
-            start_test_server_with_registry(metrics, health, registry).await;
+        let (addr, shutdown) = start_test_server_with_registry(metrics, health, registry).await;
 
         let (status, body) = http_get(&addr, "/health").await;
         assert_eq!(status, 200, "body: {body}");
         assert!(body.contains("\"status\":\"healthy\""), "body: {body}");
-        assert!(
-            body.contains("\"checks\""),
-            "checks key missing: {body}"
-        );
+        assert!(body.contains("\"checks\""), "checks key missing: {body}");
         assert!(
             body.contains("\"disk_space\":\"healthy\""),
             "check result missing: {body}"
@@ -717,8 +711,7 @@ mod tests {
             HealthStatus::Unhealthy("disk full".to_string())
         });
 
-        let (addr, shutdown) =
-            start_test_server_with_registry(metrics, health, registry).await;
+        let (addr, shutdown) = start_test_server_with_registry(metrics, health, registry).await;
 
         let (status, body) = http_get(&addr, "/health").await;
         // Readiness is OK but custom check fails → 503 + unhealthy status.
@@ -740,8 +733,7 @@ mod tests {
         registry.register("check_a", || HealthStatus::Healthy);
         registry.register("check_b", || HealthStatus::Healthy);
 
-        let (addr, shutdown) =
-            start_test_server_with_registry(metrics, health, registry).await;
+        let (addr, shutdown) = start_test_server_with_registry(metrics, health, registry).await;
 
         let (status, body) = http_get(&addr, "/health").await;
         assert_eq!(status, 200, "body: {body}");
@@ -760,8 +752,7 @@ mod tests {
         let registry = Arc::new(HealthRegistry::new());
         registry.register("always_ok", || HealthStatus::Healthy);
 
-        let (addr, shutdown) =
-            start_test_server_with_registry(metrics, health, registry).await;
+        let (addr, shutdown) = start_test_server_with_registry(metrics, health, registry).await;
 
         let (status, body) = http_get(&addr, "/health").await;
         assert_eq!(status, 503, "body: {body}");

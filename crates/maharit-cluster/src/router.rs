@@ -145,7 +145,10 @@ mod tests {
             })
             .unwrap();
         }
-        QueryRouter::new(Arc::new(RwLock::new(map)), Box::new(HashSharding::new(shard_count)))
+        QueryRouter::new(
+            Arc::new(RwLock::new(map)),
+            Box::new(HashSharding::new(shard_count)),
+        )
     }
 
     fn make_router_label() -> QueryRouter {
@@ -260,10 +263,7 @@ mod tests {
             node_count: 0,
         })
         .unwrap();
-        let router = QueryRouter::new(
-            Arc::new(RwLock::new(map)),
-            Box::new(HashSharding::new(1)),
-        );
+        let router = QueryRouter::new(Arc::new(RwLock::new(map)), Box::new(HashSharding::new(1)));
         assert!(router.route_all().is_empty());
     }
 }

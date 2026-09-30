@@ -11,7 +11,10 @@ pub use backup::{
     Backup, BackupCallback, BackupError, BackupMetadata, BackupOptions, BackupScheduler,
     CompressionType, IncrementalBackupMetadata,
 };
-pub use mvcc::{MvccManager, MvccSnapshot, NodeData, NodeVersion, PropertyValue as MvccPropertyValue, VersionedNode};
+pub use mvcc::{
+    MvccManager, MvccSnapshot, NodeData, NodeVersion, PropertyValue as MvccPropertyValue,
+    VersionedNode,
+};
 pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{
     LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,

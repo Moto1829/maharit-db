@@ -851,7 +851,9 @@ mod tests {
             "nodes gauge missing custom labels: {output}"
         );
         assert!(
-            output.contains("maharit_memory_usage_bytes{env=\"production\",region=\"ap-northeast-1\"}"),
+            output.contains(
+                "maharit_memory_usage_bytes{env=\"production\",region=\"ap-northeast-1\"}"
+            ),
             "memory gauge missing custom labels: {output}"
         );
         assert!(

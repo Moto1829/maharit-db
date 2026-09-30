@@ -453,16 +453,12 @@ impl Graph {
 
     /// ラベルでノードを検索（指定ラベルを持つノードを全て返す）
     pub fn find_nodes_by_label(&self, label: &str) -> Vec<&Node> {
-        self.nodes()
-            .filter(|n| n.has_label(label))
-            .collect()
+        self.nodes().filter(|n| n.has_label(label)).collect()
     }
 
     /// ラベル（タイプ）でエッジを検索
     pub fn find_edges_by_type(&self, edge_type: &str) -> Vec<&Edge> {
-        self.edges()
-            .filter(|e| e.label == edge_type)
-            .collect()
+        self.edges().filter(|e| e.label == edge_type).collect()
     }
 }
 
@@ -544,10 +540,7 @@ mod tests {
     #[test]
     fn test_create_node_with_labels() {
         let mut graph = Graph::new();
-        let id = graph.create_node_with_labels(vec![
-            "Person".to_string(),
-            "Employee".to_string(),
-        ]);
+        let id = graph.create_node_with_labels(vec!["Person".to_string(), "Employee".to_string()]);
 
         assert_eq!(graph.node_count(), 1);
         let node = graph.get_node(id).unwrap();

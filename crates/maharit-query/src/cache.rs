@@ -739,7 +739,9 @@ mod tests {
     fn test_ast_cache_miss_on_different_queries() {
         let mut cache = AstCache::new(10);
 
-        cache.get_or_parse("CREATE (n:Person {name: 'Alice'})").unwrap();
+        cache
+            .get_or_parse("CREATE (n:Person {name: 'Alice'})")
+            .unwrap();
         cache.get_or_parse("MATCH (n:Person) RETURN n").unwrap();
 
         let stats = cache.stats();
@@ -850,22 +852,14 @@ mod tests {
         let mut params1 = HashMap::new();
         params1.insert("name".to_string(), Value::String("Alice".to_string()));
         executor
-            .execute_cached(
-                "CREATE (n:Person {name: $name})",
-                params1,
-                &mut cache,
-            )
+            .execute_cached("CREATE (n:Person {name: $name})", params1, &mut cache)
             .unwrap();
 
         // 同じクエリ文字列・異なるパラメータでノード作成（キャッシュヒット）
         let mut params2 = HashMap::new();
         params2.insert("name".to_string(), Value::String("Bob".to_string()));
         executor
-            .execute_cached(
-                "CREATE (n:Person {name: $name})",
-                params2,
-                &mut cache,
-            )
+            .execute_cached("CREATE (n:Person {name: $name})", params2, &mut cache)
             .unwrap();
 
         // 2回目はキャッシュヒット（パースが1回だけ実行される）
@@ -876,7 +870,7 @@ mod tests {
 
     #[test]
     fn test_execute_cached_invalid_query_returns_error() {
-        use crate::executor::{Executor, ExecuteError};
+        use crate::executor::{ExecuteError, Executor};
         use maharit_core::Graph;
         use std::collections::HashMap;
 

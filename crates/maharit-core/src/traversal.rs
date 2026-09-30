@@ -684,9 +684,7 @@ impl<'a> Dijkstra<'a> {
         let mut current = to;
 
         while current != from {
-            if let Some((prev_node, edge_id)) =
-                previous.get(current as usize).and_then(|v| *v)
-            {
+            if let Some((prev_node, edge_id)) = previous.get(current as usize).and_then(|v| *v) {
                 nodes.push(prev_node);
                 edges.push(edge_id);
                 current = prev_node;

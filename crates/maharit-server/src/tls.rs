@@ -230,8 +230,8 @@ impl TlsConfig {
     /// ```
     pub fn from_toml_file(path: &str) -> Result<Option<Self>, TlsError> {
         let content = std::fs::read_to_string(path)?;
-        let wrapper: TlsConfigFile = toml::from_str(&content)
-            .map_err(|e| TlsError::TomlParse(e.to_string()))?;
+        let wrapper: TlsConfigFile =
+            toml::from_str(&content).map_err(|e| TlsError::TomlParse(e.to_string()))?;
         Self::from_file_config(wrapper.tls)
     }
 
@@ -671,10 +671,7 @@ impl CertificateReloader {
     ///
     /// この関数は非同期タスクを spawn して即座に返る。
     /// タスクはプログラムが終了するまで動き続ける。
-    pub async fn start_watching(
-        self: Arc<Self>,
-        on_reload: impl Fn(TlsConfig) + Send + 'static,
-    ) {
+    pub async fn start_watching(self: Arc<Self>, on_reload: impl Fn(TlsConfig) + Send + 'static) {
         // 初回チェックでベースラインのタイムスタンプを記録
         self.check_reload();
 
@@ -923,10 +920,16 @@ min_version = "1.4"
 "#;
         let (_guard, path) = write_toml(toml);
         let result = TlsConfig::from_toml_file(&path);
-        assert!(result.is_err(), "invalid min_version should return an error");
+        assert!(
+            result.is_err(),
+            "invalid min_version should return an error"
+        );
         match result.unwrap_err() {
             TlsError::ConfigError(msg) => {
-                assert!(msg.contains("1.4"), "error should mention the bad value: {msg}");
+                assert!(
+                    msg.contains("1.4"),
+                    "error should mention the bad value: {msg}"
+                );
             }
             other => panic!("expected ConfigError, got {other:?}"),
         }
@@ -960,10 +963,16 @@ min_version = "1.4"
         assert_eq!(cfg.protocol_version().unwrap(), None);
 
         cfg.min_version = Some("1.2".to_string());
-        assert_eq!(cfg.protocol_version().unwrap(), Some(ProtocolVersion::Tls12));
+        assert_eq!(
+            cfg.protocol_version().unwrap(),
+            Some(ProtocolVersion::Tls12)
+        );
 
         cfg.min_version = Some("1.3".to_string());
-        assert_eq!(cfg.protocol_version().unwrap(), Some(ProtocolVersion::Tls13));
+        assert_eq!(
+            cfg.protocol_version().unwrap(),
+            Some(ProtocolVersion::Tls13)
+        );
 
         cfg.min_version = Some("1.4".to_string());
         assert!(cfg.protocol_version().is_err());
@@ -1045,11 +1054,8 @@ min_version = "1.4"
         let cert = TempCertFile::new("cert");
         let key = TempCertFile::new("key");
 
-        let reloader = CertificateReloader::new(
-            cert.path_str(),
-            key.path_str(),
-            Duration::from_secs(30),
-        );
+        let reloader =
+            CertificateReloader::new(cert.path_str(), key.path_str(), Duration::from_secs(30));
 
         // 初回呼び出し: ベースラインを設定
         let first = reloader.check_reload();
@@ -1066,11 +1072,8 @@ min_version = "1.4"
         let cert = TempCertFile::new("cert2");
         let key = TempCertFile::new("key2");
 
-        let reloader = CertificateReloader::new(
-            cert.path_str(),
-            key.path_str(),
-            Duration::from_secs(30),
-        );
+        let reloader =
+            CertificateReloader::new(cert.path_str(), key.path_str(), Duration::from_secs(30));
 
         // 初回呼び出し: ベースラインを設定
         reloader.check_reload();

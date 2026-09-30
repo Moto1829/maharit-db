@@ -316,10 +316,7 @@ pub fn pagerank(graph: &Graph, config: &PageRankConfig) -> PageRankResult {
         // Handle dangling nodes (nodes with no outgoing edges).
         // The sum over dangling scores is embarrassingly parallel.
         let dangling_sum: f64 = if use_parallel {
-            dangling_nodes
-                .par_iter()
-                .map(|id| scores[id])
-                .sum()
+            dangling_nodes.par_iter().map(|id| scores[id]).sum()
         } else {
             dangling_nodes.iter().map(|id| scores[id]).sum()
         };
@@ -518,9 +515,7 @@ pub fn has_cycle(graph: &Graph) -> bool {
     let mut rec_stack = HashSet::new();
 
     for node in graph.nodes() {
-        if !visited.contains(&node.id)
-            && dfs_cycle(graph, node.id, &mut visited, &mut rec_stack)
-        {
+        if !visited.contains(&node.id) && dfs_cycle(graph, node.id, &mut visited, &mut rec_stack) {
             return true;
         }
     }
@@ -893,7 +888,11 @@ mod tests {
         // 全ノードが同じコミュニティに収束するはず
         let unique_communities: std::collections::HashSet<u64> =
             communities.values().copied().collect();
-        assert_eq!(unique_communities.len(), 1, "完全グラフは1コミュニティになるべき");
+        assert_eq!(
+            unique_communities.len(),
+            1,
+            "完全グラフは1コミュニティになるべき"
+        );
     }
 
     #[test]

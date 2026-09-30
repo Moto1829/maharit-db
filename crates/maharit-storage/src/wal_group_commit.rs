@@ -29,8 +29,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 
-use crate::wal::{RecordPayload, RecordType, Wal, WalError};
 use crate::Lsn;
+use crate::wal::{RecordPayload, RecordType, Wal, WalError};
 
 /// グループコミット設定
 #[derive(Debug, Clone)]
@@ -217,9 +217,7 @@ impl WalGroupCommitter {
                 // WalError は Clone でないため、エラーメッセージを文字列化して配布する
                 let msg = e.to_string();
                 for (_, tx) in pending.drain(..) {
-                    let _ = tx.send(Err(WalError::Io(std::io::Error::other(
-                        msg.clone(),
-                    ))));
+                    let _ = tx.send(Err(WalError::Io(std::io::Error::other(msg.clone()))));
                 }
             }
         }

@@ -229,7 +229,9 @@ impl ShardCoordinatorServer {
                     shards: self.shard_ids.len(),
                 },
                 CoordRequest::Disconnect | CoordRequest::Unknown => {
-                    let _ = self.write_response(&mut stream, &CoordResponse::Goodbye).await;
+                    let _ = self
+                        .write_response(&mut stream, &CoordResponse::Goodbye)
+                        .await;
                     break;
                 }
                 CoordRequest::Query {
@@ -357,7 +359,10 @@ impl ShardCoordinatorServer {
         if msg_len > MAX_MESSAGE_SIZE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("message length {} exceeds maximum {}", msg_len, MAX_MESSAGE_SIZE),
+                format!(
+                    "message length {} exceeds maximum {}",
+                    msg_len, MAX_MESSAGE_SIZE
+                ),
             ));
         }
         let mut buf = vec![0u8; msg_len];

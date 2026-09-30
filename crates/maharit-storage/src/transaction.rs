@@ -281,11 +281,12 @@ impl TransactionManager {
                     properties,
                 } => {
                     if let Ok(new_id) = graph.create_edge(*from, *to, label.clone())
-                        && let Some(edge) = graph.get_edge_mut(new_id) {
-                            for (k, v) in properties.iter() {
-                                edge.set_property(k.clone(), v.clone());
-                            }
+                        && let Some(edge) = graph.get_edge_mut(new_id)
+                    {
+                        for (k, v) in properties.iter() {
+                            edge.set_property(k.clone(), v.clone());
                         }
+                    }
                 }
                 UndoRecord::SetEdgeProperty {
                     edge_id,
@@ -332,13 +333,21 @@ impl TransactionManager {
                 UndoRecord::CreateNode { node_id } => {
                     graph.delete_node(*node_id);
                 }
-                UndoRecord::DeleteNode { node_id: _, labels, properties } => {
+                UndoRecord::DeleteNode {
+                    node_id: _,
+                    labels,
+                    properties,
+                } => {
                     let new_id = graph.create_node_with_labels(labels.clone());
                     for (key, value) in properties.iter() {
                         graph.set_node_property(new_id, key, value.clone());
                     }
                 }
-                UndoRecord::SetProperty { node_id, key, old_value } => match old_value {
+                UndoRecord::SetProperty {
+                    node_id,
+                    key,
+                    old_value,
+                } => match old_value {
                     Some(value) => graph.set_node_property(*node_id, key, value.clone()),
                     None => {
                         graph.with_node_mut(*node_id, |n| {
@@ -349,14 +358,24 @@ impl TransactionManager {
                 UndoRecord::CreateEdge { edge_id } => {
                     graph.delete_edge(*edge_id);
                 }
-                UndoRecord::DeleteEdge { edge_id: _, from, to, label, properties } => {
+                UndoRecord::DeleteEdge {
+                    edge_id: _,
+                    from,
+                    to,
+                    label,
+                    properties,
+                } => {
                     if let Ok(new_id) = graph.create_edge(*from, *to, label.clone()) {
                         for (k, v) in properties.iter() {
                             graph.set_edge_property(new_id, k, v.clone());
                         }
                     }
                 }
-                UndoRecord::SetEdgeProperty { edge_id, key, old_value } => match old_value {
+                UndoRecord::SetEdgeProperty {
+                    edge_id,
+                    key,
+                    old_value,
+                } => match old_value {
                     Some(value) => graph.set_edge_property(*edge_id, key, value.clone()),
                     None => {
                         graph.with_edge_mut(*edge_id, |e| {
@@ -918,9 +937,9 @@ mod tests {
 
     #[test]
     fn test_rollback_concurrent_delete_node() {
+        use maharit_core::{ConcurrentGraph, PropertyValue};
         use std::collections::HashMap;
         use std::sync::Arc;
-        use maharit_core::{ConcurrentGraph, PropertyValue};
 
         let tm = TransactionManager::new();
         let graph = ConcurrentGraph::new();
@@ -932,8 +951,12 @@ mod tests {
         let tx_id = tm.begin();
         let labels = vec!["Person".to_string()];
         let mut props = HashMap::new();
-        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
-        tm.record_node_deleted(tx_id, node_id, labels, Arc::new(props)).unwrap();
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("Alice".to_string()),
+        );
+        tm.record_node_deleted(tx_id, node_id, labels, Arc::new(props))
+            .unwrap();
         graph.delete_node(node_id);
 
         assert_eq!(graph.node_count(), 0);
@@ -957,7 +980,8 @@ mod tests {
         // Modify in transaction
         let tx_id = tm.begin();
         let old = Some(PropertyValue::String("Alice".to_string()));
-        tm.record_property_changed(tx_id, node_id, "name".to_string(), old).unwrap();
+        tm.record_property_changed(tx_id, node_id, "name".to_string(), old)
+            .unwrap();
         graph.set_node_property(node_id, "name", PropertyValue::String("Bob".to_string()));
 
         let n = graph.get_node(node_id).unwrap();

@@ -303,7 +303,9 @@ enum Request {
 #[serde(tag = "type")]
 enum Response {
     #[serde(rename = "result")]
-    Result { rows: Vec<HashMap<String, serde_json::Value>> },
+    Result {
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    },
 
     #[serde(rename = "error")]
     Error { message: String },
@@ -749,7 +751,8 @@ impl Client {
     async fn query_internal(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
         let request = Request::Query {
             query: query.to_string(),
-            tx_id, session_token: self.session_token.clone(),
+            tx_id,
+            session_token: self.session_token.clone(),
         };
 
         self.send_request(&request).await?;
@@ -805,7 +808,8 @@ impl Client {
                 DEFAULT_CHUNK_SIZE
             } else {
                 chunk_size
-            }, session_token: self.session_token.clone(),
+            },
+            session_token: self.session_token.clone(),
         };
 
         self.send_request(&request).await?;
@@ -868,7 +872,10 @@ impl Client {
 
     /// Begin a transaction with options
     async fn begin_with_options(&mut self, read_only: bool) -> Result<TxId> {
-        let request = Request::BeginTransaction { read_only, session_token: self.session_token.clone() };
+        let request = Request::BeginTransaction {
+            read_only,
+            session_token: self.session_token.clone(),
+        };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -882,7 +889,10 @@ impl Client {
 
     /// Commit a transaction
     pub async fn commit(&mut self, tx_id: TxId) -> Result<()> {
-        let request = Request::Commit { tx_id, session_token: self.session_token.clone() };
+        let request = Request::Commit {
+            tx_id,
+            session_token: self.session_token.clone(),
+        };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -896,7 +906,10 @@ impl Client {
 
     /// Rollback a transaction
     pub async fn rollback(&mut self, tx_id: TxId) -> Result<()> {
-        let request = Request::Rollback { tx_id, session_token: self.session_token.clone() };
+        let request = Request::Rollback {
+            tx_id,
+            session_token: self.session_token.clone(),
+        };
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
@@ -1218,8 +1231,7 @@ pub mod sync {
 
         /// Connect to a MaharitDB server with custom configuration
         pub fn connect_with_config(addr: &str, config: ClientConfig) -> Result<Self> {
-            let runtime =
-                tokio::runtime::Runtime::new().map_err(ClientError::Connection)?;
+            let runtime = tokio::runtime::Runtime::new().map_err(ClientError::Connection)?;
 
             let client = runtime.block_on(Client::connect_with_config(addr, config))?;
 
@@ -1356,7 +1368,8 @@ mod tests {
     fn test_request_serialization() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
-            tx_id: None, session_token: None,
+            tx_id: None,
+            session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1369,7 +1382,8 @@ mod tests {
     fn test_request_serialization_with_tx_id() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
-            tx_id: Some(42), session_token: None,
+            tx_id: Some(42),
+            session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1378,7 +1392,10 @@ mod tests {
 
     #[test]
     fn test_begin_transaction_request() {
-        let request = Request::BeginTransaction { read_only: false, session_token: None };
+        let request = Request::BeginTransaction {
+            read_only: false,
+            session_token: None,
+        };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"begin\""));
         assert!(json.contains("\"readOnly\":false"));
@@ -1386,7 +1403,10 @@ mod tests {
 
     #[test]
     fn test_commit_request() {
-        let request = Request::Commit { tx_id: 123, session_token: None };
+        let request = Request::Commit {
+            tx_id: 123,
+            session_token: None,
+        };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"commit\""));
         assert!(json.contains("\"txId\":123"));
@@ -1394,7 +1414,10 @@ mod tests {
 
     #[test]
     fn test_rollback_request() {
-        let request = Request::Rollback { tx_id: 456, session_token: None };
+        let request = Request::Rollback {
+            tx_id: 456,
+            session_token: None,
+        };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"rollback\""));
         assert!(json.contains("\"txId\":456"));
@@ -1557,7 +1580,8 @@ mod tests {
         let request = Request::StreamQuery {
             query: "MATCH (n) RETURN n".to_string(),
             tx_id: None,
-            chunk_size: 100, session_token: None,
+            chunk_size: 100,
+            session_token: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"streamQuery\""));
@@ -1654,7 +1678,8 @@ mod tests {
 
     #[test]
     fn test_logged_in_response_deserialization() {
-        let json = r#"{"type":"loggedIn","sessionToken":"tok-1","role":"admin","expiresAt":1700000000}"#;
+        let json =
+            r#"{"type":"loggedIn","sessionToken":"tok-1","role":"admin","expiresAt":1700000000}"#;
         let resp: Response = serde_json::from_str(json).unwrap();
         match resp {
             Response::LoggedIn {

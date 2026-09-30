@@ -11,7 +11,10 @@
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::sync::{Mutex, atomic::{AtomicU8, Ordering}};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Log level.
@@ -255,11 +258,7 @@ impl RotatingLogger {
     /// * `log_file`        – path to the log file (created on first write).
     /// * `max_size_bytes`  – rotate when the file exceeds this size.
     /// * `max_generations` – maximum number of rotated archives to keep.
-    pub fn new(
-        log_file: impl Into<String>,
-        max_size_bytes: u64,
-        max_generations: u32,
-    ) -> Self {
+    pub fn new(log_file: impl Into<String>, max_size_bytes: u64, max_generations: u32) -> Self {
         Self {
             log_file: log_file.into(),
             max_size_bytes,
@@ -271,7 +270,11 @@ impl RotatingLogger {
     /// Create a [`RotatingLogger`] with the default limits:
     /// `max_size_bytes = 100 MiB` and `max_generations = 5`.
     pub fn with_defaults(log_file: impl Into<String>) -> Self {
-        Self::new(log_file, Self::DEFAULT_MAX_SIZE, Self::DEFAULT_MAX_GENERATIONS)
+        Self::new(
+            log_file,
+            Self::DEFAULT_MAX_SIZE,
+            Self::DEFAULT_MAX_GENERATIONS,
+        )
     }
 
     /// Write a [`LogEntry`] to the file as a JSON line, rotating if necessary.
@@ -653,7 +656,10 @@ mod tests {
     fn test_rotating_logger_default_limits() {
         let logger = RotatingLogger::with_defaults("/tmp/maharit_default_test.log");
         assert_eq!(logger.max_size_bytes(), RotatingLogger::DEFAULT_MAX_SIZE);
-        assert_eq!(logger.max_generations(), RotatingLogger::DEFAULT_MAX_GENERATIONS);
+        assert_eq!(
+            logger.max_generations(),
+            RotatingLogger::DEFAULT_MAX_GENERATIONS
+        );
         assert_eq!(logger.log_file(), "/tmp/maharit_default_test.log");
     }
 }

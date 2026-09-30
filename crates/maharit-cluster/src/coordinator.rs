@@ -120,9 +120,9 @@ impl From<&PropertyValue> for RowValue {
             PropertyValue::Float(v) => RowValue::Int(*v as i64),
             PropertyValue::String(s) => RowValue::Text(s.clone()),
             PropertyValue::Bool(b) => RowValue::Bool(*b),
-            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
-                RowValue::Text(pv.to_string())
-            }
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::Duration { .. } => RowValue::Text(pv.to_string()),
         }
     }
 }
@@ -211,10 +211,7 @@ impl ClusterCoordinator {
         self.local_shards
             .iter()
             .map(|(&id, graph)| {
-                let node_count = graph
-                    .read()
-                    .map(|g| g.node_count() as u64)
-                    .unwrap_or(0);
+                let node_count = graph.read().map(|g| g.node_count() as u64).unwrap_or(0);
                 ShardInfo {
                     id,
                     address: format!("local:{}", id),

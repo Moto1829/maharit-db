@@ -8,12 +8,15 @@
 //! - Graceful shutdown
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId, PropertyIndex, PropertyValue};
+use maharit_core::{
+    ConcurrentGraph, ConstraintManager, EdgeId, FulltextManager, GraphBackend, NodeId,
+    PropertyIndex, PropertyValue,
+};
 use maharit_query::{AstCache, Executor, Parser, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -739,7 +742,6 @@ impl TcpServer {
     pub fn stats(&self) -> &ServerStats {
         &self.stats
     }
-
 }
 
 /// Handle a single client connection
@@ -877,7 +879,10 @@ async fn handle_connection(
                                 .await
                             }
                         };
-                        tracing::info!(duration_us = start.elapsed().as_micros() as u64, "query completed");
+                        tracing::info!(
+                            duration_us = start.elapsed().as_micros() as u64,
+                            "query completed"
+                        );
                         resp
                     }
                 }
@@ -919,7 +924,7 @@ async fn handle_connection(
                         continue;
                     }
                 }
-            }
+            },
             Request::Ping => Response::Pong,
             Request::Stats => {
                 // Report replication status (role, node id, current LSN, follower
@@ -1148,10 +1153,9 @@ async fn execute_streaming_query(
         }
     };
 
-    if is_write
-        && let Some(repl) = replication {
-            emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
-        }
+    if is_write && let Some(repl) = replication {
+        emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+    }
 
     // Convert rows to HashMap<String, serde_json::Value> 型情報維持
     let all_rows: Vec<HashMap<String, serde_json::Value>> = result
@@ -1230,7 +1234,10 @@ fn take_concurrent_snapshot(graph: &ConcurrentGraph) -> ConcurrentSnapshot {
         .edges()
         .map(|r| {
             let e = r.value();
-            (e.id, (e.from, e.to, e.label.clone(), Arc::clone(&e.properties)))
+            (
+                e.id,
+                (e.from, e.to, e.label.clone(), Arc::clone(&e.properties)),
+            )
         })
         .collect();
     ConcurrentSnapshot { nodes, edges }
@@ -1259,7 +1266,10 @@ fn record_undo_diff_concurrent(
             for (key, old_val) in old_props.iter() {
                 if node.properties.get(key.as_str()) != Some(old_val) {
                     let _ = tx_manager.record_property_changed(
-                        tx_id, id, key.clone(), Some(old_val.clone()),
+                        tx_id,
+                        id,
+                        key.clone(),
+                        Some(old_val.clone()),
                     );
                 }
             }
@@ -1287,7 +1297,10 @@ fn record_undo_diff_concurrent(
             for (key, old_val) in old_props.iter() {
                 if edge.properties.get(key.as_str()) != Some(old_val) {
                     let _ = tx_manager.record_edge_property_changed(
-                        tx_id, id, key.clone(), Some(old_val.clone()),
+                        tx_id,
+                        id,
+                        key.clone(),
+                        Some(old_val.clone()),
                     );
                 }
             }
@@ -1318,7 +1331,7 @@ async fn execute_query_with_tx(
         Err(e) => {
             return Response::Error {
                 message: format!("Parse error: {}", e),
-            }
+            };
         }
     };
 
@@ -1448,10 +1461,9 @@ async fn execute_query(
         result
     };
 
-    if is_write
-        && let (Ok(_), Some(repl)) = (&exec_result, replication) {
-            emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
-        }
+    if is_write && let (Ok(_), Some(repl)) = (&exec_result, replication) {
+        emit_wal_diff(graph.as_ref(), &node_ids_before, &edge_ids_before, repl).await;
+    }
 
     match exec_result {
         Ok(result) => {
@@ -1609,7 +1621,10 @@ mod tests {
     fn test_check_session_disabled_returns_admin() {
         let auth = Arc::new(Mutex::new(crate::auth::AuthManager::new()));
         // require_auth=false のときは常に Admin 相当で通す。
-        assert!(matches!(check_session(false, &auth, &None), Ok(Role::Admin)));
+        assert!(matches!(
+            check_session(false, &auth, &None),
+            Ok(Role::Admin)
+        ));
     }
 
     #[test]
@@ -1749,7 +1764,10 @@ mod tests {
             let mut mgr = auth.lock().unwrap();
             mgr.authenticate("admin", "admin").unwrap()
         };
-        assert!(matches!(check_session(true, &auth, &Some(token)), Ok(Role::Admin)));
+        assert!(matches!(
+            check_session(true, &auth, &Some(token)),
+            Ok(Role::Admin)
+        ));
     }
 
     #[test]
@@ -1856,7 +1874,8 @@ mod tests {
             Request::StreamQuery {
                 query,
                 tx_id,
-                chunk_size, session_token: None,
+                chunk_size,
+                session_token: None,
             } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert!(tx_id.is_none());
@@ -2019,7 +2038,11 @@ mod tests {
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
         let resp = send_recv(&mut stream, &Request::Ping).await;
-        assert!(matches!(resp, Response::Pong), "expected Pong, got {:?}", resp);
+        assert!(
+            matches!(resp, Response::Pong),
+            "expected Pong, got {:?}",
+            resp
+        );
     }
 
     #[tokio::test]
@@ -2052,8 +2075,16 @@ mod tests {
             other => panic!("expected Result, got {:?}", other),
         };
         let joined = format!("{:?}", rows);
-        assert!(joined.contains("alice"), "SHOW USERS missing alice: {}", joined);
-        assert!(joined.contains("admin"), "SHOW USERS missing admin: {}", joined);
+        assert!(
+            joined.contains("alice"),
+            "SHOW USERS missing alice: {}",
+            joined
+        );
+        assert!(
+            joined.contains("admin"),
+            "SHOW USERS missing admin: {}",
+            joined
+        );
 
         // DROP USER of a nonexistent user must error (not silently succeed).
         let resp = send_recv(&mut stream, &q("DROP USER nobody")).await;
@@ -2171,18 +2202,24 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Person {name: 'Alice'}) RETURN n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "CREATE failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "CREATE failed: {:?}",
+            resp
+        );
 
         // MATCH
         let resp = send_recv(
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2190,7 +2227,10 @@ mod tests {
             Response::Result { rows } => {
                 assert!(!rows.is_empty(), "expected at least one row");
                 // String values are returned as JSON-quoted strings (e.g. `"Alice"`)
-                assert_eq!(rows[0].get("n.name").and_then(|v| v.as_str()), Some("Alice"));
+                assert_eq!(
+                    rows[0].get("n.name").and_then(|v| v.as_str()),
+                    Some("Alice")
+                );
             }
             other => panic!("expected Result, got {:?}", other),
         }
@@ -2206,11 +2246,16 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Item {s: 'hello', i: 42, f: 3.14, b: true}) RETURN n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "CREATE failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "CREATE failed: {:?}",
+            resp
+        );
 
         // MATCH each property individually
         // Server returns typed JSON values: String/Number/Boolean.
@@ -2223,19 +2268,15 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("MATCH (n:Item) RETURN {}", col),
-                    tx_id: None, session_token: None,
+                    tx_id: None,
+                    session_token: None,
                 },
             )
             .await;
             match resp {
                 Response::Result { rows } => {
                     assert!(!rows.is_empty(), "no rows for {}", col);
-                    assert_eq!(
-                        rows[0].get(col),
-                        Some(&expected),
-                        "mismatch for {}",
-                        col
-                    );
+                    assert_eq!(rows[0].get(col), Some(&expected), "mismatch for {}", col);
                 }
                 other => panic!("expected Result for {}, got {:?}", col, other),
             }
@@ -2246,7 +2287,8 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Item) RETURN n.f".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2272,12 +2314,18 @@ mod tests {
         ] {
             let resp = send_recv(
                 &mut stream,
-                &Request::Query { query: q.to_string(), tx_id: None, session_token: None },
+                &Request::Query {
+                    query: q.to_string(),
+                    tx_id: None,
+                    session_token: None,
+                },
             )
             .await;
             assert!(
                 matches!(resp, Response::Result { .. }),
-                "setup query failed for '{}': {:?}", q, resp
+                "setup query failed for '{}': {:?}",
+                q,
+                resp
             );
         }
 
@@ -2286,7 +2334,8 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (a:A)-[:LINK]->(b:B) RETURN b.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2308,13 +2357,15 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "THIS IS NOT VALID CYPHER !!!".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
         assert!(
             matches!(resp, Response::Error { .. }),
-            "expected Error response, got {:?}", resp
+            "expected Error response, got {:?}",
+            resp
         );
     }
 
@@ -2345,7 +2396,8 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:TmpNode {name: 'delete_me'})".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2355,18 +2407,24 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) DETACH DELETE n".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "DELETE failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "DELETE failed: {:?}",
+            resp
+        );
 
         // Verify gone
         let resp = send_recv(
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) RETURN n.name".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2412,7 +2470,8 @@ mod tests {
                         &mut stream,
                         &Request::Query {
                             query: format!("CREATE (n:ConcWrite {{id: {i}}}) RETURN n"),
-                            tx_id: None, session_token: None,
+                            tx_id: None,
+                            session_token: None,
                         },
                     )
                     .await;
@@ -2434,13 +2493,19 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:ConcWrite) RETURN n.id".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
         match resp {
             Response::Result { rows } => {
-                assert_eq!(rows.len(), 10, "10件のConcWriteノードが存在するべき、実際: {}", rows.len());
+                assert_eq!(
+                    rows.len(),
+                    10,
+                    "10件のConcWriteノードが存在するべき、実際: {}",
+                    rows.len()
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -2457,7 +2522,8 @@ mod tests {
             &mut setup,
             &Request::Query {
                 query: "CREATE (n:ReadTarget {val: 1})".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2472,7 +2538,8 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: format!("CREATE (n:RWWrite {{id: {i}}}) RETURN n"),
-                        tx_id: None, session_token: None,
+                        tx_id: None,
+                        session_token: None,
                     },
                 )
                 .await;
@@ -2491,7 +2558,8 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: "MATCH (n:ReadTarget) RETURN n.val".to_string(),
-                        tx_id: None, session_token: None,
+                        tx_id: None,
+                        session_token: None,
                     },
                 )
                 .await;
@@ -2519,11 +2587,9 @@ mod tests {
                 tokio::spawn(async move {
                     // 接続制限に引っかかる場合はサーバーがキューイングするため
                     // 少し長めのタイムアウトで待つ
-                    let stream = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        TcpStream::connect(addr),
-                    )
-                    .await;
+                    let stream =
+                        tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+                            .await;
 
                     match stream {
                         Ok(Ok(mut s)) => {
@@ -2548,7 +2614,10 @@ mod tests {
         // サーバーがまだ生きていることを確認
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let resp = send_recv(&mut stream, &Request::Ping).await;
-        assert!(matches!(resp, Response::Pong), "server should still respond after connection burst");
+        assert!(
+            matches!(resp, Response::Pong),
+            "server should still respond after connection burst"
+        );
     }
 
     #[tokio::test]
@@ -2561,14 +2630,28 @@ mod tests {
         let mut client_b = TcpStream::connect(addr).await.unwrap();
 
         // クライアントA: トランザクション開始
-        let resp_a = send_recv(&mut client_a, &Request::BeginTransaction { read_only: false, session_token: None }).await;
+        let resp_a = send_recv(
+            &mut client_a,
+            &Request::BeginTransaction {
+                read_only: false,
+                session_token: None,
+            },
+        )
+        .await;
         let tx_a = match resp_a {
             Response::TransactionBegun { tx_id } => tx_id,
             other => panic!("client A expected TransactionBegun, got {other:?}"),
         };
 
         // クライアントB: トランザクション開始
-        let resp_b = send_recv(&mut client_b, &Request::BeginTransaction { read_only: false, session_token: None }).await;
+        let resp_b = send_recv(
+            &mut client_b,
+            &Request::BeginTransaction {
+                read_only: false,
+                session_token: None,
+            },
+        )
+        .await;
         let tx_b = match resp_b {
             Response::TransactionBegun { tx_id } => tx_id,
             other => panic!("client B expected TransactionBegun, got {other:?}"),
@@ -2579,30 +2662,58 @@ mod tests {
             &mut client_a,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'A'}) RETURN n".to_string(),
-                tx_id: Some(tx_a), session_token: None,
+                tx_id: Some(tx_a),
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "tx A CREATE failed: {resp:?}");
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "tx A CREATE failed: {resp:?}"
+        );
 
         // クライアントB: トランザクション内でノードを作成
         let resp = send_recv(
             &mut client_b,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'B'}) RETURN n".to_string(),
-                tx_id: Some(tx_b), session_token: None,
+                tx_id: Some(tx_b),
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "tx B CREATE failed: {resp:?}");
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "tx B CREATE failed: {resp:?}"
+        );
 
         // クライアントA: コミット
-        let resp = send_recv(&mut client_a, &Request::Commit { tx_id: tx_a, session_token: None }).await;
-        assert!(matches!(resp, Response::Committed { .. }), "tx A commit failed: {resp:?}");
+        let resp = send_recv(
+            &mut client_a,
+            &Request::Commit {
+                tx_id: tx_a,
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Committed { .. }),
+            "tx A commit failed: {resp:?}"
+        );
 
         // クライアントB: ロールバック（Bの変更は取り消される）
-        let resp = send_recv(&mut client_b, &Request::Rollback { tx_id: tx_b, session_token: None }).await;
-        assert!(matches!(resp, Response::RolledBack { .. }), "tx B rollback failed: {resp:?}");
+        let resp = send_recv(
+            &mut client_b,
+            &Request::Rollback {
+                tx_id: tx_b,
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::RolledBack { .. }),
+            "tx B rollback failed: {resp:?}"
+        );
 
         // 確認: A のノードのみ残り、B のノードはロールバックされている
         let mut checker = TcpStream::connect(addr).await.unwrap();
@@ -2610,7 +2721,8 @@ mod tests {
             &mut checker,
             &Request::Query {
                 query: "MATCH (n:TxIsolate) RETURN n.owner".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2618,11 +2730,14 @@ mod tests {
             Response::Result { rows } => {
                 // A がコミット済みなので少なくとも1件、B はロールバック済みなので "B" は含まれない
                 assert!(
-                    rows.iter().any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("A")),
+                    rows.iter()
+                        .any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("A")),
                     "A's committed node should exist"
                 );
                 assert!(
-                    !rows.iter().any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("B")),
+                    !rows
+                        .iter()
+                        .any(|r| r.get("n.owner").and_then(|v| v.as_str()) == Some("B")),
                     "B's rolled-back node should not exist"
                 );
             }
@@ -2642,13 +2757,16 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("CREATE (n:Pipeline {{idx: {}}}) RETURN n", i),
-                    tx_id: None, session_token: None,
+                    tx_id: None,
+                    session_token: None,
                 },
             )
             .await;
             assert!(
                 matches!(resp, Response::Result { .. }),
-                "CREATE #{} failed: {:?}", i, resp
+                "CREATE #{} failed: {:?}",
+                i,
+                resp
             );
         }
 
@@ -2657,7 +2775,8 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline) RETURN n.idx".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2677,7 +2796,8 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline {idx: 5}) RETURN n.idx".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2700,30 +2820,42 @@ mod tests {
         let resp = send_recv(
             &mut stream,
             &Request::Query {
-                query: "CREATE CONSTRAINT unique_test_id FOR (n:TestItem) REQUIRE n.id IS UNIQUE".to_string(),
-                tx_id: None, session_token: None,
+                query: "CREATE CONSTRAINT unique_test_id FOR (n:TestItem) REQUIRE n.id IS UNIQUE"
+                    .to_string(),
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "CREATE CONSTRAINT failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "CREATE CONSTRAINT failed: {:?}",
+            resp
+        );
 
         // 最初のノード作成（成功するはず）
         let resp = send_recv(
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "First CREATE failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "First CREATE failed: {:?}",
+            resp
+        );
 
         // 重複 id で2回目の作成（制約違反でエラーになるはず）
         let resp = send_recv(
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
@@ -2738,13 +2870,17 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "SHOW CONSTRAINTS".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
         match resp {
             Response::Result { rows } => {
-                assert!(!rows.is_empty(), "SHOW CONSTRAINTS should return at least one row");
+                assert!(
+                    !rows.is_empty(),
+                    "SHOW CONSTRAINTS should return at least one row"
+                );
             }
             other => panic!("SHOW CONSTRAINTS failed: {:?}", other),
         }
@@ -2761,18 +2897,24 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE FULLTEXT INDEX ft_test_body FOR (a:Article) ON (a.body)".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;
-        assert!(matches!(resp, Response::Result { .. }), "CREATE FULLTEXT INDEX failed: {:?}", resp);
+        assert!(
+            matches!(resp, Response::Result { .. }),
+            "CREATE FULLTEXT INDEX failed: {:?}",
+            resp
+        );
 
         // DROP FULLTEXT INDEX（永続化されていれば成功するはず）
         let resp = send_recv(
             &mut stream,
             &Request::Query {
                 query: "DROP FULLTEXT INDEX ft_test_body".to_string(),
-                tx_id: None, session_token: None,
+                tx_id: None,
+                session_token: None,
             },
         )
         .await;

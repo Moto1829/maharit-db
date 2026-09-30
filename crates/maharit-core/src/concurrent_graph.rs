@@ -35,9 +35,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 
+use crate::GraphError;
 use crate::graph::{Edge, EdgeId, Node, NodeId};
 use crate::property::PropertyValue;
-use crate::GraphError;
 
 /// A lock-free, concurrent graph backed by [`DashMap`].
 ///
@@ -82,7 +82,10 @@ impl ConcurrentGraph {
     /// Register `id` under each of `labels` in the label index.
     fn label_index_add(&self, id: NodeId, labels: &[String]) {
         for label in labels {
-            self.label_index.entry(label.clone()).or_default().insert(id);
+            self.label_index
+                .entry(label.clone())
+                .or_default()
+                .insert(id);
         }
     }
 
@@ -131,9 +134,7 @@ impl ConcurrentGraph {
                 had
             })
             .unwrap_or(false);
-        if removed
-            && let Some(mut set) = self.label_index.get_mut(label)
-        {
+        if removed && let Some(mut set) = self.label_index.get_mut(label) {
             set.remove(&id);
         }
     }
@@ -233,9 +234,10 @@ impl ConcurrentGraph {
         if let Some((_, out_ids)) = self.outgoing.remove(&id) {
             for eid in out_ids {
                 if let Some((_, edge)) = self.edges.remove(&eid)
-                    && let Some(mut inc) = self.incoming.get_mut(&edge.to) {
-                        inc.remove(&eid);
-                    }
+                    && let Some(mut inc) = self.incoming.get_mut(&edge.to)
+                {
+                    inc.remove(&eid);
+                }
             }
         }
 
@@ -243,9 +245,10 @@ impl ConcurrentGraph {
         if let Some((_, in_ids)) = self.incoming.remove(&id) {
             for eid in in_ids {
                 if let Some((_, edge)) = self.edges.remove(&eid)
-                    && let Some(mut out) = self.outgoing.get_mut(&edge.from) {
-                        out.remove(&eid);
-                    }
+                    && let Some(mut out) = self.outgoing.get_mut(&edge.from)
+                {
+                    out.remove(&eid);
+                }
             }
         }
 
@@ -258,7 +261,9 @@ impl ConcurrentGraph {
     }
 
     /// Iterate over all nodes (takes a short-lived read shard lock per entry).
-    pub fn nodes(&self) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<'_, NodeId, Node>> {
+    pub fn nodes(
+        &self,
+    ) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<'_, NodeId, Node>> {
         self.nodes.iter()
     }
 
@@ -328,7 +333,9 @@ impl ConcurrentGraph {
     }
 
     /// Iterate over all edges.
-    pub fn edges(&self) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<'_, EdgeId, Edge>> {
+    pub fn edges(
+        &self,
+    ) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<'_, EdgeId, Edge>> {
         self.edges.iter()
     }
 

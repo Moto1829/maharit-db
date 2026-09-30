@@ -340,8 +340,7 @@ fn run_server(args: &[String]) {
 
     match replication_role.as_deref() {
         Some("leader") => {
-            let bind = replication_bind
-                .unwrap_or_else(|| "127.0.0.1:7688".to_string());
+            let bind = replication_bind.unwrap_or_else(|| "127.0.0.1:7688".to_string());
             let repl_config = ReplicationConfig {
                 role: NodeRole::Leader,
                 node_id: node_id.clone(),
@@ -381,8 +380,7 @@ fn run_server(args: &[String]) {
                     std::process::exit(1);
                 }
             };
-            let bind = replication_bind
-                .unwrap_or_else(|| "127.0.0.1:7689".to_string());
+            let bind = replication_bind.unwrap_or_else(|| "127.0.0.1:7689".to_string());
             let repl_config = ReplicationConfig {
                 role: NodeRole::Follower,
                 node_id: node_id.clone(),
@@ -420,7 +418,10 @@ fn run_server(args: &[String]) {
             });
         }
         Some(other) => {
-            eprintln!("Unknown replication role: {}. Use 'leader' or 'follower'.", other);
+            eprintln!(
+                "Unknown replication role: {}. Use 'leader' or 'follower'.",
+                other
+            );
             std::process::exit(1);
         }
         None => {
@@ -468,10 +469,7 @@ fn spawn_http_server(bind_address: Option<String>) {
 }
 
 /// Spawn a background task that waits for SIGINT/SIGTERM, saves the database, then exits.
-fn spawn_shutdown_handler(
-    graph: std::sync::Arc<maharit_core::ConcurrentGraph>,
-    data_path: String,
-) {
+fn spawn_shutdown_handler(graph: std::sync::Arc<maharit_core::ConcurrentGraph>, data_path: String) {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         println!("\nShutting down, saving database to {}...", data_path);
@@ -488,7 +486,8 @@ async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
@@ -598,7 +597,10 @@ fn run_backup(args: &[String]) {
         std::process::exit(1);
     };
 
-    let mut options = BackupOptions { compression, description: String::new() };
+    let mut options = BackupOptions {
+        compression,
+        description: String::new(),
+    };
     if !description.is_empty() {
         options = options.with_description(description);
     }
@@ -876,32 +878,64 @@ fn print_server_help() {
     println!("    maharit server [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    -d, --data <PATH>                Database file path (default: maharit.db, env: MAHARIT_DATA)");
-    println!("                                     Loaded on startup if exists; saved on shutdown.");
+    println!(
+        "    -d, --data <PATH>                Database file path (default: maharit.db, env: MAHARIT_DATA)"
+    );
+    println!(
+        "                                     Loaded on startup if exists; saved on shutdown."
+    );
     println!("    -h, --host <HOST>                Host to bind to (default: 127.0.0.1)");
     println!("    -p, --port <PORT>                Port to listen on (default: 7687)");
     println!("    -c, --max-connections <N>        Maximum concurrent connections (default: 100)");
-    println!("    --require-auth                   Require a valid session token for all requests (enforces RBAC)");
-    println!("    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth");
-    println!("    --metrics-bind <ADDR>            Monitoring HTTP (metrics/health) bind address (default: 127.0.0.1:9090, loopback only)");
+    println!(
+        "    --require-auth                   Require a valid session token for all requests (enforces RBAC)"
+    );
+    println!(
+        "    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth"
+    );
+    println!(
+        "    --metrics-bind <ADDR>            Monitoring HTTP (metrics/health) bind address (default: 127.0.0.1:9090, loopback only)"
+    );
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
-    println!("    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)");
-    println!("    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)");
+    println!(
+        "    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)"
+    );
+    println!(
+        "    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)"
+    );
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
-    println!("    --node-id <ID>                   Unique node identifier in the replication cluster (env: MAHARIT_NODE_ID, default: node-1)");
-    println!("    --shard                          Start as a shard node (normal TcpServer with shard-id logged)");
-    println!("    --shard-id <ID>                  Shard identifier for this node (used with --shard)");
-    println!("    --coordinator                    Start as a coordinator node (fans queries out to shards)");
-    println!("    --coordinator-port <PORT>        Port for the coordinator listener (default: 7690)");
-    println!("    --shards <ADDR,...>              Comma-separated list of shard addresses (coordinator mode)");
-    println!("    --strategy <STRATEGY>            Sharding strategy: hash|range|label (default: hash)");
+    println!(
+        "    --node-id <ID>                   Unique node identifier in the replication cluster (env: MAHARIT_NODE_ID, default: node-1)"
+    );
+    println!(
+        "    --shard                          Start as a shard node (normal TcpServer with shard-id logged)"
+    );
+    println!(
+        "    --shard-id <ID>                  Shard identifier for this node (used with --shard)"
+    );
+    println!(
+        "    --coordinator                    Start as a coordinator node (fans queries out to shards)"
+    );
+    println!(
+        "    --coordinator-port <PORT>        Port for the coordinator listener (default: 7690)"
+    );
+    println!(
+        "    --shards <ADDR,...>              Comma-separated list of shard addresses (coordinator mode)"
+    );
+    println!(
+        "    --strategy <STRATEGY>            Sharding strategy: hash|range|label (default: hash)"
+    );
     println!("    --config <PATH>                  Path to a TOML cluster config file (reserved)");
     println!("    --help                           Print this help message");
     println!();
     println!("EXAMPLES:");
     println!("    maharit server --replication-role leader --replication-bind 0.0.0.0:7688");
-    println!("    maharit server --replication-role follower --leader-addr 192.168.1.1:7688 --port 7690");
+    println!(
+        "    maharit server --replication-role follower --leader-addr 192.168.1.1:7688 --port 7690"
+    );
     println!("    maharit server --shard --shard-id 0 --port 7687");
     println!("    maharit server --shard --shard-id 1 --port 7688");
-    println!("    maharit server --coordinator --shards 127.0.0.1:7687,127.0.0.1:7688 --coordinator-port 7690");
+    println!(
+        "    maharit server --coordinator --shards 127.0.0.1:7687,127.0.0.1:7688 --coordinator-port 7690"
+    );
 }

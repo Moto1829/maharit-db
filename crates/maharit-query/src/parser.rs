@@ -187,9 +187,7 @@ impl Parser {
                     return self.parse_procedure_call();
                 }
                 // Otherwise fall through to error (CALL { } must appear inside MATCH)
-                return Err(self.unexpected_token(
-                    "procedure name after CALL",
-                ));
+                return Err(self.unexpected_token("procedure name after CALL"));
             }
             Some(_) => {
                 return Err(self.unexpected_token(
@@ -886,8 +884,10 @@ impl Parser {
 
         // テンポラル関数 (date/datetime/duration) は BinaryOp に参加できるため
         // parse_expression に委譲する
-        if matches!(var.to_lowercase().as_str(), "date" | "datetime" | "duration")
-            && self.check(TokenKind::LParen)
+        if matches!(
+            var.to_lowercase().as_str(),
+            "date" | "datetime" | "duration"
+        ) && self.check(TokenKind::LParen)
         {
             self.pos = saved_pos;
             let expr = self.parse_expression()?;
@@ -1198,7 +1198,9 @@ impl Parser {
             "duration" => {
                 let arg = self.parse_expression()?;
                 self.expect(TokenKind::RParen)?;
-                return Ok(ReturnItem::Function(ScalarFunction::DurationFunc(Box::new(arg))));
+                return Ok(ReturnItem::Function(ScalarFunction::DurationFunc(
+                    Box::new(arg),
+                )));
             }
             // リスト操作関数: 1引数
             "head" | "tail" => {
@@ -1963,7 +1965,10 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let property = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
-        Ok(Statement::CreateIndex(CreateIndexStatement { label, property }))
+        Ok(Statement::CreateIndex(CreateIndexStatement {
+            label,
+            property,
+        }))
     }
 
     /// DROP INDEX ON :Label(property)
@@ -2765,7 +2770,9 @@ impl Parser {
                             self.advance(); // consume '('
                             let arg = self.parse_expression()?;
                             self.expect(TokenKind::RParen)?;
-                            return Ok(Expression::ScalarFn(ScalarFunction::DurationFunc(Box::new(arg))));
+                            return Ok(Expression::ScalarFn(ScalarFunction::DurationFunc(
+                                Box::new(arg),
+                            )));
                         }
                         _ => {} // fall through to subquery/property/variable handling
                     }
@@ -2949,9 +2956,8 @@ impl Parser {
     }
 
     fn check(&self, kind: TokenKind) -> bool {
-        self.peek_kind().is_some_and(|k| {
-            std::mem::discriminant(k) == std::mem::discriminant(&kind)
-        })
+        self.peek_kind()
+            .is_some_and(|k| std::mem::discriminant(k) == std::mem::discriminant(&kind))
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<Token, ParseError> {
@@ -3048,7 +3054,10 @@ mod tests {
         if let Statement::Create(create) = stmt {
             if let Pattern::Node(node) = &create.patterns[0] {
                 assert_eq!(node.variable, Some("n".to_string()));
-                assert_eq!(node.labels, vec!["Person".to_string(), "Employee".to_string()]);
+                assert_eq!(
+                    node.labels,
+                    vec!["Person".to_string(), "Employee".to_string()]
+                );
             } else {
                 panic!("expected node pattern");
             }
@@ -3666,10 +3675,7 @@ mod tests {
 
         if let Statement::Match(m) = stmt {
             let with = m.segments[0].with_clause.as_ref().unwrap();
-            assert_eq!(
-                with.limit,
-                Some(Expression::Literal(Literal::Int(10)))
-            );
+            assert_eq!(with.limit, Some(Expression::Literal(Literal::Int(10))));
         } else {
             panic!("expected MATCH statement");
         }
@@ -3681,10 +3687,7 @@ mod tests {
 
         if let Statement::Match(m) = stmt {
             let with = m.segments[0].with_clause.as_ref().unwrap();
-            assert_eq!(
-                with.skip,
-                Some(Expression::Literal(Literal::Int(5)))
-            );
+            assert_eq!(with.skip, Some(Expression::Literal(Literal::Int(5))));
         } else {
             panic!("expected MATCH statement");
         }
@@ -4100,8 +4103,14 @@ mod tests {
     #[test]
     fn test_parse_unwind_json_map_list() {
         // benchmark.py の bench_unwind_batch_create が生成するクエリ形式
-        let stmt = parse(r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name})"#);
-        assert!(stmt.is_ok(), "Failed to parse JSON map list UNWIND: {:?}", stmt);
+        let stmt = parse(
+            r#"UNWIND [{"id": 0, "name": "Alice0", "city": "Tokyo"}, {"id": 1, "name": "Bob1", "city": "Osaka"}] AS item CREATE (:UnwindBench {id: item.id, name: item.name})"#,
+        );
+        assert!(
+            stmt.is_ok(),
+            "Failed to parse JSON map list UNWIND: {:?}",
+            stmt
+        );
     }
 
     #[test]
@@ -4118,9 +4127,7 @@ mod tests {
     #[test]
     fn test_parse_property_key_keyword_in_relationship() {
         // Task 98: リレーションシップの property にキーワードを使えること
-        let stmt = parse(
-            "MATCH (a), (b) CREATE (a)-[:WORKS_AT {role: 'Engineer'}]->(b)",
-        );
+        let stmt = parse("MATCH (a), (b) CREATE (a)-[:WORKS_AT {role: 'Engineer'}]->(b)");
         assert!(
             stmt.is_ok(),
             "Failed to parse 'role' in relationship properties: {:?}",
@@ -4187,7 +4194,12 @@ mod tests {
             "MATCH (u:User:Role) RETURN u",
         ] {
             let stmt = parse(q);
-            assert!(stmt.is_ok(), "Failed to parse keyword label: {}\n  err: {:?}", q, stmt);
+            assert!(
+                stmt.is_ok(),
+                "Failed to parse keyword label: {}\n  err: {:?}",
+                q,
+                stmt
+            );
         }
     }
 
@@ -4200,7 +4212,12 @@ mod tests {
             "MATCH (a) CREATE (a)-[:Constraint]->(b)",
         ] {
             let stmt = parse(q);
-            assert!(stmt.is_ok(), "Failed to parse keyword rel type: {}\n  err: {:?}", q, stmt);
+            assert!(
+                stmt.is_ok(),
+                "Failed to parse keyword rel type: {}\n  err: {:?}",
+                q,
+                stmt
+            );
         }
     }
 
@@ -4233,10 +4250,7 @@ mod tests {
     #[test]
     fn test_parse_set_remove_label_keyword() {
         // Task 108: SET / REMOVE のラベル位置でキーワード
-        for q in [
-            "MATCH (n) SET n:User",
-            "MATCH (n) REMOVE n:Role",
-        ] {
+        for q in ["MATCH (n) SET n:User", "MATCH (n) REMOVE n:Role"] {
             let stmt = parse(q);
             assert!(stmt.is_ok(), "Failed to parse: {}\n  err: {:?}", q, stmt);
         }
@@ -4572,9 +4586,10 @@ mod tests {
         assert!(result.statement.is_none());
         assert!(!result.errors.is_empty());
         // 空入力は UnexpectedEof またはレキサーエラーを返す
-        let has_eof_or_lexer_error = result.errors.iter().any(|e| {
-            matches!(e, ParseError::UnexpectedEof | ParseError::LexerError(_))
-        });
+        let has_eof_or_lexer_error = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ParseError::UnexpectedEof | ParseError::LexerError(_)));
         assert!(has_eof_or_lexer_error || !result.errors.is_empty());
     }
 

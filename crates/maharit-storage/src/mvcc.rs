@@ -371,10 +371,7 @@ mod tests {
 
     fn make_data_with_prop(label: &str, key: &str, value: &str) -> NodeData {
         let mut props = HashMap::new();
-        props.insert(
-            key.to_string(),
-            PropertyValue::String(value.to_string()),
-        );
+        props.insert(key.to_string(), PropertyValue::String(value.to_string()));
         NodeData {
             label: label.to_string(),
             properties: props,
@@ -562,7 +559,10 @@ mod tests {
 
         // No active transactions → GC should collect old deleted versions.
         let removed = mgr.gc();
-        assert!(removed > 0, "GC should have removed at least one old version");
+        assert!(
+            removed > 0,
+            "GC should have removed at least one old version"
+        );
     }
 
     #[test]
@@ -604,11 +604,7 @@ mod tests {
 
         // Writer updates the node after the snapshot.
         let txn2 = mgr.begin_transaction();
-        mgr.write_node(
-            100,
-            make_data_with_prop("Item", "status", "updated"),
-            txn2,
-        );
+        mgr.write_node(100, make_data_with_prop("Item", "status", "updated"), txn2);
         mgr.commit(txn2);
 
         // Reader's snapshot should still see the initial value.

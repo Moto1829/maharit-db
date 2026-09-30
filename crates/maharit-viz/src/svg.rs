@@ -199,10 +199,8 @@ impl SvgExporter {
         let positions = self.layout.compute(graph);
 
         // Build a lookup: node_id -> (x, y).
-        let pos_map: HashMap<u64, (f64, f64)> = positions
-            .iter()
-            .map(|p| (p.node_id, (p.x, p.y)))
-            .collect();
+        let pos_map: HashMap<u64, (f64, f64)> =
+            positions.iter().map(|p| (p.node_id, (p.x, p.y))).collect();
 
         let w = self.layout.canvas_width as u64;
         let h = self.layout.canvas_height as u64;
@@ -261,11 +259,7 @@ impl SvgExporter {
             let raw_label = if node.labels.is_empty() {
                 node.id.to_string()
             } else {
-                format!(
-                    "{}:{}",
-                    node.labels.join(":"),
-                    node.id
-                )
+                format!("{}:{}", node.labels.join(":"), node.id)
             };
             let escaped = escape_xml(&raw_label);
             writeln!(
@@ -312,7 +306,10 @@ mod tests {
         assert!(svg.contains("<svg"), "missing opening <svg> tag");
         assert!(svg.contains("</svg>"), "missing closing </svg> tag");
         // No circles for an empty graph.
-        assert!(!svg.contains("<circle"), "empty graph should have no circles");
+        assert!(
+            !svg.contains("<circle"),
+            "empty graph should have no circles"
+        );
     }
 
     #[test]
@@ -322,7 +319,10 @@ mod tests {
         let exporter = SvgExporter::default();
         let svg = exporter.export(&graph);
 
-        assert!(svg.contains("<circle"), "single node should produce a <circle>");
+        assert!(
+            svg.contains("<circle"),
+            "single node should produce a <circle>"
+        );
     }
 
     #[test]
@@ -349,7 +349,10 @@ mod tests {
         let exporter = SvgExporter::default();
         let svg = exporter.export(&graph);
 
-        assert!(svg.contains("<line"), "edge should produce a <line> element");
+        assert!(
+            svg.contains("<line"),
+            "edge should produce a <line> element"
+        );
     }
 
     #[test]
@@ -409,7 +412,9 @@ mod tests {
 
         let exporter = SvgExporter::default();
         let path = "/tmp/maharit_test_export.svg";
-        exporter.export_to_file(&graph, path).expect("export_to_file failed");
+        exporter
+            .export_to_file(&graph, path)
+            .expect("export_to_file failed");
 
         let contents = std::fs::read_to_string(path).expect("file not found after export");
         assert!(contents.contains("<svg"), "exported file lacks <svg> tag");
@@ -444,7 +449,10 @@ mod tests {
         let exporter = SvgExporter::default();
         let svg = exporter.export(&graph);
 
-        assert!(svg.contains("Person"), "node label should appear in SVG text");
+        assert!(
+            svg.contains("Person"),
+            "node label should appear in SVG text"
+        );
     }
 
     #[test]

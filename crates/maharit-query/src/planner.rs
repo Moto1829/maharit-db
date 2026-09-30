@@ -441,7 +441,12 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
             vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
         }
         Statement::Return(rc) => {
-            vec![PlanNode::new("StandaloneReturn", 1, rc.items.len() as u64, "")]
+            vec![PlanNode::new(
+                "StandaloneReturn",
+                1,
+                rc.items.len() as u64,
+                "",
+            )]
         }
     };
 
@@ -517,7 +522,12 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
             vec![PlanNode::new("ProcedureCall", 1, 1, &pc.procedure)]
         }
         Statement::Return(rc) => {
-            vec![PlanNode::new("StandaloneReturn", 1, rc.items.len() as u64, "")]
+            vec![PlanNode::new(
+                "StandaloneReturn",
+                1,
+                rc.items.len() as u64,
+                "",
+            )]
         }
     };
 
@@ -1020,12 +1030,20 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             let start_label = if pp.start.labels.is_empty() {
                                 String::new()
                             } else {
-                                pp.start.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                                pp.start
+                                    .labels
+                                    .iter()
+                                    .map(|l| format!(":{}", l))
+                                    .collect::<String>()
                             };
                             let end_label = if end_node.labels.is_empty() {
                                 String::new()
                             } else {
-                                end_node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                                end_node
+                                    .labels
+                                    .iter()
+                                    .map(|l| format!(":{}", l))
+                                    .collect::<String>()
                             };
                             let edge_info = pp.segments[0]
                                 .edge
@@ -1074,7 +1092,11 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             let start_label = if pp.start.labels.is_empty() {
                                 String::new()
                             } else {
-                                pp.start.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                                pp.start
+                                    .labels
+                                    .iter()
+                                    .map(|l| format!(":{}", l))
+                                    .collect::<String>()
                             };
                             nodes.push(PlanNode::new(
                                 "NodeByLabelScan",
@@ -1981,13 +2003,17 @@ mod tests {
 
         // 10ノードが数値プロパティを持つ（Person ラベル）
         // 1ノードは age なし（null_count）
-        let hist = stats
-            .build_histogram(&graph, "Person", "age", 5)
-            .unwrap();
+        let hist = stats.build_histogram(&graph, "Person", "age", 5).unwrap();
 
         let total = hist.total_count();
-        assert_eq!(total, 10, "全バケットの合計件数は数値プロパティ件数と一致するべき");
-        assert_eq!(hist.null_count, 1, "null_count はプロパティなしのノード数と一致するべき");
+        assert_eq!(
+            total, 10,
+            "全バケットの合計件数は数値プロパティ件数と一致するべき"
+        );
+        assert_eq!(
+            hist.null_count, 1,
+            "null_count はプロパティなしのノード数と一致するべき"
+        );
     }
 
     #[test]
@@ -1995,12 +2021,13 @@ mod tests {
         let graph = make_histogram_graph();
         let stats = GraphStats::from_graph(&graph);
 
-        let hist = stats
-            .build_histogram(&graph, "Person", "age", 5)
-            .unwrap();
+        let hist = stats.build_histogram(&graph, "Person", "age", 5).unwrap();
 
         // 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 の 10 種類
-        assert_eq!(hist.distinct_count, 10, "distinct_count が正しく計算されるべき");
+        assert_eq!(
+            hist.distinct_count, 10,
+            "distinct_count が正しく計算されるべき"
+        );
     }
 
     #[test]
@@ -2033,10 +2060,7 @@ mod tests {
         let stats = GraphStats::from_graph(&graph);
 
         let hist = stats.build_histogram(&graph, "NonExistent", "age", 5);
-        assert!(
-            hist.is_none(),
-            "存在しないラベルの場合は None を返すべき"
-        );
+        assert!(hist.is_none(), "存在しないラベルの場合は None を返すべき");
     }
 
     #[test]

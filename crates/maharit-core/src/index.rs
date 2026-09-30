@@ -379,8 +379,14 @@ mod tests {
         // 旧ラベル "Person" でノード0は見つからない
         let persons: Vec<_> = index.get_nodes_by_label("Person").collect();
         assert_eq!(persons.len(), 1);
-        assert!(!persons.contains(&0), "旧ラベルで変更したノードは見つからないべき");
-        assert!(persons.contains(&1), "旧ラベルを持つ他のノードは見つかるべき");
+        assert!(
+            !persons.contains(&0),
+            "旧ラベルで変更したノードは見つからないべき"
+        );
+        assert!(
+            persons.contains(&1),
+            "旧ラベルを持つ他のノードは見つかるべき"
+        );
     }
 
     #[test]

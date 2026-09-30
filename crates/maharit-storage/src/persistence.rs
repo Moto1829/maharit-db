@@ -124,7 +124,11 @@ impl PersistentStorage {
             })
             .collect();
 
-        let snapshot = SSnapshot { nodes, edges, indexes };
+        let snapshot = SSnapshot {
+            nodes,
+            edges,
+            indexes,
+        };
 
         let encoded = bincode::serialize(&snapshot)
             .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
@@ -173,7 +177,11 @@ impl PersistentStorage {
             })
             .collect();
 
-        let snapshot = SSnapshot { nodes, edges, indexes: vec![] };
+        let snapshot = SSnapshot {
+            nodes,
+            edges,
+            indexes: vec![],
+        };
 
         let encoded = bincode::serialize(&snapshot)
             .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
@@ -509,7 +517,11 @@ impl PersistentStorage {
                 let days = i32::from_le_bytes(buf4);
                 reader.read_exact(&mut buf8)?;
                 let millis = i64::from_le_bytes(buf8);
-                Ok(PropertyValue::Duration { months, days, millis })
+                Ok(PropertyValue::Duration {
+                    months,
+                    days,
+                    millis,
+                })
             }
             t => Err(PersistenceError::CorruptedData(format!(
                 "unknown property type: {}",
@@ -778,13 +790,21 @@ mod tests {
         let loaded = PersistentStorage::load_concurrent(path).unwrap();
         assert_eq!(loaded.node_count(), 1);
 
-        let name = loaded.with_node(id, |n| n.properties.get("name").cloned()).unwrap();
-        let age  = loaded.with_node(id, |n| n.properties.get("age").cloned()).unwrap();
-        let active = loaded.with_node(id, |n| n.properties.get("active").cloned()).unwrap();
-        let score  = loaded.with_node(id, |n| n.properties.get("score").cloned()).unwrap();
+        let name = loaded
+            .with_node(id, |n| n.properties.get("name").cloned())
+            .unwrap();
+        let age = loaded
+            .with_node(id, |n| n.properties.get("age").cloned())
+            .unwrap();
+        let active = loaded
+            .with_node(id, |n| n.properties.get("active").cloned())
+            .unwrap();
+        let score = loaded
+            .with_node(id, |n| n.properties.get("score").cloned())
+            .unwrap();
 
         assert_eq!(name, Some(PropertyValue::String("Alice".to_string())));
-        assert_eq!(age,  Some(PropertyValue::Int(30)));
+        assert_eq!(age, Some(PropertyValue::Int(30)));
         assert_eq!(active, Some(PropertyValue::Bool(true)));
         if let Some(PropertyValue::Float(f)) = score {
             assert!((f - 9.5).abs() < 1e-6);
@@ -818,8 +838,10 @@ mod tests {
         assert_eq!(edge.label, "LINK");
         let src_labels = loaded.with_node(edge.from, |n| n.labels.clone()).unwrap();
         let dst_labels = loaded.with_node(edge.to, |n| n.labels.clone()).unwrap();
-        assert!(src_labels.contains(&"Src".to_string()) || dst_labels.contains(&"Src".to_string()),
-            "エッジの端点に Src ラベルが存在すること");
+        assert!(
+            src_labels.contains(&"Src".to_string()) || dst_labels.contains(&"Src".to_string()),
+            "エッジの端点に Src ラベルが存在すること"
+        );
 
         std::fs::remove_file(path).ok();
     }

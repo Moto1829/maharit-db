@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::http::Request as HttpRequest;
 use axum::{
     Json, Router,
     extract::State,
@@ -32,7 +33,6 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
     routing::{get, post},
 };
-use axum::http::Request as HttpRequest;
 use maharit_client::Client;
 use serde::{Deserialize, Serialize};
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
@@ -183,12 +183,10 @@ pub async fn serve(config: VizConfig) -> Result<(), std::io::Error> {
                 assets = %config.assets_dir.display(),
                 "maharit-viz listening (TLS)"
             );
-            let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &tls.cert_path,
-                &tls.key_path,
-            )
-            .await
-            .map_err(std::io::Error::other)?;
+            let rustls_cfg =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                    .await
+                    .map_err(std::io::Error::other)?;
             axum_server::bind_rustls(config.bind_address, rustls_cfg)
                 .serve(router.into_make_service())
                 .await?;
@@ -323,9 +321,7 @@ async fn query_handler(
             .into_response();
     }
 
-    let session_token = cookies
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string());
+    let session_token = cookies.get(SESSION_COOKIE).map(|c| c.value().to_string());
 
     let started = Instant::now();
     let result = run_query(&state.server_addr, &query, session_token).await;
@@ -392,10 +388,7 @@ async fn run_query(
 /// 保持した JSON 値に変換されているので、viz では型変換は行わない。
 fn build_columns_and_rows(
     rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
-) -> (
-    Vec<String>,
-    Vec<serde_json::Map<String, serde_json::Value>>,
-) {
+) -> (Vec<String>, Vec<serde_json::Map<String, serde_json::Value>>) {
     let mut columns: BTreeSet<String> = BTreeSet::new();
     for row in &rows {
         for k in row.keys() {

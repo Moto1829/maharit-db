@@ -301,10 +301,7 @@ impl Wal {
     /// its timestamp).
     ///
     /// Pass `after_timestamp = 0` to retrieve every record in the log.
-    pub fn read_all_for_incremental(
-        &self,
-        after_timestamp: u64,
-    ) -> (Vec<LogRecord>, Option<Lsn>) {
+    pub fn read_all_for_incremental(&self, after_timestamp: u64) -> (Vec<LogRecord>, Option<Lsn>) {
         let file = match File::open(&self.path) {
             Ok(f) => f,
             Err(_) => return (Vec::new(), None),
@@ -709,7 +706,11 @@ impl Wal {
                 writer.write_all(&[6u8])?;
                 writer.write_all(&ms.to_le_bytes())?;
             }
-            PropertyValue::Duration { months, days, millis } => {
+            PropertyValue::Duration {
+                months,
+                days,
+                millis,
+            } => {
                 writer.write_all(&[7u8])?;
                 writer.write_all(&months.to_le_bytes())?;
                 writer.write_all(&days.to_le_bytes())?;
@@ -763,7 +764,11 @@ impl Wal {
                 let days = i32::from_le_bytes(buf4);
                 reader.read_exact(&mut buf8)?;
                 let millis = i64::from_le_bytes(buf8);
-                Ok(PropertyValue::Duration { months, days, millis })
+                Ok(PropertyValue::Duration {
+                    months,
+                    days,
+                    millis,
+                })
             }
             t => Err(WalError::CorruptedLog(format!(
                 "unknown property type: {}",

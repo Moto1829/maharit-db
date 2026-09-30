@@ -97,7 +97,10 @@ impl DotExporter {
             format!(
                 "{}{}",
                 node.id,
-                node.labels.iter().map(|l| format!(":{}", l)).collect::<String>()
+                node.labels
+                    .iter()
+                    .map(|l| format!(":{}", l))
+                    .collect::<String>()
             )
         };
 
@@ -135,9 +138,9 @@ impl DotExporter {
                     s.clone()
                 }
             }
-            PropertyValue::Date(_) | PropertyValue::DateTime(_) | PropertyValue::Duration { .. } => {
-                v.to_string()
-            }
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::Duration { .. } => v.to_string(),
         }
     }
 

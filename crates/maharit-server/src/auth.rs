@@ -658,12 +658,7 @@ impl AclManager {
     /// 3. User-level `Allow`
     /// 4. Role-level `Allow`
     /// 5. Default → `Allow`
-    pub fn check(
-        &self,
-        username: &str,
-        role: Role,
-        resource: &AclResource,
-    ) -> AclPermission {
+    pub fn check(&self, username: &str, role: Role, resource: &AclResource) -> AclPermission {
         // Collect matching rules for this subject+resource combination.
         let matches_resource = |r: &AclResource| -> bool {
             match (r, resource) {
@@ -1036,7 +1031,11 @@ mod tests {
 
         // Load into a fresh manager
         let loaded = AuthManager::load_from_file(path).unwrap();
-        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+        let usernames: Vec<&str> = loaded
+            .list_users()
+            .iter()
+            .map(|u| u.username.as_str())
+            .collect();
 
         assert!(usernames.contains(&"admin"));
         assert!(usernames.contains(&"persisted_user"));
@@ -1086,7 +1085,11 @@ mod tests {
 
         // Loading it must include iris
         let loaded = AuthManager::load_from_file(&path).unwrap();
-        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+        let usernames: Vec<&str> = loaded
+            .list_users()
+            .iter()
+            .map(|u| u.username.as_str())
+            .collect();
         assert!(usernames.contains(&"iris"));
     }
 
@@ -1105,7 +1108,11 @@ mod tests {
 
         // Reload and verify jack is gone
         let loaded = AuthManager::load_from_file(&path).unwrap();
-        let usernames: Vec<&str> = loaded.list_users().iter().map(|u| u.username.as_str()).collect();
+        let usernames: Vec<&str> = loaded
+            .list_users()
+            .iter()
+            .map(|u| u.username.as_str())
+            .collect();
         assert!(!usernames.contains(&"jack"));
         assert!(usernames.contains(&"admin"));
         assert!(usernames.contains(&"admin2"));
@@ -1141,7 +1148,11 @@ mod tests {
     #[test]
     fn test_acl_default_allow_when_no_rules() {
         let mgr = AclManager::new();
-        let result = mgr.check("alice", Role::ReadOnly, &AclResource::Label("Secret".to_string()));
+        let result = mgr.check(
+            "alice",
+            Role::ReadOnly,
+            &AclResource::Label("Secret".to_string()),
+        );
         assert_eq!(result, AclPermission::Allow);
     }
 
@@ -1156,12 +1167,20 @@ mod tests {
 
         // bob is denied access to Secret label
         assert_eq!(
-            mgr.check("bob", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            mgr.check(
+                "bob",
+                Role::ReadWrite,
+                &AclResource::Label("Secret".to_string())
+            ),
             AclPermission::Deny
         );
         // alice is not affected
         assert_eq!(
-            mgr.check("alice", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            mgr.check(
+                "alice",
+                Role::ReadWrite,
+                &AclResource::Label("Secret".to_string())
+            ),
             AclPermission::Allow
         );
     }
@@ -1213,12 +1232,20 @@ mod tests {
 
         // mallory is denied despite the role-level Allow
         assert_eq!(
-            mgr.check("mallory", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            mgr.check(
+                "mallory",
+                Role::ReadWrite,
+                &AclResource::Label("Secret".to_string())
+            ),
             AclPermission::Deny
         );
         // other ReadWrite users still get Allow
         assert_eq!(
-            mgr.check("alice", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            mgr.check(
+                "alice",
+                Role::ReadWrite,
+                &AclResource::Label("Secret".to_string())
+            ),
             AclPermission::Allow
         );
     }
@@ -1250,7 +1277,11 @@ mod tests {
 
         // role-Deny beats user-Allow → Deny
         assert_eq!(
-            mgr.check("trusted", Role::ReadOnly, &AclResource::Label("Internal".to_string())),
+            mgr.check(
+                "trusted",
+                Role::ReadOnly,
+                &AclResource::Label("Internal".to_string())
+            ),
             AclPermission::Deny
         );
     }
@@ -1266,7 +1297,11 @@ mod tests {
 
         // ReadOnly is denied on any label
         assert_eq!(
-            mgr.check("alice", Role::ReadOnly, &AclResource::Label("Public".to_string())),
+            mgr.check(
+                "alice",
+                Role::ReadOnly,
+                &AclResource::Label("Public".to_string())
+            ),
             AclPermission::Deny
         );
         assert_eq!(
@@ -1296,7 +1331,11 @@ mod tests {
 
         // After removing the deny rule, default Allow applies
         assert_eq!(
-            mgr.check("bob", Role::ReadWrite, &AclResource::Label("Secret".to_string())),
+            mgr.check(
+                "bob",
+                Role::ReadWrite,
+                &AclResource::Label("Secret".to_string())
+            ),
             AclPermission::Allow
         );
     }

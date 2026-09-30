@@ -26,10 +26,10 @@
 use std::sync::OnceLock;
 
 use tracing::Level as TracingLevel;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 // ---------------------------------------------------------------------------
 // Global initialisation guard – only the first call to TracingConfig::init
@@ -94,8 +94,8 @@ impl TracingConfig {
 
         // Only initialise once across the entire process lifetime.
         TRACING_INITIALISED.get_or_init(|| {
-            let filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"));
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
             // JSON formatter layer writing to stderr.
             let json_layer = fmt::layer()
@@ -212,10 +212,7 @@ mod tests {
             service_name: "my-service".to_string(),
         };
         assert!(!cfg.enabled);
-        assert_eq!(
-            cfg.otlp_endpoint.as_deref(),
-            Some("http://localhost:4317")
-        );
+        assert_eq!(cfg.otlp_endpoint.as_deref(), Some("http://localhost:4317"));
         assert_eq!(cfg.service_name, "my-service");
     }
 
@@ -277,10 +274,7 @@ mod tests {
             service_name: "svc".to_string(),
         };
         let guard = cfg.init();
-        assert_eq!(
-            guard.otlp_endpoint.as_deref(),
-            Some("http://otel:4317")
-        );
+        assert_eq!(guard.otlp_endpoint.as_deref(), Some("http://otel:4317"));
     }
 
     // ------------------------------------------------------------------
@@ -356,11 +350,7 @@ mod tests {
     #[test]
     fn test_tracing_event_fields() {
         // Verify various field types compile and run without panic.
-        tracing::info!(
-            query_len = 42usize,
-            peer = "127.0.0.1",
-            "handle request"
-        );
+        tracing::info!(query_len = 42usize, peer = "127.0.0.1", "handle request");
         tracing::warn!(error_code = 404u32, "not found");
         tracing::error!(cause = "timeout", "connection failed");
     }

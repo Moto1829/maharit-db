@@ -215,7 +215,13 @@ impl Repl {
         for node in self.graph.nodes() {
             print!("  ({}", node.id);
             if !node.labels.is_empty() {
-                print!("{}", node.labels.iter().map(|l| format!(":{}", l)).collect::<String>());
+                print!(
+                    "{}",
+                    node.labels
+                        .iter()
+                        .map(|l| format!(":{}", l))
+                        .collect::<String>()
+                );
             }
             if !node.properties.is_empty() {
                 print!(" {{");
