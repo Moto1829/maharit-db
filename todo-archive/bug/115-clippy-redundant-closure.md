@@ -15,10 +15,16 @@ error: redundant closure
 
 ## 修正内容
 
-- [ ] 2 箇所を `.any(Self::is_aggregate)` に置き換える
-- [ ] `cargo clippy --all-targets -- -D warnings` がワークスペース全体で通ることを確認（maharit-query 以降のクレートで別の警告が出ないかも確認）
-- [ ] `cargo fmt --all -- --check` も通ることを確認
+- [x] 2 箇所を `.any(Self::is_aggregate)` に置き換える
+- [x] `cargo clippy --all-targets -- -D warnings` がワークスペース全体で通ることを確認（maharit-query 以降のクレートで別の警告が出ないかも確認）
+- [x] `cargo fmt --all -- --check` も通ることを確認
 
 ## 再発防止
 
 CI で clippy / fmt を実行する（`todo/e2e/77-ci-e2e-pipeline.md` の lint job）。
+
+## 完了内容 (2026-09-30)
+
+- executor.rs の 2 箇所を `.any(Self::is_aggregate)` に修正
+- 追加で見つかった `examples/traversal.rs` の `manual_abs_diff` を `goal.abs_diff(current)` に修正
+- `cargo fmt --all -- --check` はワークスペース全体で差分があったため、別コミット（style: cargo fmt）で整形

@@ -2111,7 +2111,7 @@ impl<'a> Executor<'a> {
             .return_clause
             .items
             .iter()
-            .any(|item| Self::is_aggregate(item));
+            .any(Self::is_aggregate);
 
         let early_limit: Option<usize> =
             if !has_aggregation && m.return_clause.order_by.is_none() {
@@ -3282,7 +3282,7 @@ impl<'a> Executor<'a> {
         let has_aggregation = return_clause
             .items
             .iter()
-            .any(|item| Self::is_aggregate(item));
+            .any(Self::is_aggregate);
 
         if has_aggregation {
             return self.build_aggregated_result_set(return_clause, bindings_list);

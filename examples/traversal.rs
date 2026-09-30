@@ -240,11 +240,7 @@ fn main() {
         |current, goal| {
             // Heuristic based on node ID difference (just for demonstration)
             // This is admissible if IDs are roughly ordered by distance
-            let diff = if goal > current {
-                goal - current
-            } else {
-                current - goal
-            };
+            let diff = goal.abs_diff(current);
             diff as f64 * 0.5 // Scale factor to keep it admissible
         },
     );
