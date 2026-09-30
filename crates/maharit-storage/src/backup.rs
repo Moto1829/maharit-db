@@ -1376,6 +1376,7 @@ impl BackupScheduler {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -1569,7 +1570,7 @@ mod tests {
 
         let result = Backup::verify(&path);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         std::fs::remove_file(path).ok();
     }

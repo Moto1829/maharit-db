@@ -21,7 +21,7 @@ cargo test -- --nocapture            # println! を表示
 
 # Lint / フォーマット
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings   # --workspace 必須（無いとルートパッケージしか検査されない）
 
 # REPL（対話モード）
 cargo run -p maharit-server

@@ -6228,6 +6228,7 @@ impl<'a> Executor<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
     use crate::parser::Parser;

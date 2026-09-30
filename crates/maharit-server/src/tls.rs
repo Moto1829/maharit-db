@@ -112,7 +112,7 @@ pub enum ProtocolVersion {
 impl ProtocolVersion {
     /// Convert to rustls protocol version
     #[cfg(test)]
-    fn to_rustls(&self) -> &'static rustls::SupportedProtocolVersion {
+    fn to_rustls(self) -> &'static rustls::SupportedProtocolVersion {
         match self {
             ProtocolVersion::Tls12 => &rustls::version::TLS12,
             ProtocolVersion::Tls13 => &rustls::version::TLS13,

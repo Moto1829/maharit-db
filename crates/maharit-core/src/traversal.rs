@@ -1175,10 +1175,10 @@ mod tests {
         let b = graph.create_node("B");
         let c = graph.create_node("C");
         let d = graph.create_node("D");
-        graph.create_edge(a, b, "E");
-        graph.create_edge(b, c, "E");
-        graph.create_edge(b, d, "E");
-        graph.create_edge(d, c, "E");
+        graph.create_edge(a, b, "E").unwrap();
+        graph.create_edge(b, c, "E").unwrap();
+        graph.create_edge(b, d, "E").unwrap();
+        graph.create_edge(d, c, "E").unwrap();
 
         let paths = all_paths(&graph, a, c, None);
         assert_eq!(paths.len(), 2);
@@ -1216,10 +1216,10 @@ mod tests {
         let b = graph.create_node("B");
         let c = graph.create_node("C");
         let d = graph.create_node("D");
-        graph.create_edge(a, b, "E");
-        graph.create_edge(b, c, "E");
-        graph.create_edge(c, d, "E");
-        graph.create_edge(a, d, "E");
+        graph.create_edge(a, b, "E").unwrap();
+        graph.create_edge(b, c, "E").unwrap();
+        graph.create_edge(c, d, "E").unwrap();
+        graph.create_edge(a, d, "E").unwrap();
 
         // max_depth=1: only A->D (1 hop)
         let paths = all_paths(&graph, a, d, Some(1));
@@ -1238,9 +1238,9 @@ mod tests {
         let a = graph.create_node("A");
         let b = graph.create_node("B");
         let c = graph.create_node("C");
-        graph.create_edge(a, b, "E");
-        graph.create_edge(b, a, "E"); // cycle
-        graph.create_edge(b, c, "E");
+        graph.create_edge(a, b, "E").unwrap();
+        graph.create_edge(b, a, "E").unwrap(); // cycle
+        graph.create_edge(b, c, "E").unwrap();
 
         // Should find A->B->C and not loop infinitely
         let paths = all_paths(&graph, a, c, None);

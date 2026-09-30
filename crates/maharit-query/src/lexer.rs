@@ -651,6 +651,7 @@ impl<'a> Lexer<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
 

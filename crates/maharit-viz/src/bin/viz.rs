@@ -104,10 +104,10 @@ fn main() -> ExitCode {
     config.require_auth = if auth_flag {
         true
     } else {
-        match std::env::var("MAHARIT_VIZ_AUTH").ok().as_deref() {
-            Some("1") | Some("true") | Some("TRUE") | Some("yes") => true,
-            _ => false,
-        }
+        matches!(
+            std::env::var("MAHARIT_VIZ_AUTH").ok().as_deref(),
+            Some("1" | "true" | "TRUE" | "yes")
+        )
     };
 
     // TLS: CLI フラグ優先、なければ環境変数。

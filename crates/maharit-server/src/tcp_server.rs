@@ -972,12 +972,11 @@ async fn handle_connection(
                 // Report replication status (role, node id, current LSN, follower
                 // count, leader liveness) when this node participates in
                 // replication as a follower or leader.
-                let replication_status = if let Some(f) = follower.as_ref() {
-                    Some(ReplicationStatus::from(f.get_stats()))
-                } else if let Some(l) = replication.as_ref() {
-                    Some(ReplicationStatus::from(l.get_stats()))
-                } else {
-                    None
+                let replication_status = match follower.as_ref() {
+                    Some(f) => Some(ReplicationStatus::from(f.get_stats())),
+                    None => replication
+                        .as_ref()
+                        .map(|l| ReplicationStatus::from(l.get_stats())),
                 };
                 Response::Stats {
                     connections: stats.current_connections.load(Ordering::SeqCst),
@@ -1579,6 +1578,7 @@ async fn emit_wal_diff(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
 
@@ -2676,17 +2676,14 @@ mod tests {
                         tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
                             .await;
 
-                    match stream {
-                        Ok(Ok(mut s)) => {
-                            // 接続できた場合は Ping を送って生存確認
-                            let resp = send_recv(&mut s, &Request::Ping).await;
-                            assert!(
-                                matches!(resp, Response::Pong),
-                                "client #{i} got unexpected response: {resp:?}"
-                            );
-                        }
-                        // タイムアウトや接続拒否は許容（制限超過時の想定動作）
-                        Ok(Err(_)) | Err(_) => {}
+                    // タイムアウトや接続拒否は許容（制限超過時の想定動作）
+                    if let Ok(Ok(mut s)) = stream {
+                        // 接続できた場合は Ping を送って生存確認
+                        let resp = send_recv(&mut s, &Request::Ping).await;
+                        assert!(
+                            matches!(resp, Response::Pong),
+                            "client #{i} got unexpected response: {resp:?}"
+                        );
                     }
                 })
             })

@@ -28,3 +28,16 @@ CI で clippy / fmt を実行する（`todo/e2e/77-ci-e2e-pipeline.md` の lint 
 - executor.rs の 2 箇所を `.any(Self::is_aggregate)` に修正
 - 追加で見つかった `examples/traversal.rs` の `manual_abs_diff` を `goal.abs_diff(current)` に修正
 - `cargo fmt --all -- --check` はワークスペース全体で差分があったため、別コミット（style: cargo fmt）で整形
+
+### 追補: `--workspace` 指定での残り 27 件 (2026-09-30)
+
+ルートで `cargo clippy --all-targets` を実行するとルートパッケージ（と依存 lib）しか検査されず、
+各クレートの bin / テストの警告が見逃されていた。`--workspace` で検出した 27 件を修正:
+
+- traversal.rs テスト: `create_edge` の未使用 `Result` → `.unwrap()`（11 件）
+- `approx_constant`（3.14 はリテラルのテストデータ）→ 各テストモジュールに `#[allow]`（executor / lexer / tcp_server / backup / persistence）
+- backup.rs: `assert_eq!(x, true)` → `assert!(x)`
+- tcp_server.rs: `Option::map` 手書き、単一パターン `match` → `if let`
+- tls.rs: `to_rustls(&self)` → `to_rustls(self)`（Copy 型）
+- viz.rs: `match` → `matches!`
+- CLAUDE.md の lint コマンドを `cargo clippy --workspace --all-targets -- -D warnings` に修正
