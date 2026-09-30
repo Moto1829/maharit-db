@@ -16,7 +16,7 @@ use maharit_core::{ConcurrentGraph, Graph, PropertyValue};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 use tokio::time::{interval, timeout};
 
 use crate::mutation_log::property_value_to_wal_string;
@@ -208,6 +208,16 @@ async fn send_message<W: AsyncWriteExt + Unpin>(
 /// an attacker could put in the u32 length prefix.
 const MAX_REPLICATION_MESSAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
+/// Per-follower WAL queue capacity. When full, `append_wal_entry` waits
+/// (backpressure) instead of dropping entries.
+const WAL_QUEUE_CAPACITY: usize = 1024;
+
+/// How long `append_wal_entry` waits for a follower with a full queue before
+/// disconnecting it.
+pub const WAL_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+type WalSubscribers = Arc<AsyncMutex<Vec<mpsc::Sender<(u64, WalEntryData)>>>>;
+
 /// Read a length-prefixed JSON message from an async reader
 async fn recv_message<R: AsyncReadExt + Unpin>(
     reader: &mut R,
@@ -238,7 +248,7 @@ fn current_timestamp() -> u64 {
 
 /// Manages outbound replication on the leader node.
 ///
-/// Accepts follower connections on a dedicated TCP port, broadcasts WAL entries
+/// Accepts follower connections on a dedicated TCP port, streams WAL entries
 /// to all connected followers, and sends periodic heartbeats.
 pub struct LeaderReplicationManager {
     config: ReplicationConfig,
@@ -248,8 +258,9 @@ pub struct LeaderReplicationManager {
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
     /// Set to `true` to request an orderly shutdown
     shutdown: Arc<AtomicBool>,
-    /// Channel used to broadcast (lsn, entry) to all follower handler tasks
-    wal_sender: broadcast::Sender<(u64, WalEntryData)>,
+    /// Per-follower WAL queues (one bounded channel per authenticated
+    /// follower handler).
+    wal_subscribers: WalSubscribers,
     /// Optional graph reference for sending full snapshots to new followers.
     graph: Option<Arc<RwLock<Graph>>>,
 }
@@ -260,39 +271,61 @@ impl LeaderReplicationManager {
     /// # Panics
     /// Does not panic; errors are surfaced through `start()`.
     pub fn new(config: ReplicationConfig) -> Self {
-        // A buffer of 1024 unacknowledged WAL entries before the channel blocks.
-        let (wal_sender, _) = broadcast::channel(1024);
         Self {
             config,
             lsn: Arc::new(AtomicU64::new(0)),
             followers: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
-            wal_sender,
+            wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: None,
         }
     }
 
     /// Create a leader manager with a graph reference for initial snapshot sync.
     pub fn with_graph(config: ReplicationConfig, graph: Arc<RwLock<Graph>>) -> Self {
-        let (wal_sender, _) = broadcast::channel(1024);
         Self {
             config,
             lsn: Arc::new(AtomicU64::new(0)),
             followers: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
-            wal_sender,
+            wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: Some(graph),
         }
     }
 
-    /// Append a WAL entry and broadcast it to all connected followers.
+    /// Append a WAL entry and stream it to every connected follower.
     ///
-    /// Increments and returns the new log sequence number.  If no followers are
-    /// connected the broadcast is a no-op (receivers count may be zero).
+    /// Increments and returns the new log sequence number. Delivery applies
+    /// backpressure: if a follower's queue is full this waits for it to drain,
+    /// so bursts larger than the queue (e.g. one statement touching thousands
+    /// of elements) are never dropped. A follower that does not drain within
+    /// [`WAL_SEND_TIMEOUT`] is disconnected (and logged) rather than silently
+    /// left behind. Entries are delivered in LSN order.
     pub async fn append_wal_entry(&self, entry: WalEntryData) -> u64 {
+        // Holding the subscriber lock across assignment and delivery keeps
+        // LSN order identical to delivery order for concurrent callers.
+        let mut subscribers = self.wal_subscribers.lock().await;
         let new_lsn = self.lsn.fetch_add(1, Ordering::SeqCst) + 1;
-        // It is fine if there are no subscribers yet.
-        let _ = self.wal_sender.send((new_lsn, entry));
+        let mut alive = Vec::with_capacity(subscribers.len());
+        for tx in subscribers.drain(..) {
+            match timeout(WAL_SEND_TIMEOUT, tx.send((new_lsn, entry.clone()))).await {
+                Ok(Ok(())) => alive.push(tx),
+                // Handler already gone (follower disconnected).
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    tracing::error!(
+                        lsn = new_lsn,
+                        "replication: follower did not drain its WAL queue within {:?}, dropping it",
+                        WAL_SEND_TIMEOUT
+                    );
+                    eprintln!(
+                        "Replication: follower too slow (WAL queue full for {:?}); disconnecting",
+                        WAL_SEND_TIMEOUT
+                    );
+                }
+            }
+        }
+        *subscribers = alive;
         new_lsn
     }
 
@@ -340,7 +373,7 @@ impl LeaderReplicationManager {
         let lsn = Arc::clone(&self.lsn);
         let followers = Arc::clone(&self.followers);
         let shutdown = Arc::clone(&self.shutdown);
-        let wal_sender = self.wal_sender.clone();
+        let wal_subscribers = Arc::clone(&self.wal_subscribers);
         let graph = self.graph.clone();
 
         tokio::spawn(async move {
@@ -357,12 +390,18 @@ impl LeaderReplicationManager {
                         let lsn2 = Arc::clone(&lsn);
                         let followers2 = Arc::clone(&followers);
                         let shutdown2 = Arc::clone(&shutdown);
-                        let wal_rx = wal_sender.subscribe();
+                        let wal_subscribers2 = Arc::clone(&wal_subscribers);
                         let graph2 = graph.clone();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_follower_connection(
-                                socket, config2, lsn2, followers2, shutdown2, wal_rx, graph2,
+                                socket,
+                                config2,
+                                lsn2,
+                                followers2,
+                                shutdown2,
+                                wal_subscribers2,
+                                graph2,
                             )
                             .await
                             {
@@ -447,7 +486,7 @@ async fn handle_follower_connection(
     lsn: Arc<AtomicU64>,
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
     shutdown: Arc<AtomicBool>,
-    mut wal_rx: broadcast::Receiver<(u64, WalEntryData)>,
+    wal_subscribers: WalSubscribers,
     graph: Option<Arc<RwLock<Graph>>>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = socket.into_split();
@@ -500,6 +539,11 @@ async fn handle_follower_connection(
         },
     )
     .await?;
+
+    // Subscribe to the WAL only after the follower authenticated, so an
+    // unauthenticated peer can never exert backpressure on the leader.
+    let (wal_tx, mut wal_rx) = mpsc::channel(WAL_QUEUE_CAPACITY);
+    wal_subscribers.lock().await.push(wal_tx);
 
     // If the follower has no data (LSN == 0), send a full snapshot.
     if follower_lsn == 0
@@ -567,7 +611,7 @@ async fn handle_follower_connection(
             // New WAL entry to forward
             entry_result = wal_rx.recv() => {
                 match entry_result {
-                    Ok((entry_lsn, entry_data)) => {
+                    Some((entry_lsn, entry_data)) => {
                         let wal_msg = ReplicationMessage::WalEntry {
                             lsn: entry_lsn,
                             entry: entry_data,
@@ -577,14 +621,9 @@ async fn handle_follower_connection(
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // Entries were skipped: continuing would leave the
-                        // follower silently diverged, so drop it instead.
-                        tracing::error!(follower = %follower_id, skipped = n, "replication: follower lagged behind the WAL buffer, dropping follower");
-                        eprintln!("Follower {} lagged by {} entries; disconnecting", follower_id, n);
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
+                    None => {
+                        // The leader dropped this follower's queue (too slow).
+                        tracing::warn!(follower = %follower_id, "replication: WAL queue closed by leader, dropping follower");
                         break;
                     }
                 }
@@ -1956,6 +1995,61 @@ mod tests {
             Ok(ReplicationMessage::WalEntry { lsn: 2, .. })
         ));
         assert_eq!(leader.get_follower_count(), 1);
+    }
+
+    /// A single burst far larger than the per-follower queue (e.g. one
+    /// statement creating thousands of elements) must not drop entries: the
+    /// old broadcast channel overflowed at 1024 and the follower silently
+    /// missed data (found by the randomized leader/follower diff test).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_wal_burst_larger_than_queue_is_not_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+        let leader = LeaderReplicationManager::new(ReplicationConfig::default());
+        leader.start_with_listener(listener).await.unwrap();
+
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+        let follower = FollowerReplicationManager::with_concurrent_graph(
+            ReplicationConfig {
+                role: NodeRole::Follower,
+                node_id: "f-overflow".to_string(),
+                replication_bind_address: "127.0.0.1:0".to_string(),
+                leader_address: Some(leader_addr.to_string()),
+                heartbeat_interval_secs: 1,
+                heartbeat_timeout_secs: 5,
+                shared_secret: None,
+            },
+            Arc::clone(&follower_graph),
+        );
+        follower.start().await.unwrap();
+        for _ in 0..50 {
+            if leader.get_follower_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let n = (WAL_QUEUE_CAPACITY * 5) as u64;
+        for id in 0..n {
+            leader
+                .append_wal_entry(WalEntryData::CreateNode {
+                    node_id: id,
+                    labels: vec!["B".to_string()],
+                })
+                .await;
+        }
+        for _ in 0..200 {
+            if follower_graph.node_count() as u64 == n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(follower_graph.node_count() as u64, n);
+        assert_eq!(
+            leader.get_follower_count(),
+            1,
+            "follower must stay connected"
+        );
     }
 
     /// A burst of WAL entries must all reach a real follower. The leader used to
