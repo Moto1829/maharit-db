@@ -2678,7 +2678,7 @@ impl<'a> Executor<'a> {
                 .into_iter()
                 .map(|row| {
                     let mut new_binding = Bindings::new();
-                    for (col, value) in col_names.iter().zip(row.columns.into_iter()) {
+                    for (col, value) in col_names.iter().zip(row.columns) {
                         match value {
                             Value::Node(id) | Value::NodeData { id, .. } => {
                                 new_binding.insert(Arc::from(col.as_str()), BindingValue::Node(id));

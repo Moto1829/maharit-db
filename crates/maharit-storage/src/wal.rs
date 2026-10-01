@@ -782,12 +782,22 @@ impl Wal {
 mod tests {
     use super::*;
 
+    /// Unique per call: tests run in parallel threads and the clock alone is
+    /// not enough (macOS timestamps have microsecond resolution, so two tests
+    /// starting together got the same file and corrupted each other's WAL).
     fn temp_path() -> PathBuf {
-        let id = std::time::SystemTime::now()
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        PathBuf::from(format!("/tmp/maharit_wal_test_{}.wal", id))
+        std::env::temp_dir().join(format!(
+            "maharit_wal_test_{}_{}_{}.wal",
+            std::process::id(),
+            seq,
+            nanos
+        ))
     }
 
     #[test]

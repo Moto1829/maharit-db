@@ -1,5 +1,5 @@
 # CI とローカルで同じ Rust を使う（新しい stable の lint で CI が突然壊れないように）。
 # 上げるときはこのファイルと .github/workflows/test.yml の dtolnay/rust-toolchain@<版> を同時に更新する。
 [toolchain]
-channel = "1.93.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

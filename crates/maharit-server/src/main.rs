@@ -127,7 +127,7 @@ fn run_server(args: &[String]) {
             "--port" | "-p" => {
                 if i + 1 < args.len() {
                     let host = config.bind_address.split(':').next().unwrap_or("127.0.0.1");
-                    config.bind_address = format!("{}:{}", host, &args[i + 1]);
+                    config.bind_address = format!("{}:{}", host, args[i + 1]);
                     i += 1;
                 }
             }
@@ -801,11 +801,9 @@ fn run_admin_promote(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--addr" | "-a" => {
-                if i + 1 < args.len() {
-                    addr = Some(args[i + 1].clone());
-                    i += 1;
-                }
+            "--addr" | "-a" if i + 1 < args.len() => {
+                addr = Some(args[i + 1].clone());
+                i += 1;
             }
             _ => {}
         }
