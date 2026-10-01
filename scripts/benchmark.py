@@ -482,6 +482,9 @@ def save_json_report(all_results: list[BenchResult], args, output_path: str):
 
 def check_docker_compose() -> None:
     """docker-compose.yml の maharit-db-server が起動中か確認する。"""
+    # CI やローカルプロセスで起動したサーバーに対して実行する場合は確認しない
+    if os.environ.get("MAHARIT_E2E_LOCAL"):
+        return
     try:
         result = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],

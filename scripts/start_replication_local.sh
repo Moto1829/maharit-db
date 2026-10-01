@@ -69,8 +69,20 @@ echo "リーダー起動中... (port 7687, replication-bind 127.0.0.1:7688)"
     > /tmp/maharit_leader.log 2>&1 &
 echo $! >> "$PIDFILE"
 
-# リーダーが起動するまで待機
-sleep 1
+# リーダーが起動するまで待機（ポートが開くまで最大 30 秒）
+wait_port() {
+    local port=$1
+    for _ in $(seq 1 60); do
+        if python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $port), 1)" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "エラー: port $port が開きません"
+    return 1
+}
+wait_port 7687
+wait_port 7688
 
 # ── フォロワー1 起動 ───────────────────────────────────────────────────────────
 echo "フォロワー1 起動中... (port 7689)"
@@ -95,8 +107,36 @@ echo "フォロワー2 起動中... (port 7690)"
 echo $! >> "$PIDFILE"
 
 # ── 起動完了待機 ──────────────────────────────────────────────────────────────
+# 固定 sleep だと遅い環境（CI）でフォロワー接続前にテストが始まるため、
+# リーダーの stats でフォロワー 2 台の接続を確認するまで待つ（最大 30 秒）。
 echo "起動完了を待機中..."
-sleep 2
+wait_port 7689
+wait_port 7690
+python3 - <<'PY' || { echo "エラー: フォロワーがリーダーに接続しません"; tail -20 /tmp/maharit_follower1.log /tmp/maharit_follower2.log; exit 1; }
+import json, socket, struct, sys, time
+
+def stats():
+    s = socket.create_connection(("127.0.0.1", 7687), 2)
+    body = json.dumps({"type": "stats"}).encode()
+    s.sendall(struct.pack(">I", len(body)) + body)
+    n = struct.unpack(">I", s.recv(4))[0]
+    data = b""
+    while len(data) < n:
+        data += s.recv(n - len(data))
+    s.close()
+    return json.loads(data)
+
+deadline = time.time() + 30
+while time.time() < deadline:
+    try:
+        repl = stats().get("replication") or {}
+        if repl.get("follower_count", 0) >= 2:
+            sys.exit(0)
+    except OSError:
+        pass
+    time.sleep(0.5)
+sys.exit(1)
+PY
 
 echo ""
 echo "クラスター起動完了"

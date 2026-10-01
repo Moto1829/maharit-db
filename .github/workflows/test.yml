@@ -1,0 +1,95 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'todo/**'
+      - 'todo-archive/**'
+      - '**.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'todo/**'
+      - 'todo-archive/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (workspace)
+        # --workspace is required: the root Cargo.toml is also a package, so
+        # without it only the root package's targets are linted.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (workspace)
+        # Includes the leader/follower differential test, the concurrency
+        # stress test and the Cypher conformance table.
+        run: cargo test --workspace
+      - name: Soak — replication diff (30 seeds) and stress (10 seeds)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          MAHARIT_DIFF_SEEDS=$(seq -s, 1 30) \
+            cargo test -p maharit-server leader_and_follower_converge
+          for seed in $(seq 1 10); do
+            MAHARIT_STRESS_SEED=$seed MAHARIT_STRESS_OPS=300 \
+              cargo test -p maharit-server concurrent_mixed_workload
+          done
+
+  e2e:
+    name: E2E (single server + replication cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build release binary
+        run: cargo build --release -p maharit-server
+      - name: Run E2E suites
+        # Replication runs 3 times: a flaky failure is treated as a bug.
+        env:
+          E2E_LOG_DIR: ${{ runner.temp }}/maharit-e2e
+        run: bash scripts/run_e2e_local.sh --replication-runs 3
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/maharit-e2e
+          retention-days: 7

@@ -324,6 +324,9 @@ def test_property_index(client: MaharitClient):
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
 def check_docker_compose() -> None:
+    # CI やローカルプロセスで起動したサーバーに対して実行する場合は確認しない
+    if os.environ.get("MAHARIT_E2E_LOCAL"):
+        return
     try:
         result = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],

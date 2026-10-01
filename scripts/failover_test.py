@@ -291,6 +291,9 @@ def _port_open(host: str, port: int) -> bool:
 def check_docker_compose() -> None:
     """docker-compose.replication.yml のコンテナ群、またはローカルプロセスが
     起動中か確認する。"""
+    # CI やローカルプロセスで起動したサーバーに対して実行する場合は確認しない
+    if os.environ.get("MAHARIT_E2E_LOCAL"):
+        return
     required = {"maharit-leader", "maharit-follower1", "maharit-follower2"}
     running: set = set()
     try:
