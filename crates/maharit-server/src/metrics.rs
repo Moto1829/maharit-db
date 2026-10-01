@@ -74,13 +74,10 @@ fn linux_memory_usage() -> u64 {
     // Read from /proc/self/status
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
-            if line.starts_with("VmRSS:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Ok(kb) = parts[1].parse::<u64>() {
-                        return kb * 1024; // Convert kB to bytes
-                    }
-                }
+            if let Some(rest) = line.strip_prefix("VmRSS:")
+                && let Some(Ok(kb)) = rest.split_whitespace().next().map(str::parse::<u64>)
+            {
+                return kb * 1024; // Convert kB to bytes
             }
         }
     }
