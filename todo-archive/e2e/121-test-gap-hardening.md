@@ -69,4 +69,7 @@
 `MAHARIT_STRESS_SEED` / `MAHARIT_STRESS_OPS` で再現・負荷調整。30 seeds × 300 ops 全通過。
 bug/114 修正前のコードでは索引の不一致を検出することを確認。
 
-残り: 5（CI, task 77）
+### 5. CI — 完了 (2026-10-01, task 77)
+上記テストはすべて GitHub Actions で PR / main push ごとに実行される。E2E のレプリケーションは 3 回実行し、フレークを不具合として扱う。
+
+**全項目完了。**

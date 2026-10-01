@@ -39,7 +39,17 @@ cargo run --example basic
 cargo run --example traversal
 ```
 
+### CI
+
+`.github/workflows/test.yml`: PR / main push で fmt・clippy（`--workspace`）・`cargo test --workspace`・E2E を実行。
+Rust は `rust-toolchain.toml` で固定（上げる時はワークフローの `dtolnay/rust-toolchain@<版>` も同時に更新）。
+Linux 専用コード（`cfg(target_os = "linux")`）は macOS の clippy では検査されない点に注意。
+
 ### E2E テスト（Python スクリプト）
+
+CI と同じ E2E 一式は Docker なしで `bash scripts/run_e2e_local.sh`（要 `cargo build --release -p maharit-server`）。
+個別に実行する場合、Docker を使わず手元で起動したサーバーに対しては `MAHARIT_E2E_LOCAL=1` を付ける。
+
 
 `scripts/` 配下の Python スクリプトは TCP プロトコル（4 バイト長プレフィックス + JSON）で稼働中サーバーに接続して検証する。**事前にサーバーを起動しておく必要がある**。
 
