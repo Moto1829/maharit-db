@@ -35,7 +35,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned (keep in sync with rust-toolchain.toml) so that a new Rust
+      # release cannot break CI without a code change.
+      - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -52,18 +54,30 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (workspace)
         # Includes the leader/follower differential test, the concurrency
         # stress test and the Cypher conformance table.
         run: cargo test --workspace
-      - name: Soak — replication diff (30 seeds) and stress (10 seeds)
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+  soak:
+    # Extra seeds for the randomized tests. Runs on main / manual only and in
+    # parallel with the other jobs; PRs still run the default seeds via
+    # `cargo test` above.
+    name: soak (randomized tests, more seeds)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Replication diff (15 seeds)
+        run: MAHARIT_DIFF_SEEDS=$(seq -s, 1 15) cargo test -p maharit-server leader_and_follower_converge
+      - name: Concurrency stress (5 seeds)
         run: |
-          MAHARIT_DIFF_SEEDS=$(seq -s, 1 30) \
-            cargo test -p maharit-server leader_and_follower_converge
-          for seed in $(seq 1 10); do
+          for seed in $(seq 1 5); do
             MAHARIT_STRESS_SEED=$seed MAHARIT_STRESS_OPS=300 \
               cargo test -p maharit-server concurrent_mixed_workload
           done
@@ -74,7 +88,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:

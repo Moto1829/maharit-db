@@ -217,11 +217,8 @@ pub mod temporal {
     /// "YYYY-MM-DDTHH:MM:SS[.fff][Z]" 文字列を Unix ミリ秒に変換
     pub fn parse_datetime(s: &str) -> Option<i64> {
         let s = s.trim_end_matches('Z');
-        let (date_part, time_part) = if let Some(pos) = s.find('T') {
-            (&s[..pos], &s[pos + 1..])
-        } else {
-            return None;
-        };
+        let pos = s.find('T')?;
+        let (date_part, time_part) = (&s[..pos], &s[pos + 1..]);
         let days = parse_date(date_part)?;
         let time_parts: Vec<&str> = time_part.split(':').collect();
         if time_parts.len() < 2 {
