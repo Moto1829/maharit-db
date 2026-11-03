@@ -145,10 +145,42 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 
 ## バージョニング・リリース
 
-- セマンティックバージョニング。現在 `0.x.y`（unstable）。0.x の間は BREAKING でも MINOR を上げる（`cliff.toml` の `[bump]`）。
-- バージョンはルート `Cargo.toml` の `[workspace.package] version` でのみ管理（workspace 継承）。`maharit --version` で確認できる。
-- Conventional Commits: `feat` → MINOR、`fix` / `perf` → PATCH、`feat!` または `BREAKING CHANGE` → MAJOR。コミットメッセージがそのまま CHANGELOG / リリースノートになる（`todo:` / `docs(todo)` / `chore(todo)` / `style:` は除外）。
-- タグは `vX.Y.Z` / `vX.Y.Z-rc.N`（`alpha` / `beta` も可）。タグの force-push は禁止。修正が必要な場合は新バージョンを切る。
+- [Semantic Versioning 2.0.0](https://semver.org/lang/ja/)（`MAJOR.MINOR.PATCH`）。現在は `0.x.y`（API 未安定）。
+- バージョンはルート `Cargo.toml` の `[workspace.package] version` の 1 か所でのみ管理（各クレートは `version.workspace = true`）。`maharit --version` で確認できる。
+- バージョンは **リリース時にだけ** 上げる。普段のコミットで `Cargo.toml` の version を触らない（`scripts/release.sh` が更新する）。
+
+### バージョンのインクリメント規則
+
+前回リリースから main に入ったコミットのうち、**最も影響の大きいもの 1 つ**で上げ幅が決まる（`bash scripts/release.sh auto` が `cliff.toml` の `[bump]` に従って自動算出）。上げた桁より下の桁は 0 に戻す。
+
+| 前回リリース以降の変更 | コミット種別 | `0.x.y` の間（現在） | `1.0.0` 以降 |
+|---|---|---|---|
+| 後方互換を壊す変更 | `feat!:` / `fix!:` / フッター `BREAKING CHANGE:` | MINOR（0.2.3 → 0.3.0） | MAJOR（1.4.2 → 2.0.0） |
+| 後方互換のある機能追加 | `feat:` | MINOR（0.2.3 → 0.3.0） | MINOR（1.4.2 → 1.5.0） |
+| バグ修正・性能改善・セキュリティ修正 | `fix:` / `perf:` / `security:` | PATCH（0.2.3 → 0.2.4） | PATCH（1.4.2 → 1.4.3） |
+| 利用者に影響しない変更のみ | `docs:` / `test:` / `refactor:` / `chore:` / `ci:` / `build:` / `bench:` / `style:` / `todo:` | リリースしない（必要なら PATCH） | 同左 |
+
+**後方互換を壊す変更**（`!` を付ける）とみなすもの:
+- TCP プロトコル（4 バイト長プレフィックス + JSON）のリクエスト・レスポンス形式の非互換変更
+- 永続化ファイル・WAL・バックアップのフォーマット変更で、旧バージョンのデータを読めなくなるもの
+- 既存の Cypher 構文・関数の削除や、同じクエリで結果が変わる意味の変更
+- CLI のサブコマンド・フラグの削除や改名、デフォルト値の変更で既存の起動方法が動かなくなるもの
+- `maharit-client` / Python クライアントなど公開 API の削除・シグネチャ変更
+- 認証・RBAC・レプリケーション設定の非互換変更（既存クラスタやユーザー設定がそのままでは動かない）
+
+互換を保つ変更（新しい構文・関数・フラグ・HTTP エンドポイントの追加、省略可能なフィールドの追加）は `feat:`。
+
+**プレリリース**: `X.Y.Z-alpha.N` → `-beta.N` → `-rc.N` の順。N は 1 から数え、同じ段階の中で 1 ずつ上げる（`0.3.0-rc.1` → `0.3.0-rc.2` → `0.3.0`）。本体部分 `X.Y.Z` には、正式版で出す予定のバージョンを使う。
+
+**1.0.0 への移行**: 公開 API・プロトコル・データフォーマットを安定版として約束する時点で `1.0.0` にする。その際 `cliff.toml` の `breaking_always_bump_major` を `true` に変える。
+
+**その他**:
+- 一度打ったタグは削除・force-push しない。リリースに問題があれば、修正して次の PATCH を出す。
+- 判断に迷ったら大きい方を選ぶ（壊れるかもしれない変更には `!` を付ける）。
+- コミットメッセージがそのまま CHANGELOG / リリースノートになるので、利用者に分かる言葉で書く（`todo:` / `docs(todo)` / `chore(todo)` / `style:` はノートに載らない）。
+- タグ名は `vX.Y.Z` / `vX.Y.Z-rc.N`（`v` を必ず付ける）。
+
+### リリース手順
 
 ```bash
 brew install git-cliff                        # 初回のみ
