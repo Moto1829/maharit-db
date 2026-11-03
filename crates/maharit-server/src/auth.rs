@@ -510,7 +510,7 @@ const TOKEN_LEN: usize = 32;
 /// Panics if the operating system RNG is unavailable — the process cannot
 /// safely produce credentials without it.
 fn fill_random(buf: &mut [u8]) {
-    getrandom::getrandom(buf).expect("OS CSPRNG unavailable; cannot generate secure credentials");
+    getrandom::fill(buf).expect("OS CSPRNG unavailable; cannot generate secure credentials");
 }
 
 /// Encode bytes as lowercase hex.
@@ -729,6 +729,31 @@ impl Default for AclManager {
 
 #[cfg(test)]
 mod tests {
+    /// Stored password hashes must stay verifiable across crypto crate
+    /// upgrades. Expected value computed independently with Python:
+    /// `hashlib.pbkdf2_hmac('sha256', pw, salt, 100000, 32).hex()`.
+    #[test]
+    fn test_hash_password_known_vector() {
+        assert_eq!(
+            hash_password(
+                "00112233445566778899aabbccddeeff",
+                "correct horse battery staple"
+            ),
+            "7f795f6b204d36c5d1749d64fd20167c1273cf892a6bb6969b2fd83700308801"
+        );
+    }
+
+    #[test]
+    fn test_random_credentials_are_hex_and_distinct() {
+        let (a, b) = (generate_salt(), generate_salt());
+        assert_eq!(a.len(), SALT_LEN * 2);
+        assert_ne!(a, b);
+        let (t1, t2) = (generate_token(), generate_token());
+        assert_eq!(t1.len(), TOKEN_LEN * 2);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(t1, t2);
+    }
+
     use super::*;
 
     // Helper method for testing (allows cloning AuthManager)

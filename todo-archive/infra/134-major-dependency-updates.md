@@ -19,3 +19,22 @@
 ## 作業
 - 関連するものをまとめて 1 つずつ上げ、`cargo test --workspace` と E2E を通す
 - 認証（getrandom / pbkdf2 / sha2）とバックアップ（zstd）は、既存データとの互換テストを必ず入れる
+
+## 対応内容（2026-11-03）
+
+| 更新 | コード変更 | 確認 |
+|---|---|---|
+| axum 0.8 / axum-server 0.8 / tower-http 0.7 / tower-cookies 0.11 | なし（パス引数のルートが無いため） | viz を実際に起動し、HTTP（health/info/query/静的ファイル）・`--auth` で未ログイン 401・TLS（テスト用自己署名証明書）を確認。axum-server 0.8 で `rustls-pemfile` が依存から消え、監査警告が 1 件減った |
+| rustyline 19 | なし | パイプ入力と疑似 TTY で REPL を実行 |
+| getrandom 0.4 / pbkdf2 0.13 / sha2 0.11 | `getrandom::getrandom` → `getrandom::fill` | Python `hashlib` で独立に計算した PBKDF2 のテストベクタを追加し、更新前・更新後の両方で一致（既存ユーザーのハッシュが検証できる）。salt/トークンの形式テストも追加 |
+| webpki-roots 1 | なし | ビルド・TLS テスト |
+| zstd 0.14 | なし | 旧バイナリ（zstd 0.13）で作ったバックアップを新ビルドで復元、逆方向も復元し、件数・合計値・個別プロパティが一致 |
+| toml 1 / colored 3 | なし | クラスター設定・TLS 設定の TOML テスト |
+| tokio-tungstenite | `[workspace.dependencies]` から削除（未使用） | — |
+
+- `cargo audit`: 脆弱性 0 件、警告 3 件（bincode → task 131、encoding / unsafe-libyaml → task 132）
+- `cargo update --dry-run --verbose` で残るメジャー更新は bincode / lindera（各タスク）と、axum が固定している matchit のみ
+- 検証: fmt・clippy クリーン、`cargo test --workspace` 全通過（1152 件）、`bash scripts/run_e2e_local.sh` 全スイート通過
+
+## ステータス
+完了
