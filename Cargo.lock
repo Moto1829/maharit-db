@@ -1495,7 +1495,7 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "colored",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "maharit-cluster",
  "maharit-core",
  "maharit-query",
