@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 
 use maharit_core::{Graph, PropertyValue};
+use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::{IoError, Result};
 
@@ -76,183 +77,177 @@ pub struct ImportStats {
     pub edges_imported: usize,
 }
 
+/// Element state while streaming a GraphML document.
+#[derive(Default)]
+struct ImportState {
+    keys: HashMap<String, KeyDef>,
+    id_map: HashMap<String, u64>,
+    nodes_imported: usize,
+    edges_imported: usize,
+    /// `id` of the `<node>` being read.
+    node_id: Option<String>,
+    /// `(source, target)` of the `<edge>` being read.
+    edge: Option<(String, String)>,
+    /// `key` of the `<data>` being read, and its text so far.
+    data_key: Option<String>,
+    data_text: String,
+    properties: HashMap<String, PropertyValue>,
+    label: Option<String>,
+}
+
+impl ImportState {
+    fn start(&mut self, e: &BytesStart) {
+        match e.name().as_ref() {
+            "key" => {
+                if let Some(key_def) = GraphMlImporter::parse_key(e) {
+                    self.keys.insert(key_def.id.clone(), key_def);
+                }
+            }
+            "node" => {
+                self.node_id = GraphMlImporter::get_attr(e, "id");
+                self.properties.clear();
+                self.label = None;
+            }
+            "edge" => {
+                let source = GraphMlImporter::get_attr(e, "source");
+                let target = GraphMlImporter::get_attr(e, "target");
+                self.edge = source.zip(target);
+                self.properties.clear();
+                self.label = None;
+            }
+            "data" => {
+                self.data_key = GraphMlImporter::get_attr(e, "key");
+                self.data_text.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        if self.data_key.is_some() {
+            self.data_text.push_str(text);
+        }
+    }
+
+    fn end(&mut self, graph: &mut Graph, name: &str) {
+        match name {
+            "data" => self.finish_data(),
+            "node" => {
+                if let Some(node_id) = self.node_id.take() {
+                    let label_str = self.label.take().unwrap_or_else(|| "Node".to_string());
+                    let labels: Vec<String> = label_str.split(':').map(str::to_string).collect();
+                    let internal_id = graph.create_node_with_labels(labels);
+                    self.id_map.insert(node_id, internal_id);
+                    if let Some(node) = graph.get_node_mut(internal_id) {
+                        for (k, v) in self.properties.drain() {
+                            node.set_property(k, v);
+                        }
+                    }
+                    self.nodes_imported += 1;
+                }
+            }
+            "edge" => {
+                if let Some((source, target)) = self.edge.take() {
+                    let from = self.id_map.get(&source).copied();
+                    let to = self.id_map.get(&target).copied();
+                    if let (Some(from), Some(to)) = (from, to) {
+                        let label = self.label.take().unwrap_or_else(|| "EDGE".to_string());
+                        if let Ok(edge_id) = graph.create_edge(from, to, &label) {
+                            if let Some(edge) = graph.get_edge_mut(edge_id) {
+                                for (k, v) in self.properties.drain() {
+                                    edge.set_property(k, v);
+                                }
+                            }
+                            self.edges_imported += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `</data>`: store the collected text as a label or a typed property.
+    fn finish_data(&mut self) {
+        let Some(key_id) = self.data_key.take() else {
+            return;
+        };
+        if self.node_id.is_none() && self.edge.is_none() {
+            return;
+        }
+        let text = self.data_text.trim();
+        let key_def = self.keys.get(&key_id);
+        let name = key_def.map_or(key_id.as_str(), |k| k.name.as_str());
+        if matches!(name, "label" | "labelV" | "labelE") {
+            self.label = Some(text.to_string());
+        } else {
+            let value = GraphMlImporter::parse_value(text, key_def);
+            self.properties.insert(name.to_string(), value);
+        }
+    }
+}
+
 /// GraphML importer
 pub struct GraphMlImporter;
 
 impl GraphMlImporter {
     /// Import a graph from GraphML format
     pub fn import<R: Read>(graph: &mut Graph, reader: R) -> Result<ImportStats> {
-        let buf_reader = BufReader::new(reader);
-        let mut xml_reader = Reader::from_reader(buf_reader);
-        xml_reader.config_mut().trim_text(true);
-
+        let mut xml_reader = Reader::from_reader(BufReader::new(reader));
+        // Text is not trimmed per event: entity references arrive as separate
+        // events, so `a &amp; b` is Text("a "), GeneralRef("amp"), Text(" b").
+        // The accumulated <data> value is trimmed once at </data> instead.
+        let mut state = ImportState::default();
         let mut buf = Vec::new();
-        let mut keys: HashMap<String, KeyDef> = HashMap::new();
-        let mut id_map: HashMap<String, u64> = HashMap::new();
-
-        let mut nodes_imported = 0;
-        let mut edges_imported = 0;
-
-        // Current element state
-        let mut current_node_id: Option<String> = None;
-        let mut current_edge: Option<(String, String)> = None;
-        let mut current_data_key: Option<String> = None;
-        let mut current_node_properties: HashMap<String, PropertyValue> = HashMap::new();
-        let mut current_edge_properties: HashMap<String, PropertyValue> = HashMap::new();
-        let mut current_node_label: Option<String> = None;
-        let mut current_edge_label: Option<String> = None;
 
         loop {
-            match xml_reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                    match e.name().as_ref() {
-                        b"key" => {
-                            // Parse key definition
-                            if let Some(key_def) = Self::parse_key(e) {
-                                keys.insert(key_def.id.clone(), key_def);
-                            }
-                        }
-                        b"node" => {
-                            // Start of node
-                            current_node_id = Self::get_attr(e, b"id");
-                            current_node_properties.clear();
-                            current_node_label = None;
-                        }
-                        b"edge" => {
-                            // Start of edge
-                            let source = Self::get_attr(e, b"source");
-                            let target = Self::get_attr(e, b"target");
-                            if let (Some(s), Some(t)) = (source, target) {
-                                current_edge = Some((s, t));
-                            }
-                            current_edge_properties.clear();
-                            current_edge_label = None;
-                        }
-                        b"data" => {
-                            current_data_key = Self::get_attr(e, b"key");
-                        }
-                        _ => {}
-                    }
-
-                    // Handle empty elements (self-closing tags)
-                    if matches!(xml_reader.read_event_into(&mut buf), Ok(Event::Empty(_))) {
-                        // Process empty node
-                        if let Some(ref node_id) = current_node_id {
-                            let label_str = current_node_label
-                                .clone()
-                                .unwrap_or_else(|| "Node".to_string());
-                            let labels: Vec<String> =
-                                label_str.split(':').map(|s| s.to_string()).collect();
-                            let internal_id = graph.create_node_with_labels(labels);
-                            id_map.insert(node_id.clone(), internal_id);
-                            nodes_imported += 1;
-                            current_node_id = None;
-                        }
-                    }
+            let event = xml_reader
+                .read_event_into(&mut buf)
+                .map_err(|e| IoError::InvalidFormat(format!("XML parse error: {}", e)))?;
+            match event {
+                Event::Start(ref e) => state.start(e),
+                Event::Empty(ref e) => {
+                    // Self-closing tag: a start immediately followed by its end.
+                    state.start(e);
+                    state.end(graph, e.name().as_ref());
                 }
-                Ok(Event::Text(ref e)) => {
-                    if let Some(ref key_id) = current_data_key {
-                        let text = e.unescape().unwrap_or_default().to_string();
-
-                        // Check if this is a label key
-                        if let Some(key_def) = keys.get(key_id)
-                            && (key_def.name == "label"
-                                || key_def.name == "labelV"
-                                || key_def.name == "labelE")
-                        {
-                            if current_node_id.is_some() {
-                                current_node_label = Some(text.clone());
-                            } else if current_edge.is_some() {
-                                current_edge_label = Some(text.clone());
-                            }
+                Event::End(ref e) => state.end(graph, e.name().as_ref()),
+                Event::Text(ref e) => state.push_text(&e.xml10_content()),
+                Event::CData(ref e) => state.push_text(&e.xml10_content()),
+                Event::GeneralRef(ref r) => {
+                    let resolved = match r.resolve_char_ref() {
+                        Ok(Some(ch)) => ch.to_string(),
+                        Ok(None) => resolve_predefined_entity(r)
+                            .ok_or_else(|| {
+                                IoError::InvalidFormat(format!("unknown XML entity: &{};", &**r))
+                            })?
+                            .to_string(),
+                        Err(e) => {
+                            return Err(IoError::InvalidFormat(format!(
+                                "invalid XML character reference: {}",
+                                e
+                            )));
                         }
-
-                        let value = Self::parse_value(&text, keys.get(key_id));
-
-                        if current_node_id.is_some() {
-                            let prop_name = keys
-                                .get(key_id)
-                                .map(|k| k.name.clone())
-                                .unwrap_or_else(|| key_id.clone());
-                            current_node_properties.insert(prop_name, value);
-                        } else if current_edge.is_some() {
-                            let prop_name = keys
-                                .get(key_id)
-                                .map(|k| k.name.clone())
-                                .unwrap_or_else(|| key_id.clone());
-                            current_edge_properties.insert(prop_name, value);
-                        }
-                    }
+                    };
+                    state.push_text(&resolved);
                 }
-                Ok(Event::End(ref e)) => match e.name().as_ref() {
-                    b"node" => {
-                        if let Some(ref node_id) = current_node_id {
-                            let label_str = current_node_label
-                                .take()
-                                .unwrap_or_else(|| "Node".to_string());
-                            let labels: Vec<String> =
-                                label_str.split(':').map(|s| s.to_string()).collect();
-                            let internal_id = graph.create_node_with_labels(labels);
-                            id_map.insert(node_id.clone(), internal_id);
-
-                            if let Some(node) = graph.get_node_mut(internal_id) {
-                                for (k, v) in current_node_properties.drain() {
-                                    if k != "label" && k != "labelV" {
-                                        node.set_property(k, v);
-                                    }
-                                }
-                            }
-                            nodes_imported += 1;
-                        }
-                        current_node_id = None;
-                    }
-                    b"edge" => {
-                        if let Some((source, target)) = current_edge.take() {
-                            let from_id = id_map.get(&source).copied();
-                            let to_id = id_map.get(&target).copied();
-
-                            if let (Some(from), Some(to)) = (from_id, to_id) {
-                                let label = current_edge_label
-                                    .take()
-                                    .unwrap_or_else(|| "EDGE".to_string());
-                                if let Ok(edge_id) = graph.create_edge(from, to, &label) {
-                                    if let Some(edge) = graph.get_edge_mut(edge_id) {
-                                        for (k, v) in current_edge_properties.drain() {
-                                            if k != "label" && k != "labelE" {
-                                                edge.set_property(k, v);
-                                            }
-                                        }
-                                    }
-                                    edges_imported += 1;
-                                }
-                            }
-                        }
-                    }
-                    b"data" => {
-                        current_data_key = None;
-                    }
-                    _ => {}
-                },
-                Ok(Event::Eof) => break,
-                Err(e) => {
-                    return Err(IoError::InvalidFormat(format!("XML parse error: {}", e)));
-                }
+                Event::Eof => break,
                 _ => {}
             }
             buf.clear();
         }
 
         Ok(ImportStats {
-            nodes_imported,
-            edges_imported,
+            nodes_imported: state.nodes_imported,
+            edges_imported: state.edges_imported,
         })
     }
 
     fn parse_key(e: &BytesStart) -> Option<KeyDef> {
-        let id = Self::get_attr(e, b"id")?;
-        let name = Self::get_attr(e, b"attr.name").unwrap_or_else(|| id.clone());
-        let for_str = Self::get_attr(e, b"for").unwrap_or_else(|| "all".to_string());
-        let attr_type_str = Self::get_attr(e, b"attr.type").unwrap_or_else(|| "string".to_string());
+        let id = Self::get_attr(e, "id")?;
+        let name = Self::get_attr(e, "attr.name").unwrap_or_else(|| id.clone());
+        let for_str = Self::get_attr(e, "for").unwrap_or_else(|| "all".to_string());
+        let attr_type_str = Self::get_attr(e, "attr.type").unwrap_or_else(|| "string".to_string());
 
         let for_type = match for_str.as_str() {
             "node" => KeyFor::Node,
@@ -268,11 +263,15 @@ impl GraphMlImporter {
         })
     }
 
-    fn get_attr(e: &BytesStart, name: &[u8]) -> Option<String> {
+    fn get_attr(e: &BytesStart, name: &str) -> Option<String> {
         e.attributes()
             .filter_map(|a| a.ok())
             .find(|a| a.key.as_ref() == name)
-            .and_then(|a| String::from_utf8(a.value.to_vec()).ok())
+            .and_then(|a| {
+                a.normalized_value(XmlVersion::Implicit1_0)
+                    .ok()
+                    .map(|v| v.into_owned())
+            })
     }
 
     fn parse_value(text: &str, key_def: Option<&KeyDef>) -> PropertyValue {
@@ -553,6 +552,90 @@ mod tests {
         assert_eq!(stats.edges_imported, 1);
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.edge_count(), 1);
+    }
+
+    /// Properties, labels and escaped text survive import (and a roundtrip).
+    #[test]
+    fn test_import_graphml_properties_and_escapes() {
+        let graphml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="label" for="node" attr.name="label" attr.type="string"/>
+  <key id="labelE" for="edge" attr.name="label" attr.type="string"/>
+  <key id="n_name" for="node" attr.name="name" attr.type="string"/>
+  <key id="n_age" for="node" attr.name="age" attr.type="long"/>
+  <key id="e_w" for="edge" attr.name="weight" attr.type="double"/>
+  <graph id="G" edgedefault="directed">
+    <node id="a&amp;1">
+      <data key="label">Person</data>
+      <data key="n_name">Tom &amp; Jerry &lt;3 &#x41;</data>
+      <data key="n_age">30</data>
+    </node>
+    <node id="2"/>
+    <edge id="e0" source="a&amp;1" target="2">
+      <data key="labelE">KNOWS</data>
+      <data key="e_w">1.5</data>
+    </edge>
+  </graph>
+</graphml>"#;
+
+        let mut graph = Graph::new();
+        let stats = GraphMlImporter::import(&mut graph, graphml.as_bytes()).unwrap();
+        assert_eq!(stats.nodes_imported, 2);
+        assert_eq!(stats.edges_imported, 1);
+
+        let alice = graph
+            .nodes()
+            .find(|n| n.has_label("Person"))
+            .expect("Person node");
+        assert_eq!(
+            alice.get_property("name"),
+            Some(&PropertyValue::String("Tom & Jerry <3 A".to_string()))
+        );
+        assert_eq!(alice.get_property("age"), Some(&PropertyValue::Int(30)));
+        assert_eq!(alice.get_property("label"), None);
+
+        let edge = graph.edges().next().expect("edge");
+        assert_eq!(edge.label, "KNOWS");
+        assert_eq!(
+            edge.get_property("weight"),
+            Some(&PropertyValue::Float(1.5))
+        );
+
+        // Roundtrip keeps the escaped value.
+        let xml = GraphMlExporter::export_to_string(&graph).unwrap();
+        let mut graph2 = Graph::new();
+        GraphMlImporter::import(&mut graph2, xml.as_bytes()).unwrap();
+        assert!(graph2.nodes().any(|n| {
+            n.get_property("name") == Some(&PropertyValue::String("Tom & Jerry <3 A".to_string()))
+        }));
+    }
+
+    #[test]
+    fn test_import_graphml_rejects_bad_input() {
+        let mut graph = Graph::new();
+        // Undefined entity.
+        let undefined = r#"<graphml><key id="k" for="node" attr.name="name"/><graph><node id="1"><data key="k">&nope;</data></node></graph></graphml>"#;
+        assert!(GraphMlImporter::import(&mut graph, undefined.as_bytes()).is_err());
+        // Mismatched end tag.
+        let mismatched = r#"<graphml><graph><node id="1"></edge></graph></graphml>"#;
+        assert!(GraphMlImporter::import(&mut graph, mismatched.as_bytes()).is_err());
+    }
+
+    /// A start tag with many attributes is handled in linear time
+    /// (quick-xml < 0.41 was quadratic here, RUSTSEC-2026-0194).
+    #[test]
+    fn test_import_graphml_many_attributes() {
+        let attrs: String = (0..50_000).map(|i| format!(" a{i}=\"x\"")).collect();
+        let graphml = format!(r#"<graphml><graph><node id="1"{attrs}/></graph></graphml>"#);
+        let started = std::time::Instant::now();
+        let mut graph = Graph::new();
+        let stats = GraphMlImporter::import(&mut graph, graphml.as_bytes()).unwrap();
+        assert_eq!(stats.nodes_imported, 1);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
