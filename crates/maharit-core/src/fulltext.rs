@@ -15,7 +15,7 @@ use lindera::mode::Mode;
 #[cfg(feature = "japanese")]
 use lindera::segmenter::Segmenter;
 #[cfg(feature = "japanese")]
-use lindera::tokenizer::Tokenizer as LinderaTokenizer;
+use std::borrow::Cow;
 
 /// Errors that can occur during full-text search operations.
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -103,153 +103,73 @@ impl Tokenizer {
 
     /// Tokenize Japanese text using lindera morphological analysis with IPADIC.
     ///
-    /// Loads the embedded IPADIC dictionary, segments the text, removes stop
-    /// parts-of-speech (particles, auxiliary verbs, symbols, etc.), and returns
-    /// the dictionary (base) form of each retained token in lowercase.
+    /// Segments the text, removes stop parts-of-speech (particles, auxiliary
+    /// verbs, symbols, etc.), and returns the dictionary (base) form of each
+    /// retained token in lowercase.
     ///
-    /// On any lindera error the function falls back to simple whitespace splitting
-    /// so that indexing never silently discards text.
+    /// Loading the dictionary is expensive, so each thread (including rayon
+    /// workers during parallel index builds) loads it once and keeps the
+    /// segmenter. On any lindera error the function falls back to simple
+    /// whitespace splitting so that indexing never silently discards text.
     #[cfg(feature = "japanese")]
     fn tokenize_japanese(text: &str) -> Vec<String> {
-        // Build a tokenizer backed by the embedded IPADIC dictionary.
-        let tokenizer = match Self::build_japanese_tokenizer() {
-            Ok(t) => t,
-            Err(_) => {
-                // Fallback: split on whitespace / non-alphanumeric boundaries.
-                return text
-                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        };
-
-        let mut tokens = match tokenizer.tokenize(text) {
-            Ok(t) => t,
-            Err(_) => {
-                return text
-                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        };
-
-        let mut result = Vec::new();
-        for token in tokens.iter_mut() {
-            // Capture the surface string before calling `details()` since `details()`
-            // takes `&mut self` and would otherwise conflict with borrowing `surface`.
-            let surface_owned: String = token.surface.as_ref().to_string();
-            let details = token.details();
-
-            // details[0] is the major part-of-speech in IPADIC format.
-            // Skip stop POS categories.
-            let pos = details.first().copied().unwrap_or("*");
-            if JAPANESE_STOP_POS.contains(&pos) {
-                continue;
-            }
-
-            // details[6] is the dictionary (base) form in IPADIC layout.
-            // Fall back to the surface form if the base form is not available or is "*".
-            let base_form = details
-                .get(6)
-                .copied()
-                .filter(|s| !s.is_empty() && *s != "*")
-                .unwrap_or(&surface_owned);
-
-            let normalized = base_form.to_lowercase();
-            if !normalized.is_empty() {
-                result.push(normalized);
-            }
+        thread_local! {
+            static SEGMENTER: Option<Segmenter> = Tokenizer::build_japanese_segmenter().ok();
         }
 
-        result
+        SEGMENTER.with(|segmenter| {
+            let Some(segmenter) = segmenter else {
+                return Self::split_fallback(text);
+            };
+            let Ok(mut tokens) = segmenter.segment(Cow::Borrowed(text)) else {
+                return Self::split_fallback(text);
+            };
+
+            let mut result = Vec::new();
+            for token in tokens.iter_mut() {
+                // Capture the surface string before calling `details()` since `details()`
+                // takes `&mut self` and would otherwise conflict with borrowing `surface`.
+                let surface_owned: String = token.surface.as_ref().to_string();
+                let details = token.details();
+
+                // details[0] is the major part-of-speech in IPADIC format.
+                // Skip stop POS categories.
+                let pos = details.first().copied().unwrap_or("*");
+                if JAPANESE_STOP_POS.contains(&pos) {
+                    continue;
+                }
+
+                // details[6] is the dictionary (base) form in IPADIC layout.
+                // Fall back to the surface form if the base form is not available or is "*".
+                let base_form = details
+                    .get(6)
+                    .copied()
+                    .filter(|s| !s.is_empty() && *s != "*")
+                    .unwrap_or(&surface_owned);
+
+                let normalized = base_form.to_lowercase();
+                if !normalized.is_empty() {
+                    result.push(normalized);
+                }
+            }
+            result
+        })
     }
 
-    /// Construct a lindera `Tokenizer` using the embedded IPADIC dictionary.
+    /// Construct a lindera `Segmenter` using the embedded IPADIC dictionary.
     #[cfg(feature = "japanese")]
-    fn build_japanese_tokenizer() -> lindera::LinderaResult<LinderaTokenizer> {
+    fn build_japanese_segmenter() -> lindera::LinderaResult<Segmenter> {
         let dictionary = load_dictionary("embedded://ipadic")?;
-        let segmenter = Segmenter::new(Mode::Normal, dictionary, None);
-        Ok(LinderaTokenizer::new(segmenter))
+        Ok(Segmenter::new(Mode::Normal, dictionary, None))
     }
 
-    /// Tokenize text using a thread-local cached tokenizer.
-    ///
-    /// This variant is used during parallel index building so that the expensive
-    /// lindera dictionary load happens at most once per rayon worker thread.
-    fn tokenize_cached(text: &str) -> Vec<String> {
-        // For the non-japanese path this is identical to `tokenize`.
-        // For the japanese path the thread-local cache avoids repeated dictionary loads.
-        #[cfg(feature = "japanese")]
-        if contains_japanese(text) {
-            return Self::tokenize_japanese_cached(text);
-        }
-
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
+    /// Whitespace / non-alphanumeric splitting used when lindera is unavailable.
+    #[cfg(feature = "japanese")]
+    fn split_fallback(text: &str) -> Vec<String> {
+        text.split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect()
-    }
-
-    /// Japanese tokenization using a thread-local cached lindera tokenizer.
-    #[cfg(feature = "japanese")]
-    fn tokenize_japanese_cached(text: &str) -> Vec<String> {
-        // Each rayon worker thread gets its own lindera tokenizer so we pay the
-        // dictionary-load cost at most once per thread.
-        thread_local! {
-            static TOKENIZER: std::cell::RefCell<Option<LinderaTokenizer>> =
-                const { std::cell::RefCell::new(None) };
-        }
-
-        TOKENIZER.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            if borrow.is_none() {
-                *borrow = Self::build_japanese_tokenizer().ok();
-            }
-
-            // If initialization failed, fall back to the whitespace splitter.
-            match borrow.as_mut() {
-                None => text
-                    .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect(),
-                Some(tokenizer) => {
-                    let mut tokens = match tokenizer.tokenize(text) {
-                        Ok(t) => t,
-                        Err(_) => {
-                            return text
-                                .split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string())
-                                .collect();
-                        }
-                    };
-
-                    let mut result = Vec::new();
-                    for token in tokens.iter_mut() {
-                        let surface_owned: String = token.surface.as_ref().to_string();
-                        let details = token.details();
-                        let pos = details.first().copied().unwrap_or("*");
-                        if JAPANESE_STOP_POS.contains(&pos) {
-                            continue;
-                        }
-                        let base_form = details
-                            .get(6)
-                            .copied()
-                            .filter(|s| !s.is_empty() && *s != "*")
-                            .unwrap_or(&surface_owned);
-                        let normalized = base_form.to_lowercase();
-                        if !normalized.is_empty() {
-                            result.push(normalized);
-                        }
-                    }
-                    result
-                }
-            }
-        })
     }
 }
 
@@ -589,7 +509,7 @@ impl FulltextIndex {
                     .par_iter()
                     .map(|&(node_id, property, text)| {
                         let doc_id = DocumentId::new(node_id, property);
-                        let tokens = Tokenizer::tokenize_cached(text);
+                        let tokens = Tokenizer::tokenize(text);
                         (doc_id, tokens)
                     })
                     .collect()
@@ -1615,5 +1535,36 @@ mod japanese_tests {
         assert!(tokens.contains(&"graph".to_string()));
         assert!(tokens.contains(&"database".to_string()));
         assert!(tokens.contains(&"search".to_string()));
+    }
+}
+
+/// Segmentation must stay stable across lindera upgrades: indexes built with
+/// one version are queried with the next, and changed tokens would silently
+/// stop matching. Expected values recorded with lindera 2.2 (IPADIC).
+#[cfg(all(test, feature = "japanese"))]
+mod japanese_segmentation_tests {
+    use super::Tokenizer;
+
+    #[test]
+    fn segmentation_matches_recorded_output() {
+        let cases: &[(&str, &[&str])] = &[
+            ("機械学習の基礎を学ぶ", &["機械", "学習", "基礎", "学ぶ"]),
+            ("東京都に住んでいます", &["東京", "都", "住む", "いる"]),
+            (
+                "全文検索エンジンを作りました",
+                &["全文", "検索", "エンジン", "作る"],
+            ),
+            (
+                "グラフデータベースは速い",
+                &["グラフ", "データベース", "速い"],
+            ),
+            (
+                "Rustで日本語を処理する",
+                &["rust", "日本語", "処理", "する"],
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(Tokenizer::tokenize(text), *expected, "{text}");
+        }
     }
 }

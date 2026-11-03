@@ -125,12 +125,12 @@ LIMIT 5
 
 ### `japanese` feature の有効化
 
-日本語形態素解析は **`japanese` という Cargo feature でゲートされており、既定では無効** です。埋め込み IPADIC 辞書（約 15MB）がバイナリサイズを大きく押し上げるため、日本語全文検索が必要なリリースでのみ有効化する方針になっています。
+日本語形態素解析は **`japanese` という Cargo feature でゲートされており、既定では無効** です。埋め込み IPADIC 辞書がバイナリサイズを大きく押し上げるため（lindera 6 以降は辞書を無圧縮で埋め込みます）、日本語全文検索が必要なリリースでのみ有効化する方針になっています。
 
 | ビルド | バイナリサイズ（実測） |
 | --- | --- |
-| 既定（`japanese` 無効） | 約 2.62MB |
-| `japanese` 有効 | 約 18MB |
+| 既定（`japanese` 無効） | 約 2.7MB |
+| `japanese` 有効 | 約 49MB |
 
 ```bash
 # 日本語形態素解析を含む本番バイナリをビルド
@@ -139,6 +139,8 @@ cargo build --release -p maharit-server --features japanese
 # テストも feature を有効にして実行
 cargo test -p maharit-core --features japanese
 ```
+
+ビルド時に lindera が IPADIC の元データ（約 12MB）を lindera.dev からダウンロードして辞書を作ります（MD5 で検証）。環境変数 `LINDERA_BUILD_DICTIONARY_CACHE_DIR` にディレクトリを指定すると作った辞書をキャッシュし、2 回目以降はダウンロードせずに（オフラインでも）ビルドできます。
 
 feature は `maharit-server` の `japanese` が `maharit-core/japanese` を引き込み、`maharit-core/japanese` がオプション依存 `lindera`（`embed-ipadic` feature 付き）を有効化する構成です。
 
@@ -166,7 +168,7 @@ feature は `maharit-server` の `japanese` が `maharit-core/japanese` を引�
 
 ### 並列インデックス構築
 
-大量ノードの一括インデックス（`build_index` / `build_index_bulk`）では、トークナイズ処理を rayon で並列化します（しきい値 200 ドキュメント以上）。各ワーカースレッドは lindera トークナイザをスレッドローカルにキャッシュするため、高コストな辞書ロードはスレッドごとに最大 1 回で済みます。
+大量ノードの一括インデックス（`build_index` / `build_index_bulk`）では、トークナイズ処理を rayon で並列化します（しきい値 200 ドキュメント以上）。検索クエリのトークナイズも含め、lindera のセグメンタは各スレッドでスレッドローカルにキャッシュするため、高コストな辞書ロードはスレッドごとに最大 1 回で済みます。
 
 ### 制限事項
 
