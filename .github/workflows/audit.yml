@@ -1,0 +1,54 @@
+name: Audit
+
+# RustSec advisories for the dependency lockfiles. Runs when dependencies
+# change and weekly, so advisories published after a lockfile change are
+# still noticed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  schedule:
+    - cron: '0 0 * * 1' # Mondays 09:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: workspace
+            lockfile: Cargo.lock
+            blocking: true
+          # Separate workspace (not covered by `cargo test --workspace`).
+          # Non-blocking until its pyo3 upgrade (todo/client/133) lands.
+          - name: python-native
+            lockfile: clients/python-native/Cargo.lock
+            blocking: false
+    continue-on-error: ${{ !matrix.blocking }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Vulnerabilities fail the job; unmaintained / unsound / yanked crates
+      # are reported as warnings (tracked in todo/).
+      # Called as `cargo-audit` (not `cargo audit`) so rust-toolchain.toml does
+      # not make rustup install the pinned toolchain just to read a lockfile.
+      - name: cargo audit
+        run: cargo-audit audit --file ${{ matrix.lockfile }}

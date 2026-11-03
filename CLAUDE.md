@@ -44,6 +44,7 @@ cargo run --example traversal
 `.github/workflows/test.yml`: PR / main push で fmt・clippy（`--workspace`）・`cargo test --workspace`・E2E を実行。
 Rust は `rust-toolchain.toml` で固定（上げる時はワークフローの `dtolnay/rust-toolchain@<版>` も同時に更新）。
 Linux 専用コード（`cfg(target_os = "linux")`）は macOS の clippy では検査されない点に注意。
+`.github/workflows/audit.yml`: 依存変更時と毎週月曜に `cargo-audit` で RustSec 勧告を検査（脆弱性で失敗、メンテ終了等は警告）。ローカルでは `cargo install cargo-audit --locked --root target/tools` → `target/tools/bin/cargo-audit audit`。`.github/dependabot.yml` で cargo / github-actions の週次更新 PR。
 
 ### docs の Cypher 例
 

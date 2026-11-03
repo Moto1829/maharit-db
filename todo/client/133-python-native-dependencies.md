@@ -14,4 +14,4 @@
 ## 作業
 - pyo3 を 0.29 以上に上げ、API の変更（Bound API など）に追従する
 - `cargo update` で lockfile を更新し、ビルドと Python 側のテストを確認する
-- task 135 の CI 監査にこの lockfile も含める
+- `.github/workflows/audit.yml` の python-native 行を `blocking: true` にする（task 135 で非ブロッキングとして追加済み）
