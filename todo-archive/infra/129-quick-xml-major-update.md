@@ -14,3 +14,18 @@ maharit-io の GraphML 入出力（`crates/maharit-io/src/graphml_io.rs`）で�
 - ワークスペースの `quick-xml = { version = "0.37", ... }` を 0.41 以上（2026-11 時点の最新は 0.42）に上げる
 - API の変更（`serialize` feature、`Reader` / `Event` 周り）に追従する
 - maharit-io の GraphML テストを通す。大きな属性数や名前空間を含む入力でのテストも足す
+
+## 対応内容（2026-11-03）
+- quick-xml を 0.37 → 0.42 に更新。`cargo audit` の脆弱性は 0 件に（残りはメンテ終了の警告 4 件のみ）
+- 0.38 以降はテキスト中の実体参照が `Event::GeneralRef` として別イベントで届くため、
+  GraphML インポートのイベントループを `ImportState` に書き直した:
+  - `<data>` のテキストを `</data>` までためてから確定（実体参照・文字参照・CDATA を連結）。trim は確定時に 1 回だけ
+  - 未定義の実体・不正な文字参照はエラー。属性値は `normalized_value` で実体を解決
+- 既存の不具合も同時に修正: 開始タグの直後に `read_event_into` をもう 1 回呼んで次のイベントを読み捨てていたため、
+  プロパティや後続ノードが取り込まれていなかった（既存テストは件数しか見ておらず検出できていなかった）
+- テスト追加: プロパティ・ラベル・実体参照の取り込みとラウンドトリップ、不正入力のエラー、
+  属性 5 万個のタグが 5 秒以内（旧版の 2 乗時間の回帰検知）
+- 検証: `cargo clippy --workspace --all-targets -- -D warnings` クリーン、`cargo test --workspace` 全通過（1147 件）
+
+## ステータス
+完了
