@@ -8,6 +8,7 @@ Native Python extension for MaharitDB — in-process graph operations without th
 pip install maturin
 maturin develop  # development build
 maturin build --release  # release wheel
+python -m unittest discover -s tests  # tests (after maturin develop)
 ```
 
 ## Usage

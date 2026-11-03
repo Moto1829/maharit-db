@@ -24,6 +24,5 @@ Homepage = "https://github.com/Moto1829/maharit-db"
 Repository = "https://github.com/Moto1829/maharit-db"
 
 [tool.maturin]
-python-source = "python"
-module-name = "maharit_native._core"
+module-name = "maharit_native"
 features = ["pyo3/extension-module"]

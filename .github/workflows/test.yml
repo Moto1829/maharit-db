@@ -107,3 +107,33 @@ jobs:
           name: e2e-logs
           path: ${{ runner.temp }}/maharit-e2e
           retention-days: 7
+
+  python-native:
+    # clients/python-native is its own Cargo workspace, so `cargo test
+    # --workspace` above does not build it.
+    name: python-native (maturin build + unittest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: clients/python-native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/python-native
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build and install the extension
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH maturin develop
+      - name: unittest
+        run: .venv/bin/python -m unittest discover -s tests -v

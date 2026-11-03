@@ -36,10 +36,9 @@ jobs:
             lockfile: Cargo.lock
             blocking: true
           # Separate workspace (not covered by `cargo test --workspace`).
-          # Non-blocking until its pyo3 upgrade (todo/client/133) lands.
           - name: python-native
             lockfile: clients/python-native/Cargo.lock
-            blocking: false
+            blocking: true
     continue-on-error: ${{ !matrix.blocking }}
     steps:
       - uses: actions/checkout@v4

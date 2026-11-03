@@ -106,36 +106,31 @@ impl PyGraph {
     }
 
     /// Return a dict representation of the node, or `None` if not found.
-    fn get_node(&self, py: Python<'_>, id: u64) -> Option<PyObject> {
-        self.inner.with_node(id, |node| {
-            let d = PyDict::new_bound(py);
-            d.set_item("id", node.id).unwrap();
-            let labels: Vec<&str> = node.labels.iter().map(|s| s.as_str()).collect();
-            d.set_item("labels", PyList::new_bound(py, &labels)).unwrap();
-            let props = PyDict::new_bound(py);
-            for (k, v) in node.properties.iter() {
-                props.set_item(k, pv_to_py(py, v)).unwrap();
-            }
-            d.set_item("properties", props).unwrap();
-            d.into()
-        })
+    fn get_node<'py>(&self, py: Python<'py>, id: u64) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.inner
+            .with_node(id, |node| {
+                let d = PyDict::new(py);
+                d.set_item("id", node.id)?;
+                d.set_item("labels", PyList::new(py, &node.labels)?)?;
+                d.set_item("properties", props_to_py(py, node.properties.iter())?)?;
+                Ok(d)
+            })
+            .transpose()
     }
 
     /// Return a dict representation of the edge, or `None` if not found.
-    fn get_edge(&self, py: Python<'_>, id: u64) -> Option<PyObject> {
-        self.inner.with_edge(id, |edge| {
-            let d = PyDict::new_bound(py);
-            d.set_item("id", edge.id).unwrap();
-            d.set_item("label", edge.label.as_str()).unwrap();
-            d.set_item("from", edge.from).unwrap();
-            d.set_item("to", edge.to).unwrap();
-            let props = PyDict::new_bound(py);
-            for (k, v) in edge.properties.iter() {
-                props.set_item(k, pv_to_py(py, v)).unwrap();
-            }
-            d.set_item("properties", props).unwrap();
-            d.into()
-        })
+    fn get_edge<'py>(&self, py: Python<'py>, id: u64) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.inner
+            .with_edge(id, |edge| {
+                let d = PyDict::new(py);
+                d.set_item("id", edge.id)?;
+                d.set_item("label", edge.label.as_str())?;
+                d.set_item("from", edge.from)?;
+                d.set_item("to", edge.to)?;
+                d.set_item("properties", props_to_py(py, edge.properties.iter())?)?;
+                Ok(d)
+            })
+            .transpose()
     }
 
     /// Outgoing edge IDs for a node.
@@ -159,17 +154,28 @@ impl PyGraph {
     }
 }
 
-/// Convert a `PropertyValue` to a Python object.
-fn pv_to_py(py: Python<'_>, pv: &PropertyValue) -> PyObject {
-    use pyo3::ToPyObject;
-    match pv {
-        PropertyValue::Null => py.None(),
-        PropertyValue::Bool(b) => b.to_object(py),
-        PropertyValue::Int(n) => n.to_object(py),
-        PropertyValue::Float(f) => f.to_object(py),
-        PropertyValue::String(s) => s.to_object(py),
-        other => format!("{:?}", other).to_object(py),
+/// Build a Python dict from property key/value pairs.
+fn props_to_py<'py, 'a>(
+    py: Python<'py>,
+    props: impl Iterator<Item = (&'a String, &'a PropertyValue)>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    for (k, v) in props {
+        d.set_item(k, pv_to_py(py, v)?)?;
     }
+    Ok(d)
+}
+
+/// Convert a `PropertyValue` to a Python object.
+fn pv_to_py<'py>(py: Python<'py>, pv: &PropertyValue) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match pv {
+        PropertyValue::Null => py.None().into_bound(py),
+        PropertyValue::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
+        PropertyValue::Int(n) => n.into_pyobject(py)?.into_any(),
+        PropertyValue::Float(f) => f.into_pyobject(py)?.into_any(),
+        PropertyValue::String(s) => s.into_pyobject(py)?.into_any(),
+        other => format!("{:?}", other).into_pyobject(py)?.into_any(),
+    })
 }
 
 /// Register the Python module.
