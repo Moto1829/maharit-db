@@ -28,3 +28,13 @@
 ## 補足
 - `cargo audit` はローカルに無かったため、`cargo install cargo-audit --locked --root target/tools` で入れて
   `target/tools/bin/cargo-audit audit` で実行した。CI への組み込みは task 135。
+
+## 対応内容（2026-11-03）
+- `cargo update` を適用（`Cargo.lock` のみの変更）
+- `cargo audit`: 脆弱性 36 件 → 2 件（quick-xml。task 129）、警告 21 件 → 4 件（メンテ終了の bincode /
+  encoding / rustls-pemfile / unsafe-libyaml。task 130〜132）。unsound の警告はすべて解消
+- 検証: `cargo fmt --check`・`cargo clippy --workspace --all-targets -- -D warnings` クリーン、
+  `cargo test --workspace` 全通過（1144 件）、`bash scripts/run_e2e_local.sh` 全スイート通過
+
+## ステータス
+完了
