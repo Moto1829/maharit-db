@@ -118,7 +118,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 ### maharit-storage: 永続化
 
 - `wal.rs` / `wal_group_commit.rs`: Write-Ahead Log。グループコミットでスループット向上。
-- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を bincode で保存・復元。
+- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を保存・復元。現行は v4 形式（bincode 1 互換のバイト列を `snapshot_codec.rs` が自前で読み書き。bincode 依存は削除済み）。形式を変えるときは `VERSION` を上げ、旧版の読み込みを残す。`tests/fixtures/v4_*.mgdb` は bincode 時代に書いた互換性確認用ファイル
 - `mvcc.rs`: MVCC トランザクション。
 - `backup.rs`: `Backup::create` / `restore` / `verify` / `metadata`。`CompressionType::None | Gzip | Zstd`。
 

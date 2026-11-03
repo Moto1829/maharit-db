@@ -4,12 +4,13 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use maharit_core::{ConcurrentGraph, Graph, IndexDefinition, PropertyIndex, PropertyValue};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::snapshot_codec::{self, SEdge, SIndex, SNode, SSnapshot};
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
-/// フォーマットバージョン（v4: bincode シリアライズ）
+/// フォーマットバージョン（v4: bincode 1 互換のスナップショット。`snapshot_codec` 参照）
 const VERSION: u32 = 4;
 /// v3: ラベルを Vec<String> として保存
 const VERSION_V3: u32 = 3;
@@ -19,42 +20,6 @@ const VERSION_V2: u32 = 2;
 const VERSION_V1: u32 = 1;
 /// BufWriter バッファサイズ（4MB）
 const BUF_CAPACITY: usize = 4 * 1024 * 1024;
-
-// ==================== Bincode-serializable snapshot types ====================
-
-/// ノードの bincode シリアライズ用表現
-#[derive(Serialize, Deserialize)]
-struct SNode {
-    id: u64,
-    labels: Vec<String>,
-    properties: HashMap<String, PropertyValue>,
-}
-
-/// エッジの bincode シリアライズ用表現
-#[derive(Serialize, Deserialize)]
-struct SEdge {
-    id: u64,
-    label: String,
-    from: u64,
-    to: u64,
-    properties: HashMap<String, PropertyValue>,
-}
-
-/// インデックス定義の bincode シリアライズ用表現
-#[derive(Serialize, Deserialize)]
-struct SIndex {
-    label: String,
-    property: String,
-    unique: bool,
-}
-
-/// スナップショット全体
-#[derive(Serialize, Deserialize)]
-struct SSnapshot {
-    nodes: Vec<SNode>,
-    edges: Vec<SEdge>,
-    indexes: Vec<SIndex>,
-}
 
 /// 永続化エラー
 #[derive(Debug, Error)]
@@ -87,7 +52,7 @@ impl PersistentStorage {
         Self::save_with_index(graph, &empty_index, path)
     }
 
-    /// グラフとプロパティインデックスをファイルに保存（bincode v4 フォーマット）
+    /// グラフとプロパティインデックスをファイルに保存（v4 フォーマット）
     pub fn save_with_index(
         graph: &Graph,
         index: &PropertyIndex,
@@ -130,8 +95,7 @@ impl PersistentStorage {
             indexes,
         };
 
-        let encoded = bincode::serialize(&snapshot)
-            .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
+        let encoded = snapshot_codec::encode(&snapshot);
 
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
@@ -140,7 +104,7 @@ impl PersistentStorage {
         writer.write_all(MAGIC)?;
         writer.write_all(&VERSION.to_le_bytes())?;
 
-        // Length-prefixed bincode payload
+        // Length-prefixed payload
         let payload_len = encoded.len() as u64;
         writer.write_all(&payload_len.to_le_bytes())?;
         writer.write_all(&encoded)?;
@@ -183,8 +147,7 @@ impl PersistentStorage {
             indexes: vec![],
         };
 
-        let encoded = bincode::serialize(&snapshot)
-            .map_err(|e| PersistenceError::CorruptedData(format!("bincode serialize: {}", e)))?;
+        let encoded = snapshot_codec::encode(&snapshot);
 
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
@@ -216,15 +179,7 @@ impl PersistentStorage {
             return Err(PersistenceError::UnsupportedVersion(version));
         }
 
-        let mut len_bytes = [0u8; 8];
-        reader.read_exact(&mut len_bytes)?;
-        let payload_len = u64::from_le_bytes(len_bytes) as usize;
-
-        let mut encoded = vec![0u8; payload_len];
-        reader.read_exact(&mut encoded)?;
-
-        let snapshot: SSnapshot = bincode::deserialize(&encoded)
-            .map_err(|e| PersistenceError::CorruptedData(format!("bincode deserialize: {}", e)))?;
+        let snapshot = Self::read_snapshot(&mut reader)?;
 
         let graph = ConcurrentGraph::new();
 
@@ -275,8 +230,7 @@ impl PersistentStorage {
         let version = Self::read_u32(&mut reader)?;
 
         if version == VERSION {
-            // v4: bincode format
-            return Self::load_bincode(reader);
+            return Self::load_v4(reader);
         }
 
         if version != VERSION_V3 && version != VERSION_V2 && version != VERSION_V1 {
@@ -351,18 +305,29 @@ impl PersistentStorage {
         Ok((graph, index))
     }
 
-    /// v4 (bincode) フォーマットからグラフとインデックスを読み込む
-    fn load_bincode<R: Read>(mut reader: R) -> Result<(Graph, PropertyIndex)> {
-        // Read length-prefixed payload
+    /// v4 フォーマットからグラフとインデックスを読み込む
+    /// Read the length-prefixed v4 payload that follows the header.
+    fn read_snapshot<R: Read>(reader: &mut R) -> Result<SSnapshot> {
         let mut len_bytes = [0u8; 8];
         reader.read_exact(&mut len_bytes)?;
-        let payload_len = u64::from_le_bytes(len_bytes) as usize;
+        let payload_len = u64::from_le_bytes(len_bytes);
 
-        let mut encoded = vec![0u8; payload_len];
-        reader.read_exact(&mut encoded)?;
+        // Read through `take` rather than pre-allocating `payload_len` bytes:
+        // a corrupted length then fails as a short read, not a huge allocation.
+        let mut encoded = Vec::new();
+        reader.take(payload_len).read_to_end(&mut encoded)?;
+        if encoded.len() as u64 != payload_len {
+            return Err(PersistenceError::CorruptedData(format!(
+                "payload is {} byte(s) but the header says {}",
+                encoded.len(),
+                payload_len
+            )));
+        }
+        snapshot_codec::decode(&encoded).map_err(PersistenceError::CorruptedData)
+    }
 
-        let snapshot: SSnapshot = bincode::deserialize(&encoded)
-            .map_err(|e| PersistenceError::CorruptedData(format!("bincode deserialize: {}", e)))?;
+    fn load_v4<R: Read>(mut reader: R) -> Result<(Graph, PropertyIndex)> {
+        let snapshot = Self::read_snapshot(&mut reader)?;
 
         let mut graph = Graph::new();
         let mut id_map: HashMap<u64, u64> = HashMap::new();
@@ -535,6 +500,151 @@ impl PersistentStorage {
 #[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
+
+    // ── v4 files written by bincode 1 (before snapshot_codec) ──────────
+    // Generated on 2026-11-03 with the bincode-based writer: nodes 0..7 have
+    // labels [Value, <TYPE>] and one property of each PropertyValue variant,
+    // node 8 has no labels; edges NEXT(0->1, w: 0.5) and TO_BARE(2->8).
+    // `v4_one_index` has a unique index on Value.string, `v4_two_indexes`
+    // adds a non-unique one on Value.int.
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    fn expected_values() -> Vec<(&'static str, PropertyValue)> {
+        vec![
+            ("null", PropertyValue::Null),
+            ("bool", PropertyValue::Bool(true)),
+            ("int", PropertyValue::Int(-42)),
+            ("float", PropertyValue::Float(-1.25e-3)),
+            (
+                "string",
+                PropertyValue::String("日本語 & \"quotes\"".to_string()),
+            ),
+            ("date", PropertyValue::Date(-719_162)),
+            ("datetime", PropertyValue::DateTime(1_700_000_000_123)),
+            (
+                "duration",
+                PropertyValue::Duration {
+                    months: 14,
+                    days: -3,
+                    millis: 86_400_001,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_load_bincode_written_v4_fixture() {
+        let (graph, index) =
+            PersistentStorage::load_with_index(fixture("v4_two_indexes.mgdb")).unwrap();
+        assert_eq!(graph.node_count(), 9);
+        assert_eq!(graph.edge_count(), 2);
+        for (i, (key, value)) in expected_values().into_iter().enumerate() {
+            let node = graph.get_node(i as u64).unwrap();
+            assert_eq!(node.labels, vec!["Value".to_string(), key.to_uppercase()]);
+            assert_eq!(node.get_property(key), Some(&value), "{key}");
+        }
+        assert!(graph.get_node(8).unwrap().labels.is_empty());
+
+        let mut edges: Vec<_> = graph.edges().collect();
+        edges.sort_by_key(|e| e.id);
+        assert_eq!(
+            (edges[0].label.as_str(), edges[0].from, edges[0].to),
+            ("NEXT", 0, 1)
+        );
+        assert_eq!(edges[0].get_property("w"), Some(&PropertyValue::Float(0.5)));
+        assert_eq!(
+            (edges[1].label.as_str(), edges[1].from, edges[1].to),
+            ("TO_BARE", 2, 8)
+        );
+
+        assert!(index.has_index("Value", "string"));
+        assert!(index.has_index("Value", "int"));
+        let unique: Vec<_> = index
+            .list_indexes()
+            .into_iter()
+            .map(|d| (d.property.as_str(), d.unique))
+            .collect();
+        assert!(unique.contains(&("string", true)));
+        assert!(unique.contains(&("int", false)));
+
+        let concurrent =
+            PersistentStorage::load_concurrent(fixture("v4_two_indexes.mgdb")).unwrap();
+        assert_eq!(concurrent.node_count(), 9);
+        assert_eq!(concurrent.edge_count(), 2);
+    }
+
+    /// Writing the loaded graph again produces the bincode-written bytes exactly.
+    #[test]
+    fn test_v4_writer_matches_bincode_bytes() {
+        let original = std::fs::read(fixture("v4_one_index.mgdb")).unwrap();
+        let (graph, index) =
+            PersistentStorage::load_with_index(fixture("v4_one_index.mgdb")).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("maharit_v4_rewrite_{}.mgdb", std::process::id()));
+        PersistentStorage::save_with_index(&graph, &index, &path).unwrap();
+        let rewritten = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(rewritten, original);
+    }
+
+    /// Corrupted v4 files are rejected with an error, never a panic or a
+    /// huge allocation.
+    #[test]
+    fn test_corrupted_v4_files_are_rejected() {
+        let original = std::fs::read(fixture("v4_one_index.mgdb")).unwrap();
+        let header = 8 + 4 + 8; // magic, version, payload length
+        let path =
+            std::env::temp_dir().join(format!("maharit_v4_corrupt_{}.mgdb", std::process::id()));
+        let load = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            PersistentStorage::load_with_index(&path).map(|_| ())
+        };
+
+        let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+        // Payload length far larger than the file.
+        let mut huge_len = original.clone();
+        huge_len[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
+        cases.push(("huge payload length", huge_len));
+        // Node count far larger than the payload.
+        let mut huge_count = original.clone();
+        huge_count[header..header + 8].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
+        cases.push(("huge node count", huge_count));
+        // Truncated payload (header length still claims the full size).
+        cases.push(("truncated", original[..original.len() - 10].to_vec()));
+        // Extra bytes inside the declared payload.
+        let mut trailing = original.clone();
+        trailing.push(0);
+        let len = (original.len() - header + 1) as u64;
+        trailing[12..20].copy_from_slice(&len.to_le_bytes());
+        cases.push(("trailing bytes", trailing));
+        // First property's type tag of node 0 replaced with an unknown variant.
+        // Layout: count(8) id(8) labels: count(8) "Value"(8+5) "NULL"(8+4) props count(8) key "null"(8+4) tag
+        let tag_at = header + 8 + 8 + 8 + 13 + 12 + 8 + 12;
+        let mut bad_tag = original.clone();
+        assert_eq!(
+            &bad_tag[tag_at..tag_at + 4],
+            &0u32.to_le_bytes(),
+            "layout drifted"
+        );
+        bad_tag[tag_at..tag_at + 4].copy_from_slice(&99u32.to_le_bytes());
+        cases.push(("unknown property type", bad_tag));
+
+        for (name, bytes) in cases {
+            assert!(
+                matches!(
+                    load(&bytes),
+                    Err(PersistenceError::CorruptedData(_)) | Err(PersistenceError::Io(_))
+                ),
+                "{name} should be rejected"
+            );
+        }
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn test_save_load_empty_graph() {

@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod mvcc;
 mod persistence;
+mod snapshot_codec;
 mod transaction;
 mod wal;
 pub mod wal_group_commit;
