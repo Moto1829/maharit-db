@@ -1,0 +1,84 @@
+# git-cliff 設定: Conventional Commits から CHANGELOG.md / リリースノートを生成する。
+#   CHANGELOG 全体の再生成:   git cliff -o CHANGELOG.md
+#   次リリース分を確定:       git cliff --tag v0.3.0 -o CHANGELOG.md
+#   直近リリースのノートのみ: git cliff --latest --strip header
+# 通常は scripts/release.sh 経由で使う（手順は CLAUDE.md「バージョニング・リリース」）。
+
+[changelog]
+header = """
+# Changelog
+
+このファイルは [git-cliff](https://git-cliff.org) により Conventional Commits から自動生成されます。
+形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、バージョンは [Semantic Versioning](https://semver.org/lang/ja/) に従います。
+
+"""
+body = """
+{%- macro remote_url() -%}
+  https://github.com/Moto1829/maharit-db
+{%- endmacro -%}
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## [Unreleased]
+{% endif -%}
+{% if commits | length == 0 %}
+- 初回公開リリース（Conventional Commits 導入前のため個別項目なし）
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}\
+  {% if commit.breaking %}[**BREAKING**] {% endif %}\
+  {{ commit.message | split(pat="\n") | first | trim }} \
+  ([{{ commit.id | truncate(length=7, end="") }}]({{ self::remote_url() }}/commit/{{ commit.id }}))\
+  {% if commit.breaking and commit.breaking_description and commit.breaking_description != commit.message %}
+  - 互換性に関する注意: {{ commit.breaking_description | split(pat="\n") | first | trim }}\
+  {% endif %}
+{%- endfor %}
+{% endfor %}
+{% if version and previous.version -%}
+[{{ version | trim_start_matches(pat="v") }}]: {{ self::remote_url() }}/compare/{{ previous.version }}...{{ version }}
+{% elif not version and previous.version -%}
+[Unreleased]: {{ self::remote_url() }}/compare/{{ previous.version }}...HEAD
+{% endif %}
+
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+# Conventional Commits 以外（初期の自由形式コミット）は除外する
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$"
+topo_order = false
+sort_commits = "oldest"
+# 注: コミット中の (#NN) は PR ではなく todo/ のタスク番号なのでリンク化しない
+commit_preprocessors = []
+# <!-- NN --> は並び順制御用（表示時は striptags で消える）
+commit_parsers = [
+  { message = "^chore: release", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 00 -->新機能" },
+  { message = "^fix", group = "<!-- 01 -->バグ修正" },
+  { message = "^perf", group = "<!-- 02 -->パフォーマンス" },
+  { message = "^security", group = "<!-- 03 -->セキュリティ" },
+  { message = "^refactor", group = "<!-- 04 -->リファクタリング" },
+  { message = "^(docs|chore)\\(todo\\)", skip = true },
+  { message = "^docs", group = "<!-- 05 -->ドキュメント" },
+  { message = "^test", group = "<!-- 06 -->テスト" },
+  { message = "^bench", group = "<!-- 07 -->ベンチマーク" },
+  { message = "^(ci|build)", group = "<!-- 08 -->ビルド / CI" },
+  { message = "^todo", skip = true },
+  { message = "^style", skip = true },
+  { message = "^chore|^revert", group = "<!-- 09 -->その他" },
+]
+
+[bump]
+# 0.x の間は破壊的変更でも MINOR を上げる（1.0.0 以降は false → true に切り替える）
+features_always_bump_minor = true
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"

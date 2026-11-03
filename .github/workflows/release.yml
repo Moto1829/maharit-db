@@ -1,0 +1,219 @@
+name: Release
+
+# v0.3.0 / v0.3.0-rc.1 形式のタグ push で、各 OS 向けバイナリをビルドし
+# git-cliff で生成したリリースノート付きの GitHub Release を作成する。
+# タグは scripts/release.sh で作る（Cargo.toml の version と CHANGELOG を同時に更新するため）。
+#
+# workflow_dispatch で手動実行した場合はビルドとノート生成のみ（Release は作らない）。
+# タグを打つ前に全ターゲットがビルドできるかの確認に使う。
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  BINARY_NAME: maharit
+
+jobs:
+  prepare:
+    name: Verify version & generate notes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      cargo_version: ${{ steps.meta.outputs.cargo_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: meta
+        run: |
+          cargo_version="$(awk '/^\[workspace.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+            if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[1-9][0-9]*)?$ ]]; then
+              echo "::error::タグ ${version} は SemVer (vX.Y.Z[-alpha|beta|rc.N]) ではありません"
+              exit 1
+            fi
+            if [ "v${cargo_version}" != "$version" ]; then
+              echo "::error::タグ ${version} と Cargo.toml の version (${cargo_version}) が一致しません。scripts/release.sh でタグを作成してください"
+              exit 1
+            fi
+          else
+            version="v${cargo_version}-dev.${GITHUB_SHA::7}"
+          fi
+          if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          {
+            echo "version=${version}"
+            echo "cargo_version=${cargo_version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${version}"
+            echo "- prerelease: ${prerelease}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Generate release notes (git-cliff)
+        env:
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            git cliff --unreleased --strip all -o CHANGES.md
+          elif [ "$PRERELEASE" = "true" ]; then
+            git cliff --latest --strip all -o CHANGES.md
+          else
+            # 正式版は直前の正式版からの差分（途中の alpha/beta/rc を畳み込む）
+            git cliff --latest --strip all '--ignore-tags=-(alpha|beta|rc)\.' -o CHANGES.md
+          fi
+
+      - name: Compose release body
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          {
+            # git-cliff の "## [x.y.z] - date" 見出しは Release タイトルと重複するので落とす
+            sed '1{/^## /d;}' CHANGES.md | sed '1{/^$/d;}'
+            echo
+            echo "## インストール"
+            echo
+            echo '```bash'
+            echo "# Linux / macOS"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | bash -s -- --version ${VERSION}"
+            echo '```'
+            echo
+            echo '```powershell'
+            echo "# Windows (PowerShell)"
+            echo "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1))) -Version ${VERSION}"
+            echo '```'
+            echo
+            echo "各アーカイブの SHA-256 は同名の \`.sha256\` ファイルで確認できます。"
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-apple-darwin,       os: macos-14 }
+          - { target: aarch64-apple-darwin,      os: macos-14 }
+          - { target: x86_64-pc-windows-msvc,    os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml / test.yml と同じ版に固定
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo build --release --locked -p maharit-server --target "${{ matrix.target }}"
+
+      - name: Smoke check (--version)
+        # macos-14 (arm64) 上の x86_64 バイナリは Rosetta 前提になるため実行しない
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          out="$("target/${{ matrix.target }}/release/${BINARY_NAME}" --version)"
+          echo "$out"
+          expected="${BINARY_NAME} ${{ needs.prepare.outputs.cargo_version }}"
+          [ "$out" = "$expected" ] || { echo "::error::--version が '${out}'（期待値 '${expected}'）"; exit 1; }
+
+      # install.sh / install.ps1 が期待する名前:
+      #   maharit-<tag>-<target>.tar.gz (.zip) と同名の .sha256
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="${BINARY_NAME}-${version}-${target}"
+          mkdir -p dist
+          cp LICENSE* README.md dist/ 2>/dev/null || true
+          if [[ "$target" == *windows* ]]; then
+            cp "target/${target}/release/${BINARY_NAME}.exe" dist/
+            archive="${name}.zip"
+            (cd dist && 7z a -tzip "../${archive}" . >/dev/null)
+            hash="$(sha256sum "${archive}" | cut -d' ' -f1)"
+          else
+            cp "target/${target}/release/${BINARY_NAME}" dist/
+            archive="${name}.tar.gz"
+            tar -C dist -czf "${archive}" .
+            hash="$(shasum -a 256 "${archive}" | cut -d' ' -f1)"
+          fi
+          # sha256sum -c 形式（"<hash>  <file>"）
+          echo "${hash}  ${archive}" > "${name}.sha256"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${name}.sha256" >> "$GITHUB_OUTPUT"
+          ls -l "${archive}" "${name}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.checksum }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          ls -l artifacts
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); else flags+=(--latest); fi
+          gh release create "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "MaharitDB ${VERSION}" \
+            --notes-file artifacts/RELEASE_NOTES.md \
+            "${flags[@]}" \
+            artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256

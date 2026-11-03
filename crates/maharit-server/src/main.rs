@@ -28,6 +28,9 @@ fn main() {
             "restore" => run_restore(&args[2..]),
             "admin" => run_admin(&args[2..]),
             "--help" | "help" => print_main_help(),
+            "--version" | "-V" | "version" => {
+                println!("maharit {}", env!("CARGO_PKG_VERSION"));
+            }
             _ => run_repl(),
         }
     } else {
@@ -843,6 +846,7 @@ fn print_main_help() {
     println!("    restore      Restore from a backup");
     println!("    admin        Administrative operations (replication failover, etc.)");
     println!("    help         Print this help message");
+    println!("    version      Print version (also --version / -V)");
 }
 
 fn print_backup_help() {

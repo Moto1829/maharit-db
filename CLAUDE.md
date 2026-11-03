@@ -143,13 +143,24 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 - `reference/` ディレクトリはユーザー指示がない限り参照しない。
 - プロジェクトルール・規約は `docs/` ではなく `~/.claude/projects/<encoded>/memory/` に保存する方針（過去のフィードバック）。
 
-## バージョニング規約
+## バージョニング・リリース
 
-- セマンティックバージョニング。現在 `0.x.y`（unstable）。
-- バージョンはルート `Cargo.toml` の `[workspace.package] version` でのみ管理（workspace 継承）。
-- リリース手順: version bump → CHANGELOG 更新 → commit → tag（`v0.2.0` 形式、`v` プレフィックス必須）→ push → `gh release create`。
-- Conventional Commits: `feat` → MINOR、`fix` / `perf` → PATCH、`feat!` または `BREAKING CHANGE` → MAJOR。
-- タグの force-push は禁止。修正が必要な場合は新バージョンを切る。
+- セマンティックバージョニング。現在 `0.x.y`（unstable）。0.x の間は BREAKING でも MINOR を上げる（`cliff.toml` の `[bump]`）。
+- バージョンはルート `Cargo.toml` の `[workspace.package] version` でのみ管理（workspace 継承）。`maharit --version` で確認できる。
+- Conventional Commits: `feat` → MINOR、`fix` / `perf` → PATCH、`feat!` または `BREAKING CHANGE` → MAJOR。コミットメッセージがそのまま CHANGELOG / リリースノートになる（`todo:` / `docs(todo)` / `chore(todo)` / `style:` は除外）。
+- タグは `vX.Y.Z` / `vX.Y.Z-rc.N`（`alpha` / `beta` も可）。タグの force-push は禁止。修正が必要な場合は新バージョンを切る。
+
+```bash
+brew install git-cliff                        # 初回のみ
+bash scripts/release.sh auto --dry-run        # 次バージョンとリリースノートのプレビュー
+bash scripts/release.sh 0.3.0                 # version 更新 → CHANGELOG 再生成 → commit → tag
+bash scripts/release.sh 0.3.0 --push          # 上記 + push（release.yml が起動）
+git cliff -o CHANGELOG.md                     # [Unreleased] を含めて CHANGELOG だけ再生成
+```
+
+- タグ push で `.github/workflows/release.yml` が起動: タグと Cargo.toml の version 一致を検証 → 5 ターゲットをビルド → `maharit-<tag>-<target>.tar.gz|.zip` + `.sha256`（`install.sh` / `install.ps1` が参照する名前）→ git-cliff のノートで GitHub Release 作成（`-rc.N` 等は prerelease）。
+- 正式版のノートは途中の rc を畳み込み、直前の正式版からの差分になる。
+- タグ前に全ターゲットのビルドを確かめたいときは Actions の Release を手動実行（`workflow_dispatch` はビルドのみで Release は作らない）。
 
 ## Rust 2024 edition の注意点
 
