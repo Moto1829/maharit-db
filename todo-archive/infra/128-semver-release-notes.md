@@ -36,7 +36,9 @@ CHANGELOG・リリースノート・配布バイナリの作成が手作業で�
 - `actionlint` で release.yml を検査
 - `cargo clippy -p maharit-server --all-targets -D warnings` / `cargo fmt --check`
 
+- `workflow_dispatch` で release.yml を実行（run 41625892649）: 5 ターゲットすべてビルド成功、Publish は想定どおり skip。
+  aarch64-apple-darwin のアーカイブを取得し、`shasum -c` OK・中身 `maharit` + `README.md`・`--version` が `maharit 0.2.0` を確認
+
 ## 未実施
 
-- 実際のタグ push による release.yml の実行（Windows / aarch64 Linux ビルドは未検証）。
-  初回は Actions の「Release」を `workflow_dispatch` で手動実行して全ターゲットのビルドを確認してからタグを打つこと
+- 実際のタグ push による GitHub Release 作成（初回リリース時に確認）
