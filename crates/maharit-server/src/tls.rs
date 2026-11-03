@@ -7,9 +7,9 @@
 //! - Environment variable configuration support
 //! - TOML configuration file support via [`TlsConfig::from_toml_file`]
 
+use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
-use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -323,8 +323,7 @@ impl TlsConfig {
     fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, TlsError> {
         let file = std::fs::File::open(path)
             .map_err(|_| TlsError::CertificateNotFound(path.to_string()))?;
-        let mut reader = BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader)
+        let certs = CertificateDer::pem_reader_iter(file)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::InvalidCertificate(e.to_string()))?;
 
@@ -355,14 +354,12 @@ impl TlsConfig {
     fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
         let file =
             std::fs::File::open(path).map_err(|_| TlsError::KeyNotFound(path.to_string()))?;
-        let mut reader = BufReader::new(file);
 
-        // Try to load private key (handles PKCS8, RSA, and EC formats)
-        let key = rustls_pemfile::private_key(&mut reader)
-            .map_err(|e| TlsError::InvalidKey(e.to_string()))?
-            .ok_or_else(|| TlsError::InvalidKey("no private key found".to_string()))?;
-
-        Ok(key)
+        // The first PKCS#8, PKCS#1 (RSA) or SEC1 (EC) key in the file.
+        PrivateKeyDer::from_pem_reader(file).map_err(|e| match e {
+            pem::Error::NoItemsFound => TlsError::InvalidKey("no private key found".to_string()),
+            e => TlsError::InvalidKey(e.to_string()),
+        })
     }
 }
 
@@ -742,6 +739,106 @@ mod tests {
             std::env::remove_var("MAHARIT_TLS_CERT");
             std::env::remove_var("MAHARIT_TLS_KEY");
         }
+    }
+
+    // Self-signed P-256 certificate for CN=localhost (valid until 2125) and its
+    // private key in PKCS#8 and SEC1 form. Test-only; never use them elsewhere.
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBdDCCARqgAwIBAgIUCIxdyfIbxa3Q7WCjY1I7mAWNzXAwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwMzExNDE1MVoYDzIxMjYxMDEw
+MTE0MTUxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64vpyekfl7sk0uJ70BNg20CWJo
+oQnq/9zCxx2o/gREFiZgN5df+2PlYN0Fo0gwRjAdBgNVHQ4EFgQUBAjZ4wm0xn8f
+EbArurwWeJc9o34wDwYDVR0TAQH/BAUwAwEB/zAUBgNVHREEDTALgglsb2NhbGhv
+c3QwCgYIKoZIzj0EAwIDSAAwRQIgLSVa4z6PJlwUqvXW1eUxR/TDt2kSHXlIAETc
+5kdoKPcCIQDHpmRp2FYYtV/xlg99sCLC3XHdKgqj4YRsBc5EYD6yzA==
+-----END CERTIFICATE-----\n";
+    const TEST_KEY_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXz2OSuuCHKmc/zoM
+9aVq6ItF41uTAWMGHYDrj4zE17KhRANCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64
+vpyekfl7sk0uJ70BNg20CWJooQnq/9zCxx2o/gREFiZgN5df+2PlYN0F
+-----END PRIVATE KEY-----\n";
+    const TEST_KEY_SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIF89jkrrghypnP86DPWlauiLReNbkwFjBh2A64+MxNeyoAoGCCqGSM49
+AwEHoUQDQgAEiDBS00Q9Fv1mK6WwW1/7zg4ERZ5OuL6cnpH5e7JNLie9ATYNtAli
+aKEJ6v/cwscdqP4ERBYmYDeXX/tj5WDdBQ==
+-----END EC PRIVATE KEY-----\n";
+
+    /// A uniquely named temp file holding `contents`, removed on drop.
+    struct TempPem(std::path::PathBuf);
+
+    impl TempPem {
+        fn new(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "maharit_tls_test_{}_{}_{name}.pem",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for TempPem {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_load_certs_and_keys_from_pem() {
+        let cert = TempPem::new("cert", TEST_CERT_PEM);
+        let certs = TlsConfig::load_certs(cert.path()).unwrap();
+        assert_eq!(certs.len(), 1);
+
+        let pkcs8 = TempPem::new("pkcs8", TEST_KEY_PKCS8_PEM);
+        assert!(matches!(
+            TlsConfig::load_private_key(pkcs8.path()).unwrap(),
+            PrivateKeyDer::Pkcs8(_)
+        ));
+        let sec1 = TempPem::new("sec1", TEST_KEY_SEC1_PEM);
+        assert!(matches!(
+            TlsConfig::load_private_key(sec1.path()).unwrap(),
+            PrivateKeyDer::Sec1(_)
+        ));
+
+        // A real certificate/key pair builds a server config.
+        TlsConfig::new(cert.path(), pkcs8.path())
+            .load_server_config()
+            .unwrap();
+        // ...and the certificate works as a client CA.
+        build_client_config(Some(cert.path()), false).unwrap();
+    }
+
+    #[test]
+    fn test_load_pem_without_matching_items() {
+        // A key file has no certificates, a certificate file has no key.
+        let key_only = TempPem::new("key_only", TEST_KEY_PKCS8_PEM);
+        assert!(matches!(
+            TlsConfig::load_certs(key_only.path()),
+            Err(TlsError::InvalidCertificate(msg)) if msg == "no certificates found"
+        ));
+        let cert_only = TempPem::new("cert_only", TEST_CERT_PEM);
+        assert!(matches!(
+            TlsConfig::load_private_key(cert_only.path()),
+            Err(TlsError::InvalidKey(msg)) if msg == "no private key found"
+        ));
+        // A broken PEM body is an error, not silently skipped.
+        let broken = TempPem::new(
+            "broken",
+            "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n",
+        );
+        assert!(matches!(
+            TlsConfig::load_certs(broken.path()),
+            Err(TlsError::InvalidCertificate(_))
+        ));
     }
 
     #[test]

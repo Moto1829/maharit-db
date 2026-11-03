@@ -1423,7 +1423,6 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror",
@@ -1502,7 +1501,6 @@ dependencies = [
  "maharit-storage",
  "pbkdf2",
  "rustls",
- "rustls-pemfile",
  "rustyline",
  "serde",
  "serde_json",

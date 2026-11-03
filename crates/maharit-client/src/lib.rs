@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -567,13 +568,18 @@ impl Client {
             let ca_cert_file = std::fs::File::open(ca_cert_path).map_err(|e| {
                 ClientError::InvalidCertificate(format!("Failed to open CA cert file: {}", e))
             })?;
-            let mut reader = std::io::BufReader::new(ca_cert_file);
-
-            let certs = rustls_pemfile::certs(&mut reader)
+            let certs = CertificateDer::pem_reader_iter(ca_cert_file)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| {
                     ClientError::InvalidCertificate(format!("Failed to parse CA cert: {}", e))
                 })?;
+            // An empty store would only fail later, at the handshake, as an unknown issuer.
+            if certs.is_empty() {
+                return Err(ClientError::InvalidCertificate(format!(
+                    "No certificates found in CA cert file: {}",
+                    ca_cert_path
+                )));
+            }
 
             for cert in certs {
                 root_cert_store.add(cert).map_err(|e| {
@@ -1537,6 +1543,26 @@ mod tests {
         assert_eq!(config.ca_cert_path, Some("/path/to/ca.crt".to_string()));
         assert!(config.skip_verify);
         assert_eq!(config.domain, "example.com");
+    }
+
+    #[tokio::test]
+    async fn test_tls_connect_ca_file_without_certificates() {
+        let path = std::env::temp_dir().join(format!(
+            "maharit_client_empty_ca_{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, "not a certificate\n").unwrap();
+        let tls_config = TlsClientConfig::new("localhost").with_ca_cert(path.to_str().unwrap());
+
+        let result = Client::connect_tls("127.0.0.1:1", tls_config).await;
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(ClientError::InvalidCertificate(msg)) => {
+                assert!(msg.contains("No certificates found"), "{msg}")
+            }
+            Err(e) => panic!("Expected InvalidCertificate error, got {e}"),
+            Ok(_) => panic!("Expected InvalidCertificate error"),
+        }
     }
 
     #[tokio::test]

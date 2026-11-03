@@ -6,7 +6,7 @@
 
 | クレート | 現在 | 最新 | 使っている箇所 / 注意 |
 |---|---|---|---|
-| axum / axum-server | 0.7 / 0.7 | 0.8 / 0.8 | maharit-viz。ルートのパス構文（`/:id` → `/{id}`）が変わる |
+| axum / axum-server | 0.7 / 0.7 | 0.8 / 0.8 | maharit-viz。ルートのパス構文（`/:id` → `/{id}`）が変わる。axum-server 0.7 がメンテ終了の rustls-pemfile を引き込む最後の経路（task 130 で直接依存は削除済み） |
 | tower-http / tower-cookies | 0.6 / 0.10 | 0.7 / 0.11 | maharit-viz。axum と同時に上げる |
 | rustyline | 15 | 19 | REPL。Windows 向け依存の clipboard-win 5.4.1 が yanked |
 | getrandom / pbkdf2 / sha2 | 0.2 / 0.12 / 0.10 | 0.4 / 0.13 / 0.11 | `auth.rs` のパスワードハッシュとトークン生成。まとめて上げ、既存のハッシュが検証できることをテストで確認する |
