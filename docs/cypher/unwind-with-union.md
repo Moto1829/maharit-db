@@ -13,20 +13,20 @@ nav_order: 4
 ### 基本的な使い方
 
 ```cypher
--- リストリテラルを展開
+// リストリテラルを展開
 UNWIND [1, 2, 3] AS num
 RETURN num
 
--- 結果:
--- num: 1
--- num: 2
--- num: 3
+// 結果:
+// num: 1
+// num: 2
+// num: 3
 ```
 
 ### リストプロパティの展開
 
 ```cypher
--- ノードのタグリストを展開
+// ノードのタグリストを展開
 MATCH (a:Article)
 UNWIND a.tags AS tag
 RETURN a.title, tag
@@ -35,7 +35,7 @@ RETURN a.title, tag
 ### データのバルクインサート
 
 ```cypher
--- パラメータで渡したリストからノードを作成
+// パラメータで渡したリストからノードを作成
 UNWIND $persons AS person
 CREATE (n:Person {name: person.name, age: person.age})
 ```
@@ -54,7 +54,7 @@ CREATE (n:Person {name: person.name, age: person.age})
 ### UNWIND と MATCH の組み合わせ
 
 ```cypher
--- ID リストからノードを検索
+// ID リストからノードを検索
 UNWIND [1, 2, 3] AS id
 MATCH (n:Product)
 WHERE n.id = id
@@ -64,7 +64,7 @@ RETURN n.name, n.price
 ### ネストしたリストの展開
 
 ```cypher
--- 二重リストを展開
+// 二重リストを展開
 UNWIND [[1, 2], [3, 4], [5, 6]] AS sublist
 UNWIND sublist AS num
 RETURN num
@@ -77,7 +77,7 @@ RETURN num
 ### 中間結果のフィルタ
 
 ```cypher
--- 友人が 3 人以上いる人を検索
+// 友人が 3 人以上いる人を検索
 MATCH (p:Person)-[:FRIENDS]->(f:Person)
 WITH p, count(f) AS friend_count
 WHERE friend_count >= 3
@@ -88,7 +88,7 @@ ORDER BY friend_count DESC
 ### 集計後のさらなる処理
 
 ```cypher
--- 平均年齢より年上の人を検索
+// 平均年齢より年上の人を検索
 MATCH (p:Person)
 WITH avg(p.age) AS avg_age
 MATCH (p:Person)
@@ -99,16 +99,14 @@ RETURN p.name, p.age, avg_age
 ### パイプライン処理
 
 ```cypher
--- ステージ1: 条件でフィルタ
+// ステージ1: 条件でフィルタ
 MATCH (p:Person)-[:WORKS_AT]->(c:Company)
 WHERE c.industry = "Tech"
 WITH p, c
-
--- ステージ2: さらに条件を追加
+// ステージ2: さらに条件を追加
 MATCH (p)-[:KNOWS]->(colleague:Person)
 WITH p, c, collect(colleague.name) AS colleagues
-
--- ステージ3: 結果を返す
+// ステージ3: 結果を返す
 RETURN p.name, c.name AS company, colleagues
 ORDER BY p.name
 LIMIT 10
@@ -121,9 +119,9 @@ LIMIT 10
 ```cypher
 MATCH (p:Person), (c:Company)
 WHERE p.employer = c.name
-WITH p  -- c はここで破棄
+WITH p  // c はここで破棄
 RETURN p.name
--- ここでは c は参照できない
+// ここでは c は参照できない
 ```
 
 ## UNION
@@ -133,7 +131,7 @@ RETURN p.name
 ### 基本的な使い方
 
 ```cypher
--- 二つのクエリ結果を結合（重複排除）
+// 二つのクエリ結果を結合（重複排除）
 MATCH (n:Person) RETURN n.name AS name
 UNION
 MATCH (n:Company) RETURN n.name AS name
@@ -142,7 +140,7 @@ MATCH (n:Company) RETURN n.name AS name
 ### UNION ALL（重複を保持）
 
 ```cypher
--- 重複を保持して結合
+// 重複を保持して結合
 MATCH (n:Person) RETURN n.name AS name, "person" AS type
 UNION ALL
 MATCH (n:Company) RETURN n.name AS name, "company" AS type
@@ -151,7 +149,7 @@ MATCH (n:Company) RETURN n.name AS name, "company" AS type
 ### 複数のクエリを結合
 
 ```cypher
--- 異なる条件のクエリを結合
+// 異なる条件のクエリを結合
 MATCH (n:Person) WHERE n.city = "Tokyo" RETURN n.name AS name, n.city AS location
 UNION
 MATCH (n:Person) WHERE n.city = "Osaka" RETURN n.name AS name, n.city AS location

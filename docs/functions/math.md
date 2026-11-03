@@ -16,10 +16,10 @@ MaharitDB は Cypher クエリ内で使用できる基本的な数学関数を�
 
 ```cypher
 RETURN abs(-42)
--- 結果: 42
+// 結果: 42
 
 RETURN abs(3.14)
--- 結果: 3.14
+// 結果: 3.14
 ```
 
 ### sign(number)
@@ -28,13 +28,13 @@ RETURN abs(3.14)
 
 ```cypher
 RETURN sign(-5)
--- 結果: -1
+// 結果: -1
 
 RETURN sign(0)
--- 結果: 0
+// 結果: 0
 
 RETURN sign(3.14)
--- 結果: 1
+// 結果: 1
 ```
 
 ## 丸め
@@ -45,10 +45,10 @@ RETURN sign(3.14)
 
 ```cypher
 RETURN ceil(3.1)
--- 結果: 4.0
+// 結果: 4.0
 
 RETURN ceil(-3.1)
--- 結果: -3.0
+// 結果: -3.0
 ```
 
 ### floor(number)
@@ -57,10 +57,10 @@ RETURN ceil(-3.1)
 
 ```cypher
 RETURN floor(3.9)
--- 結果: 3.0
+// 結果: 3.0
 
 RETURN floor(-3.1)
--- 結果: -4.0
+// 結果: -4.0
 ```
 
 ### round(number)
@@ -69,13 +69,13 @@ RETURN floor(-3.1)
 
 ```cypher
 RETURN round(3.5)
--- 結果: 4.0
+// 結果: 4.0
 
 RETURN round(3.4)
--- 結果: 3.0
+// 結果: 3.0
 
 RETURN round(-3.5)
--- 結果: -4.0
+// 結果: -4.0
 ```
 
 ## べき乗・平方根
@@ -86,10 +86,10 @@ RETURN round(-3.5)
 
 ```cypher
 RETURN sqrt(16.0)
--- 結果: 4.0
+// 結果: 4.0
 
 RETURN sqrt(2.0)
--- 結果: 1.4142135623730951
+// 結果: 1.4142135623730951
 ```
 
 ### pow(base, exponent)
@@ -98,10 +98,10 @@ RETURN sqrt(2.0)
 
 ```cypher
 RETURN pow(2, 10)
--- 結果: 1024.0
+// 結果: 1024.0
 
 RETURN pow(3.0, 0.5)
--- 結果: 1.7320508075688772
+// 結果: 1.7320508075688772
 ```
 
 ## 対数・指数
@@ -112,7 +112,7 @@ RETURN pow(3.0, 0.5)
 
 ```cypher
 RETURN log(2.718281828)
--- 結果: 約 1.0
+// 結果: 約 1.0
 ```
 
 ### log10(number)
@@ -121,7 +121,7 @@ RETURN log(2.718281828)
 
 ```cypher
 RETURN log10(1000)
--- 結果: 3.0
+// 結果: 3.0
 ```
 
 ### exp(number)
@@ -130,36 +130,36 @@ e の `number` 乗を返します。
 
 ```cypher
 RETURN exp(1)
--- 結果: 2.718281828459045
+// 結果: 2.718281828459045
 ```
 
 ## 三角関数
 
 ```cypher
--- sin, cos, tan
-RETURN sin(0)    -- 結果: 0.0
-RETURN cos(0)    -- 結果: 1.0
-RETURN tan(0)    -- 結果: 0.0
+// sin, cos, tan
+RETURN sin(0)    // 結果: 0.0
+RETURN cos(0)    // 結果: 1.0
+RETURN tan(0)    // 結果: 0.0
 
--- asin, acos, atan
-RETURN asin(1.0)  -- 結果: 1.5707963267948966 (π/2)
-RETURN acos(1.0)  -- 結果: 0.0
-RETURN atan(1.0)  -- 結果: 0.7853981633974483 (π/4)
+// asin, acos, atan
+RETURN asin(1.0)  // 結果: 1.5707963267948966 (π/2)
+RETURN acos(1.0)  // 結果: 0.0
+RETURN atan(1.0)  // 結果: 0.7853981633974483 (π/4)
 
--- atan2(y, x)
-RETURN atan2(1.0, 1.0)  -- 結果: 0.7853981633974483
+// atan2(y, x)
+RETURN atan2(1.0, 1.0)  // 結果: 0.7853981633974483
 ```
 
 ## 定数
 
 ```cypher
--- 円周率 π
+// 円周率 π
 RETURN pi()
--- 結果: 3.141592653589793
+// 結果: 3.141592653589793
 
--- e（ネイピア数）
+// e（ネイピア数）
 RETURN e()
--- 結果: 2.718281828459045
+// 結果: 2.718281828459045
 ```
 
 ## 乱数
@@ -170,9 +170,9 @@ RETURN e()
 
 ```cypher
 RETURN rand()
--- 結果: 例 0.7234567890...
+// 結果: 例 0.7234567890...
 
--- ランダムなサンプリング（約 10% のノードを返す）
+// ランダムなサンプリング（約 10% のノードを返す）
 MATCH (n:Person)
 WHERE rand() < 0.1
 RETURN n.name
@@ -186,10 +186,10 @@ RETURN n.name
 
 ```cypher
 RETURN toInteger(3.9)
--- 結果: 3
+// 結果: 3
 
 RETURN toInteger(-3.1)
--- 結果: -3
+// 結果: -3
 ```
 
 ### toFloat(integer)
@@ -198,22 +198,22 @@ RETURN toInteger(-3.1)
 
 ```cypher
 RETURN toFloat(42)
--- 結果: 42.0
+// 結果: 42.0
 ```
 
 ## 実用的な例
 
 ```cypher
--- 距離計算（ピタゴラスの定理）
+// 距離計算（ピタゴラスの定理）
 MATCH (a:Location), (b:Location)
 WHERE a.name = "A" AND b.name = "B"
 RETURN sqrt(pow(b.x - a.x, 2) + pow(b.y - a.y, 2)) AS distance
 
--- 価格を 10% 引き上げて切り上げ
+// 価格を 10% 引き上げて切り上げ
 MATCH (p:Product)
 SET p.new_price = ceil(p.price * 1.1)
 
--- 統計的なサンプリング
+// 統計的なサンプリング
 MATCH (n:Event)
 WHERE rand() < $sample_rate
 RETURN n.id, n.timestamp

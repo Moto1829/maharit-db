@@ -16,13 +16,15 @@ MaharitDB は Rust で実装されたグラフデータベースエンジンで�
 Neo4j の Cypher に近い構文でグラフデータを操作できます。`MATCH`、`CREATE`、`MERGE`、`SET`、`DELETE`、`RETURN` といった基本操作はもちろん、`UNWIND`、`WITH`、`UNION`、`FOREACH`、`CALL {}` サブクエリなど高度な構文にも対応しています。
 
 ```cypher
--- ノードを作成してリレーションを張る
+// ノードを作成してリレーションを張る
 CREATE (alice:Person {name: "Alice", age: 30})
+
 CREATE (bob:Person {name: "Bob", age: 25})
+
 MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 CREATE (a)-[:KNOWS {since: 2020}]->(b)
 
--- グラフを検索する
+// グラフを検索する
 MATCH (p:Person)-[:KNOWS]->(friend:Person)
 WHERE p.age > 20
 RETURN p.name, friend.name
@@ -34,10 +36,10 @@ ORDER BY p.name
 BM25 アルゴリズムに基づく高精度な全文検索インデックスを内蔵しています。lindera IPADIC による日本語形態素解析に対応しており、日本語テキストの自然な検索が可能です。フレーズ検索やファジー検索（編集距離指定）もサポートします。
 
 ```cypher
--- 全文検索インデックスを作成
+// 全文検索インデックスを作成
 CREATE FULLTEXT INDEX articleIndex FOR (a:Article) ON EACH [a.title, a.body]
 
--- BM25 スコアリングで検索
+// BM25 スコアリングで検索
 CALL db.index.fulltext.search("articleIndex", "グラフデータベース")
 YIELD node, score
 RETURN node.title, score

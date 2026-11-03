@@ -12,20 +12,20 @@ MaharitDB は Neo4j の Cypher に近い構文のクエリ言語をサポート�
 
 ノードは丸括弧 `()` で表します。
 
-```cypher
--- ラベルなしのノード
+```text
+// ラベルなしのノード
 ()
 
--- ラベル付きのノード
+// ラベル付きのノード
 (:Person)
 
--- 変数束縛
+// 変数束縛
 (n:Person)
 
--- プロパティフィルタ
+// プロパティフィルタ
 (n:Person {name: "Alice"})
 
--- 複数ラベル
+// 複数ラベル
 (n:Person:Employee)
 ```
 
@@ -34,42 +34,42 @@ MaharitDB は Neo4j の Cypher に近い構文のクエリ言語をサポート�
 ノードには複数のラベルを付与できます。ラベルはノードが属するカテゴリを表し、複数のカテゴリに同時に属することが可能です。
 
 ```cypher
--- 複数ラベルを持つノードを作成
+// 複数ラベルを持つノードを作成
 CREATE (n:Person:Employee {name: "Alice", department: "Engineering"})
 
--- 複数ラベルでマッチ（AND 条件 — 両方のラベルを持つノードのみ）
+// 複数ラベルでマッチ（AND 条件 — 両方のラベルを持つノードのみ）
 MATCH (n:Person:Employee) RETURN n.name
 
--- 片方のラベルだけでマッチ
+// 片方のラベルだけでマッチ
 MATCH (n:Employee) RETURN n.name
 ```
 
 MATCH でラベルを複数指定した場合、**すべてのラベルを持つノード**のみが返ります（OR ではなく AND）。
 
 ```cypher
--- ラベルの一覧を取得
+// ラベルの一覧を取得
 MATCH (n:Person) RETURN n.name, labels(n)
--- 結果: ["Person", "Employee"] のようなリスト
+// 結果: ["Person", "Employee"] のようなリスト
 ```
 
 ## エッジ（リレーションシップ）のパターン
 
 エッジは角括弧 `[]` と矢印で表します。
 
-```cypher
--- 向き付きエッジ
+```text
+// 向き付きエッジ
 (a)-[:KNOWS]->(b)
 
--- 逆向き
+// 逆向き
 (a)<-[:KNOWS]-(b)
 
--- 向きなし（マッチ時のみ）
+// 向きなし（マッチ時のみ）
 (a)-[:KNOWS]-(b)
 
--- 変数束縛とプロパティ
+// 変数束縛とプロパティ
 (a)-[r:KNOWS {since: 2020}]->(b)
 
--- ホップ数指定（可変長）
+// ホップ数指定（可変長）
 (a)-[:KNOWS*1..3]->(b)
 ```
 
@@ -78,14 +78,14 @@ MATCH (n:Person) RETURN n.name, labels(n)
 ノードとエッジを作成します。
 
 ```cypher
--- ノードを作成
+// ノードを作成
 CREATE (n:Person {name: "Alice", age: 30})
 
--- エッジを作成（既存ノードを参照）
+// エッジを作成（既存ノードを参照）
 MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 CREATE (a)-[:KNOWS {since: 2021}]->(b)
 
--- 複数ノードを一度に作成
+// 複数ノードを一度に作成
 CREATE
   (alice:Person {name: "Alice"}),
   (bob:Person {name: "Bob"}),
@@ -97,19 +97,19 @@ CREATE
 グラフからパターンに一致するデータを検索します。
 
 ```cypher
--- すべてのノードを取得
+// すべてのノードを取得
 MATCH (n) RETURN n
 
--- 特定ラベルのノードを取得
+// 特定ラベルのノードを取得
 MATCH (n:Person) RETURN n
 
--- プロパティでフィルタ
+// プロパティでフィルタ
 MATCH (n:Person {name: "Alice"}) RETURN n
 
--- エッジを含むパターン
+// エッジを含むパターン
 MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b
 
--- 可変長パス
+// 可変長パス
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
 WHERE a.name = "Alice"
 RETURN b.name
@@ -120,22 +120,22 @@ RETURN b.name
 クエリの結果として返す値を指定します。
 
 ```cypher
--- ノード全体を返す
+// ノード全体を返す
 MATCH (n:Person) RETURN n
 
--- プロパティを返す
+// プロパティを返す
 MATCH (n:Person) RETURN n.name, n.age
 
--- エイリアスを付ける
+// エイリアスを付ける
 MATCH (n:Person) RETURN n.name AS name, n.age AS age
 
--- 計算式を返す
+// 計算式を返す
 MATCH (n:Person) RETURN n.name, n.age * 2 AS double_age
 
--- 定数を返す
+// 定数を返す
 RETURN 42, "hello", true
 
--- DISTINCT（重複排除）
+// DISTINCT（重複排除）
 MATCH (n:Person) RETURN DISTINCT n.name
 ```
 
@@ -144,40 +144,47 @@ MATCH (n:Person) RETURN DISTINCT n.name
 ノードやエッジを削除します。
 
 ```cypher
--- エッジを削除
+// エッジを削除
 MATCH (a:Person)-[r:KNOWS]->(b:Person)
 WHERE a.name = "Alice" AND b.name = "Bob"
 DELETE r
 
--- ノードを削除（エッジが存在しない場合のみ）
+// ノードを削除（エッジが存在しない場合のみ）
 MATCH (n:Person {name: "Charlie"})
 DELETE n
 
--- ノードと接続するエッジをすべて削除
+// ノードと接続するエッジをすべて削除
 MATCH (n:Person {name: "Dave"})
 DETACH DELETE n
 ```
 
 ## コメント
 
-`--` の後はコメントとして扱われます。
+`//` から行末まではコメントとして扱われます。`/* … */` で囲んだ部分もコメントになり、複数行にまたがっても構いません。
 
 ```cypher
--- これはコメントです
-MATCH (n:Person) -- インラインコメントも使えます
+// これはコメントです
+MATCH (n:Person) // インラインコメントも使えます
+/* 複数行の
+   ブロックコメント */
 RETURN n.name
 ```
 
+{: .note }
+> SQL 風の `--` はコメントとして扱われません（`(a)--(b)` のような無向パターンと区別するため）。
+
 ## 複数ステートメント
 
-セミコロン（`;`）でステートメントを区切ることができます。
+1 回のリクエストで実行できるのは 1 ステートメントです。セミコロン（`;`）で区切って複数のステートメントをまとめて送ることには対応していません。複数の操作は 1 つずつ実行してください。
 
 ```cypher
-CREATE (a:Person {name: "Alice"});
-CREATE (b:Person {name: "Bob"});
+CREATE (a:Person {name: "Alice"})
+
+CREATE (b:Person {name: "Bob"})
+
 MATCH (a:Person), (b:Person)
 WHERE a.name <> b.name
-CREATE (a)-[:KNOWS]->(b);
+CREATE (a)-[:KNOWS]->(b)
 ```
 
 ## リテラル値

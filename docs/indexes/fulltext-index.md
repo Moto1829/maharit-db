@@ -11,23 +11,24 @@ nav_order: 2
 ## インデックスの作成
 
 ```cypher
--- 基本的な全文検索インデックスの作成
+// 基本的な全文検索インデックスの作成
 CREATE FULLTEXT INDEX articleIndex FOR (a:Article) ON EACH [a.title]
 
--- 複数プロパティのインデックス
+// 複数プロパティのインデックス
 CREATE FULLTEXT INDEX articleIndex FOR (a:Article) ON EACH [a.title, a.body, a.summary]
-
--- 複数ラベルのインデックス
-CREATE FULLTEXT INDEX contentIndex FOR (n:Article|Post|Page) ON EACH [n.title, n.body]
 ```
+
+対象ラベルは 1 つだけ指定できます（Neo4j の `(n:A|B)` のような複数ラベル指定には対応していません）。
 
 ### 構文
 
 ```
 CREATE FULLTEXT INDEX <index_name>
-FOR (<variable>:<Label>[|<Label>...])
+FOR (<variable>:<Label>)
 ON EACH [<variable>.<property>[, <variable>.<property>...]]
 ```
+
+`ON EACH [...]` の代わりに `ON (<variable>.<property>, ...)` と書くこともできます。
 
 ## インデックスの削除
 
@@ -115,11 +116,11 @@ RETURN node.title, score
 MaharitDB の全文検索は lindera（IPADIC 辞書）を使った日本語形態素解析に対応しています。
 
 ```cypher
--- 日本語テキストのインデックス
+// 日本語テキストのインデックス
 CREATE FULLTEXT INDEX jpIndex FOR (d:Document) ON EACH [d.content]
 
--- 形態素解析を通じた検索
--- 「機械学習」は「機械」「学習」に分割されて検索されます
+// 形態素解析を通じた検索
+// 「機械学習」は「機械」「学習」に分割されて検索されます
 CALL db.index.fulltext.search("jpIndex", "機械学習")
 YIELD node, score
 RETURN node.content, score

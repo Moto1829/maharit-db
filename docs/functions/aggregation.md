@@ -15,13 +15,13 @@ nav_order: 5
 行数またはユニークな値の数を返します。
 
 ```cypher
--- 全ノード数
+// 全ノード数
 MATCH (n:Person) RETURN count(n)
 
--- プロパティが存在する行数（null を除外）
+// プロパティが存在する行数（null を除外）
 MATCH (n:Person) RETURN count(n.email)
 
--- ユニークな値の数
+// ユニークな値の数
 MATCH (n:Person) RETURN count(DISTINCT n.city)
 ```
 
@@ -33,7 +33,7 @@ MATCH (n:Person) RETURN count(DISTINCT n.city)
 MATCH (p:Product)
 RETURN sum(p.price) AS total_price
 
--- DISTINCT（重複を排除して合計）
+// DISTINCT（重複を排除して合計）
 MATCH (o:Order)-[:INCLUDES]->(p:Product)
 RETURN sum(DISTINCT p.price) AS unique_product_total
 ```
@@ -59,7 +59,7 @@ ORDER BY avg_price DESC
 MATCH (n:Person)
 RETURN max(n.age) AS oldest, min(n.age) AS youngest
 
--- 文字列の MAX/MIN（辞書順）
+// 文字列の MAX/MIN（辞書順）
 MATCH (n:Person)
 RETURN max(n.name), min(n.name)
 ```
@@ -69,15 +69,15 @@ RETURN max(n.name), min(n.name)
 値をリストに収集します。
 
 ```cypher
--- 全員の名前をリストにまとめる
+// 全員の名前をリストにまとめる
 MATCH (n:Person)
 RETURN collect(n.name) AS names
 
--- 友人の名前を収集
+// 友人の名前を収集
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 RETURN p.name, collect(f.name) AS friends
 
--- DISTINCT（重複を排除して収集）
+// DISTINCT（重複を排除して収集）
 MATCH (n:Person)
 RETURN collect(DISTINCT n.city) AS unique_cities
 ```
@@ -92,7 +92,7 @@ RETURN collect(DISTINCT n.city) AS unique_cities
 MATCH (n:Person)
 RETURN percentileCont(n.age, 0.5) AS median_age
 
--- 第 75 パーセンタイル
+// 第 75 パーセンタイル
 MATCH (p:Product)
 RETURN percentileCont(p.price, 0.75) AS p75_price
 ```
@@ -119,7 +119,7 @@ RETURN percentileDisc(p.price, 0.90) AS p90_price
 MATCH (n:Person)
 RETURN stDev(n.age) AS age_std_dev
 
--- カテゴリ別の価格ばらつき
+// カテゴリ別の価格ばらつき
 MATCH (p:Product)
 RETURN p.category, stDev(p.price) AS price_deviation
 ORDER BY price_deviation DESC
@@ -139,12 +139,12 @@ RETURN stDevP(n.age) AS age_std_dev_population
 集計関数を使用すると、非集計の列でグループ化が自動的に行われます。
 
 ```cypher
--- 都市別の人数と平均年齢
+// 都市別の人数と平均年齢
 MATCH (n:Person)
 RETURN n.city, count(n) AS count, avg(n.age) AS avg_age
 ORDER BY count DESC
 
--- カテゴリ別の商品統計
+// カテゴリ別の商品統計
 MATCH (p:Product)
 RETURN
   p.category,
@@ -161,14 +161,14 @@ ORDER BY product_count DESC
 集計結果をさらにフィルタリングするには `WITH` を使います。
 
 ```cypher
--- 友人が 3 人以上いる人
+// 友人が 3 人以上いる人
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WITH p, count(f) AS friend_count
 WHERE friend_count >= 3
 RETURN p.name, friend_count
 ORDER BY friend_count DESC
 
--- 売上が平均以上のカテゴリ
+// 売上が平均以上のカテゴリ
 MATCH (p:Product)
 WITH p.category AS category, sum(p.sales) AS total_sales
 WITH collect({category: category, sales: total_sales}) AS stats,
@@ -182,7 +182,7 @@ ORDER BY stat.sales DESC
 ## 実用的な例
 
 ```cypher
--- ユーザーのアクティビティ統計
+// ユーザーのアクティビティ統計
 MATCH (u:User)-[:POSTED]->(p:Post)
 RETURN
   u.name,

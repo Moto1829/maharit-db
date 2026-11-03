@@ -72,7 +72,7 @@ Rows returned: 3
 MaharitDB はパースされたクエリプランをキャッシュします。同じクエリが繰り返し実行される場合、パース処理をスキップして高速化されます。
 
 ```cypher
--- キャッシュ統計の確認
+// キャッシュ統計の確認
 CALL db.cache.stats()
 YIELD hit_count, miss_count, eviction_count, cache_size
 RETURN hit_count, miss_count, hit_count * 1.0 / (hit_count + miss_count) AS hit_ratio
@@ -87,10 +87,10 @@ RETURN hit_count, miss_count, hit_count * 1.0 / (hit_count + miss_count) AS hit_
 最も効果的な最適化はインデックスの適切な使用です。
 
 ```cypher
--- インデックスなし（AllNodesScan）
+// インデックスなし（AllNodesScan）
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 
--- インデックスあり（NodeIndexSeek）→ 速い
+// インデックスあり（NodeIndexSeek）→ 速い
 CREATE INDEX FOR (n:Person) ON (n.email)
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 ```
@@ -100,12 +100,14 @@ MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 フィルタ条件はできるだけ早い段階（パターンのマッチング直後）に適用されます。
 
 ```cypher
--- 推奨: 条件を MATCH のパターンに含める
+// 推奨: 条件を MATCH のパターンに含める
 MATCH (p:Person {age: 30})-[:KNOWS]->(f:Person)
+RETURN f.name
 
--- 同様に動作（フィルタプッシュダウンが有効）
+// 同様に動作（フィルタプッシュダウンが有効）
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WHERE p.age = 30
+RETURN f.name
 ```
 
 ### 3. 選択性の高いフィルタを先に書く
@@ -113,12 +115,12 @@ WHERE p.age = 30
 より多くのノードを絞り込むフィルタを先に記述すると効率的です。
 
 ```cypher
--- 推奨: 絞り込みが多いフィルタを先に
-MATCH (p:Person {name: "Alice"})  -- 1 件に絞り込み
-MATCH (p)-[:KNOWS*1..5]->(f:Person)  -- その後に可変長パス
+// 推奨: 絞り込みが多いフィルタを先に
+MATCH (p:Person {name: "Alice"})  // 1 件に絞り込み
+MATCH (p)-[:KNOWS*1..5]->(f:Person)  // その後に可変長パス
 RETURN f.name
 
--- 非推奨: 可変長パスを先に（中間結果が大きくなる）
+// 非推奨: 可変長パスを先に（中間結果が大きくなる）
 MATCH (p:Person)-[:KNOWS*1..5]->(f:Person)
 WHERE p.name = "Alice"
 RETURN f.name
@@ -129,7 +131,7 @@ RETURN f.name
 `LIMIT` や集計を `WITH` に組み合わせて、早い段階で結果を絞り込みます。
 
 ```cypher
--- 上位 100 人に絞り込んでからさらに処理
+// 上位 100 人に絞り込んでからさらに処理
 MATCH (p:Person)
 WHERE p.age > 20
 WITH p
@@ -144,20 +146,22 @@ RETURN p.name, collect(f.name) AS friends
 可変長パス（`*n..m`）は組み合わせ爆発を引き起こす可能性があります。
 
 ```cypher
--- 注意: ホップ数が大きいと遅くなる
+// 注意: ホップ数が大きいと遅くなる
 MATCH (a:Person)-[:KNOWS*1..10]->(b:Person)
+RETURN b.name
 
--- 推奨: ホップ数を制限する
+// 推奨: ホップ数を制限する
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
+RETURN b.name
 ```
 
 ## クエリプランキャッシュの管理
 
 ```cypher
--- クエリプランキャッシュをクリア
+// クエリプランキャッシュをクリア
 CALL db.cache.clear()
 
--- キャッシュサイズを確認
+// キャッシュサイズを確認
 CALL db.cache.info()
 YIELD max_size, current_size, hit_count, miss_count
 RETURN max_size, current_size, hit_count, miss_count

@@ -16,10 +16,10 @@ MaharitDB は Cypher クエリ内でリストを操作するための関数と�
 
 ```cypher
 RETURN head([1, 2, 3])
--- 結果: 1
+// 結果: 1
 
 RETURN head([])
--- 結果: null
+// 結果: null
 ```
 
 ### last(list)
@@ -28,7 +28,7 @@ RETURN head([])
 
 ```cypher
 RETURN last([1, 2, 3])
--- 結果: 3
+// 結果: 3
 ```
 
 ### tail(list)
@@ -37,10 +37,10 @@ RETURN last([1, 2, 3])
 
 ```cypher
 RETURN tail([1, 2, 3])
--- 結果: [2, 3]
+// 結果: [2, 3]
 
 RETURN tail([1])
--- 結果: []
+// 結果: []
 ```
 
 ### インデックスアクセス
@@ -49,14 +49,14 @@ RETURN tail([1])
 
 ```cypher
 RETURN [1, 2, 3][0]
--- 結果: 1
+// 結果: 1
 
 RETURN [1, 2, 3][2]
--- 結果: 3
+// 結果: 3
 
--- 負のインデックス（末尾から）
+// 負のインデックス（末尾から）
 RETURN [1, 2, 3][-1]
--- 結果: 3
+// 結果: 3
 ```
 
 ## リストのサイズ
@@ -67,7 +67,7 @@ RETURN [1, 2, 3][-1]
 
 ```cypher
 RETURN size([1, 2, 3])
--- 結果: 3
+// 結果: 3
 
 MATCH (n:Person)
 RETURN n.name, size(n.tags) AS tag_count
@@ -81,13 +81,13 @@ RETURN n.name, size(n.tags) AS tag_count
 
 ```cypher
 RETURN range(1, 5)
--- 結果: [1, 2, 3, 4, 5]
+// 結果: [1, 2, 3, 4, 5]
 
 RETURN range(0, 10, 2)
--- 結果: [0, 2, 4, 6, 8, 10]
+// 結果: [0, 2, 4, 6, 8, 10]
 
 RETURN range(5, 1, -1)
--- 結果: [5, 4, 3, 2, 1]
+// 結果: [5, 4, 3, 2, 1]
 ```
 
 ## リストの変換
@@ -98,10 +98,10 @@ RETURN range(5, 1, -1)
 
 ```cypher
 RETURN reverse([1, 2, 3])
--- 結果: [3, 2, 1]
+// 結果: [3, 2, 1]
 
 RETURN reverse(["a", "b", "c"])
--- 結果: ["c", "b", "a"]
+// 結果: ["c", "b", "a"]
 ```
 
 ## リストスライス
@@ -110,15 +110,15 @@ RETURN reverse(["a", "b", "c"])
 
 ```cypher
 RETURN [1, 2, 3, 4, 5][1..3]
--- 結果: [2, 3]
+// 結果: [2, 3]
 
--- 最初から n 個
+// 最初から n 個
 RETURN [1, 2, 3, 4, 5][..3]
--- 結果: [1, 2, 3]
+// 結果: [1, 2, 3]
 
--- n 番目以降
+// n 番目以降
 RETURN [1, 2, 3, 4, 5][2..]
--- 結果: [3, 4, 5]
+// 結果: [3, 4, 5]
 ```
 
 ## reduce
@@ -126,17 +126,17 @@ RETURN [1, 2, 3, 4, 5][2..]
 `reduce` はリストを順に処理して単一の値にまとめます。
 
 ```cypher
--- リストの合計
+// リストの合計
 RETURN reduce(total = 0, x IN [1, 2, 3, 4, 5] | total + x)
--- 結果: 15
+// 結果: 15
 
--- リストの最大値
+// リストの最大値
 RETURN reduce(m = 0, x IN [3, 1, 4, 1, 5, 9, 2, 6] | CASE WHEN x > m THEN x ELSE m END)
--- 結果: 9
+// 結果: 9
 
--- 文字列の結合
+// 文字列の結合
 RETURN reduce(s = "", name IN ["Alice", "Bob", "Charlie"] | s + name + ", ")
--- 結果: "Alice, Bob, Charlie, "
+// 結果: "Alice, Bob, Charlie, "
 ```
 
 ## リスト内包表記
@@ -146,35 +146,35 @@ RETURN reduce(s = "", name IN ["Alice", "Bob", "Charlie"] | s + name + ", ")
 ### 変換のみ
 
 ```cypher
--- 各要素を 2 倍
+// 各要素を 2 倍
 RETURN [x IN [1, 2, 3, 4, 5] | x * 2]
--- 結果: [2, 4, 6, 8, 10]
+// 結果: [2, 4, 6, 8, 10]
 
--- 文字列変換
+// 文字列変換
 RETURN [name IN ["alice", "bob", "charlie"] | toUpper(name)]
--- 結果: ["ALICE", "BOB", "CHARLIE"]
+// 結果: ["ALICE", "BOB", "CHARLIE"]
 ```
 
 ### フィルタのみ
 
 ```cypher
--- 偶数のみ
+// 偶数のみ
 RETURN [x IN [1, 2, 3, 4, 5] WHERE x % 2 = 0]
--- 結果: [2, 4]
+// 結果: [2, 4]
 ```
 
 ### フィルタと変換の組み合わせ
 
 ```cypher
--- 偶数を 2 倍
+// 偶数を 2 倍
 RETURN [x IN [1, 2, 3, 4, 5] WHERE x % 2 = 0 | x * 2]
--- 結果: [4, 8]
+// 結果: [4, 8]
 ```
 
 ### ノードのプロパティを変換
 
 ```cypher
--- 友人の名前リストを取得
+// 友人の名前リストを取得
 MATCH (p:Person {name: "Alice"})
 RETURN [friend IN [(p)-[:KNOWS]->(f) | f] | friend.name] AS friend_names
 ```
@@ -185,12 +185,12 @@ RETURN [friend IN [(p)-[:KNOWS]->(f) | f] | friend.name] AS friend_names
 
 ```cypher
 RETURN 3 IN [1, 2, 3, 4, 5]
--- 結果: true
+// 結果: true
 
 RETURN 6 IN [1, 2, 3, 4, 5]
--- 結果: false
+// 結果: false
 
--- プロパティチェック
+// プロパティチェック
 MATCH (n:Person)
 WHERE n.city IN ["Tokyo", "Osaka", "Kyoto"]
 RETURN n.name, n.city
@@ -199,7 +199,7 @@ RETURN n.name, n.city
 ## 実用的な例
 
 ```cypher
--- タグの共通部分を確認（手動実装）
+// タグの共通部分を確認（手動実装）
 MATCH (a:Article), (b:Article)
 WHERE a.id <> b.id
 WITH a, b,
@@ -207,7 +207,7 @@ WITH a, b,
 WHERE size(common_tags) > 0
 RETURN a.title, b.title, common_tags
 
--- ページネーション付きリスト処理
+// ページネーション付きリスト処理
 MATCH (n:Person)
 WITH collect(n.name) AS all_names
 RETURN all_names[($page - 1) * $size .. $page * $size] AS page_names
@@ -220,17 +220,17 @@ RETURN all_names[($page - 1) * $size .. $page * $size] AS page_names
 ノードが持つラベルの一覧を文字列リストで返します。複数ラベルを持つノードでは全ラベルが含まれます。
 
 ```cypher
--- ノードのラベル一覧を取得
+// ノードのラベル一覧を取得
 MATCH (n:Person {name: "Alice"})
 RETURN labels(n)
--- 結果: ["Person", "Employee"]  （複数ラベルの場合）
+// 結果: ["Person", "Employee"]  （複数ラベルの場合）
 
--- ラベルを条件に使用
+// ラベルを条件に使用
 MATCH (n)
 WHERE "Admin" IN labels(n)
 RETURN n.name
 
--- ラベル数でフィルタ
+// ラベル数でフィルタ
 MATCH (n)
 WHERE size(labels(n)) > 1
 RETURN n.name, labels(n)

@@ -13,22 +13,21 @@ MaharitDB は BM25 アルゴリズムに基づく全文検索エンジンを内�
 全文検索を使用する前に、対象のノードとプロパティに対してインデックスを作成する必要があります。
 
 ```cypher
--- 単一プロパティのインデックス
+// 単一プロパティのインデックス
 CREATE FULLTEXT INDEX articleIndex FOR (a:Article) ON EACH [a.title]
 
--- 複数プロパティのインデックス
+// 複数プロパティのインデックス
 CREATE FULLTEXT INDEX articleIndex FOR (a:Article) ON EACH [a.title, a.body, a.summary]
-
--- 複数ラベルのインデックス
-CREATE FULLTEXT INDEX contentIndex FOR (n:Article|Post|Page) ON EACH [n.title, n.body]
 ```
+
+対象ラベルは 1 つだけ指定できます（`(n:A|B)` のような複数ラベル指定には対応していません）。
 
 ## CALL db.index.fulltext.search()
 
 インデックスを使った全文検索を実行します。
 
 ```cypher
--- 基本的な検索
+// 基本的な検索
 CALL db.index.fulltext.search("articleIndex", "Rust programming")
 YIELD node, score
 RETURN node.title, score
@@ -68,12 +67,12 @@ RETURN node.title, score
 チルダ（`~`）に続けて編集距離を指定することで、スペルゆれを許容した検索ができます。
 
 ```cypher
--- 編集距離 1 以内のゆらぎを許容
+// 編集距離 1 以内のゆらぎを許容
 CALL db.index.fulltext.search("articleIndex", "graph~1")
 YIELD node, score
 RETURN node.title, score
 
--- 編集距離 2 以内
+// 編集距離 2 以内
 CALL db.index.fulltext.search("articleIndex", "datbase~2")
 YIELD node, score
 RETURN node.title, score
@@ -107,16 +106,16 @@ RETURN a.title
 MaharitDB は [lindera](https://github.com/lindera/lindera) と埋め込み IPADIC 辞書を使用した日本語形態素解析に対応しています。日本語テキストは自動的に形態素（単語）に分割されてインデックス・検索されます。
 
 ```cypher
--- 日本語テキストの全文検索
+// 日本語テキストの全文検索
 CREATE FULLTEXT INDEX jpArticleIndex FOR (a:Article) ON EACH [a.title, a.body]
 
--- 形態素に基づいた検索（「グラフデータベース」→「グラフ」「データベース」で検索）
+// 形態素に基づいた検索（「グラフデータベース」→「グラフ」「データベース」で検索）
 CALL db.index.fulltext.search("jpArticleIndex", "グラフデータベース")
 YIELD node, score
 RETURN node.title, score
 ORDER BY score DESC
 
--- 複数のキーワードで絞り込み
+// 複数のキーワードで絞り込み
 CALL db.index.fulltext.search("jpArticleIndex", "機械学習 グラフ")
 YIELD node, score
 RETURN node.title, score
@@ -191,17 +190,17 @@ score(q, d) = Σ IDF(qi) * (f(qi,d) * (k1+1)) / (f(qi,d) + k1 * (1 - b + b * |d|
 ## インデックスの管理
 
 ```cypher
--- インデックスの削除
+// インデックスの削除
 DROP FULLTEXT INDEX articleIndex
 
--- 全インデックスの一覧（プロパティインデックスを参照）
+// 全インデックスの一覧（プロパティインデックスを参照）
 SHOW INDEXES
 ```
 
 ## 実用的な例
 
 ```cypher
--- 関連記事の検索（スコア閾値でフィルタ）
+// 関連記事の検索（スコア閾値でフィルタ）
 CALL db.index.fulltext.search("articleIndex", $query)
 YIELD node, score
 WHERE score > 0.5
@@ -209,7 +208,7 @@ RETURN node.title, node.url, score
 ORDER BY score DESC
 LIMIT 5
 
--- 検索結果に追加情報を付加
+// 検索結果に追加情報を付加
 CALL db.index.fulltext.search("articleIndex", "Rust async await")
 YIELD node, score
 MATCH (node)-[:HAS_TAG]->(tag:Tag)

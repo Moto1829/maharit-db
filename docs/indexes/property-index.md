@@ -11,7 +11,7 @@ nav_order: 1
 ## インデックスの作成
 
 ```cypher
--- ラベルとプロパティにインデックスを作成
+// ラベルとプロパティにインデックスを作成
 CREATE INDEX ON :Person(name)
 
 CREATE INDEX ON :User(email)
@@ -49,11 +49,12 @@ DROP INDEX ON :Person(name)
 インライン・プロパティ指定（`{prop: value}` 形式）でインデックスが自動的に使用されます。
 
 ```cypher
--- インデックスが使用される（最もパフォーマンスが高い）
+// インデックスが使用される（最もパフォーマンスが高い）
 MATCH (n:Person {name: "Alice"}) RETURN n
 
--- 範囲検索（IntまたはFloat型プロパティのインデックスで高速化）
+// 範囲検索（IntまたはFloat型プロパティのインデックスで高速化）
 MATCH (n:Person) WHERE n.age > 30 RETURN n
+
 MATCH (n:Person) WHERE n.age >= 25 AND n.age <= 40 RETURN n
 ```
 

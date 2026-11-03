@@ -15,11 +15,11 @@ PageRank はウェブページのランキングアルゴリズムとして有�
 ### Cypher での使用
 
 ```cypher
--- PageRank を計算してスコアの高いノードを返す
+// PageRank を計算してスコアの高いノードを返す
 CALL db.pageRank(
-  "FOLLOWS",   -- エッジタイプ
-  0.85,        -- ダンピングファクター（通常 0.85）
-  20           -- 反復回数
+  "FOLLOWS",   // エッジタイプ
+  0.85,        // ダンピングファクター（通常 0.85）
+  20           // 反復回数
 )
 YIELD node, score
 RETURN node.name, score
@@ -52,7 +52,7 @@ fn main() {
 ダンピングファクター（d）は、ランダムサーファーがリンクをたどる確率を表します。`1 - d` の確率でランダムなノードに移動します。通常は `0.85` を使用します。
 
 ```cypher
--- 収束しやすいダンピングファクターと反復回数
+// 収束しやすいダンピングファクターと反復回数
 CALL db.pageRank("LINKS", 0.85, 50)
 YIELD node, score
 RETURN node.name, score
@@ -122,13 +122,13 @@ LIMIT 10
 最も単純な中心性指標で、接続するエッジ数（次数）を使用します。
 
 ```cypher
--- 出次数（FOLLOWS 先の数）
+// 出次数（FOLLOWS 先の数）
 MATCH (n:Person)
 RETURN n.name, count { (n)-[:FOLLOWS]->(:Person) } AS out_degree
 ORDER BY out_degree DESC
 LIMIT 10
 
--- 入次数（フォロワー数）
+// 入次数（フォロワー数）
 MATCH (n:Person)
 RETURN n.name, count { (:Person)-[:FOLLOWS]->(n) } AS in_degree
 ORDER BY in_degree DESC

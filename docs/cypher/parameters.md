@@ -13,11 +13,11 @@ nav_order: 7
 パラメータは `$` プレフィックスで参照します。
 
 ```cypher
--- パラメータを使ったノード検索
+// パラメータを使ったノード検索
 MATCH (n:Person {name: $name})
 RETURN n
 
--- WHERE 句でパラメータを使用
+// WHERE 句でパラメータを使用
 MATCH (n:Person)
 WHERE n.age >= $min_age AND n.age <= $max_age
 RETURN n.name, n.age
@@ -37,20 +37,20 @@ RETURN n.name, n.age
 パラメータはほぼすべての値が使用できる場所で利用可能です。
 
 ```cypher
--- プロパティの値
+// プロパティの値
 MATCH (n:Person {name: $name}) RETURN n
 
--- CREATE 時のプロパティ値
+// CREATE 時のプロパティ値
 CREATE (n:Person {name: $name, age: $age})
 
--- SET でのプロパティ更新
+// SET でのプロパティ更新
 MATCH (n:Person {name: $name})
 SET n.age = $new_age
 
--- LIMIT と SKIP
+// LIMIT と SKIP
 MATCH (n:Person) RETURN n SKIP $offset LIMIT $count
 
--- リストパラメータ
+// リストパラメータ
 MATCH (n:Person)
 WHERE n.city IN $cities
 RETURN n.name
@@ -68,7 +68,7 @@ RETURN n.name
 パラメータとしてマップを渡し、プロパティとして展開できます。
 
 ```cypher
--- マップパラメータでノードを作成
+// マップパラメータでノードを作成
 CREATE (n:Person $props)
 RETURN n
 ```

@@ -1,0 +1,68 @@
+# Docs statements that do not parse yet (see docs_cypher_examples.rs).
+# One entry per statement: `docs/<file>: <first non-comment line>`.
+# Follow-up work: todo/docs/124-docs-unsupported-syntax-backlog.md
+
+docs/advanced/query-optimization.md: CREATE INDEX FOR (n:Person) ON (n.email)
+docs/advanced/query-optimization.md: MATCH (p:Person {name: "Alice"})  // 1 件に絞り込み
+docs/advanced/transactions.md: BEGIN
+docs/advanced/transactions.md: COMMIT
+docs/advanced/transactions.md: CREATE (alice:Person {name: "Alice", balance: 1000})
+docs/advanced/transactions.md: MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
+docs/algorithms/all-paths.md: MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
+docs/cypher/order-limit-skip.md: MATCH (n:Person)
+docs/cypher/parameters.md: CREATE (n:Person $props)
+docs/cypher/set-remove-merge.md: MATCH (n)
+docs/cypher/set-remove-merge.md: MATCH (n:Person {name: "Alice"})
+docs/cypher/unwind-with-union.md: MATCH (a:Article)
+docs/cypher/unwind-with-union.md: UNWIND [1, 2, 3] AS id
+docs/cypher/unwind-with-union.md: UNWIND [[1, 2], [3, 4], [5, 6]] AS sublist
+docs/cypher/where.md: MATCH (n)
+docs/cypher/where.md: MATCH (p:Product)
+docs/functions/aggregation.md: MATCH (p:Product)
+docs/functions/list.md: MATCH (a:Article), (b:Article)
+docs/functions/list.md: MATCH (p:Person {name: "Alice"})
+docs/functions/list.md: RETURN [1, 2, 3, 4, 5][..3]
+docs/functions/list.md: RETURN [1, 2, 3, 4, 5][1..3]
+docs/functions/list.md: RETURN [1, 2, 3, 4, 5][2..]
+docs/functions/list.md: RETURN [1, 2, 3][-1]
+docs/functions/list.md: RETURN [1, 2, 3][0]
+docs/functions/list.md: RETURN [1, 2, 3][2]
+docs/functions/list.md: RETURN [x IN [1, 2, 3, 4, 5] WHERE x % 2 = 0 | x * 2]
+docs/functions/list.md: RETURN [x IN [1, 2, 3, 4, 5] WHERE x % 2 = 0]
+docs/functions/math.md: MATCH (a:Location), (b:Location)
+docs/functions/math.md: RETURN asin(1.0)  // 結果: 1.5707963267948966 (π/2)
+docs/functions/math.md: RETURN atan2(1.0, 1.0)  // 結果: 0.7853981633974483
+docs/functions/math.md: RETURN exp(1)
+docs/functions/math.md: RETURN pow(2, 10)
+docs/functions/math.md: RETURN pow(3.0, 0.5)
+docs/functions/math.md: RETURN sin(0)    // 結果: 0.0
+docs/functions/predicates.md: MATCH (dept:Department {name: "Engineering"})
+docs/functions/predicates.md: MATCH p = (start:City)-[:ROAD*]->(end:City)
+docs/functions/predicates.md: RETURN all(x IN [2, 4, 6, 8] WHERE x % 2 = 0)
+docs/functions/predicates.md: WHERE exists(n.email)
+docs/functions/string.md: MATCH (a:Article)
+docs/functions/string.md: RETURN contains("Hello World", "World")
+docs/functions/string.md: RETURN endsWith("alice@example.com", "@example.com")
+docs/functions/string.md: RETURN length("Hello")
+docs/functions/string.md: RETURN startsWith("Hello World", "Hello")
+docs/operations/acl.md: DENY READ ON LABEL FinancialRecord TO ROLE reader
+docs/operations/acl.md: DENY READ ON LABEL SecretProject TO specific_user
+docs/operations/acl.md: DENY READ ON PROPERTY salary ON LABEL Employee TO ROLE reader
+docs/operations/acl.md: DENY WRITE ON PROPERTY salary ON LABEL Employee TO default_user
+docs/operations/acl.md: GRANT READ ON ALL LABELS TO alice
+docs/operations/acl.md: GRANT READ ON LABEL Customer TO sales_user
+docs/operations/acl.md: GRANT READ ON LABEL Person TO alice
+docs/operations/acl.md: GRANT READ ON LABEL Product TO ROLE reader
+docs/operations/acl.md: GRANT READ ON LABEL Repository TO eng_user
+docs/operations/acl.md: GRANT READ ON PROPERTY name ON LABEL Person TO alice
+docs/operations/acl.md: GRANT WRITE ON LABEL Person TO alice
+docs/operations/acl.md: REVOKE READ ON LABEL Person FROM alice
+docs/operations/acl.md: REVOKE WRITE ON LABEL Person FROM alice
+docs/operations/acl.md: SET DEFAULT ACL READ ON LABEL Public
+docs/operations/acl.md: SHOW ACL FOR alice
+docs/operations/acl.md: SHOW ACL ON LABEL Person
+docs/operations/auth.md: CREATE USER admin_user WITH PASSWORD "adminpass" ROLE admin
+docs/operations/auth.md: CREATE USER alice WITH PASSWORD "securepassword"
+docs/operations/auth.md: CREATE USER bob WITH PASSWORD "password123" ROLE reader
+docs/operations/auth.md: LOGOUT
+docs/visualization/export.md: MATCH (p:Person)-[:KNOWS]->(f:Person)

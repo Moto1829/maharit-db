@@ -20,7 +20,8 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         Statement::Union(u) => u.queries.iter().all(|_| true), // all MATCH queries
         Statement::ShowConstraints => true,
         Statement::ShowUsers => true,
-        Statement::ProcedureCall(_) => true, // read-only introspection calls
+        // Procedures are read-only; a trailing FOREACH may write.
+        Statement::ProcedureCall(pc) => pc.foreach_clause.is_none(),
 
         // EXPLAIN / PROFILE are read-only when the inner statement is read-only
         Statement::Explain(inner) => is_read_only(inner),
@@ -167,6 +168,8 @@ pub struct CallSubquery {
     pub where_clause: Option<Expression>,
     /// 内部RETURN項目（エイリアスあり）
     pub return_items: Vec<CallReturnItem>,
+    /// `UNION` / `UNION ALL` で続く次のブランチ（省略可）
+    pub union: Option<(UnionType, Box<CallSubquery>)>,
 }
 
 /// CALLサブクエリのRETURN項目（エイリアスあり）
@@ -282,6 +285,17 @@ pub struct PathPattern {
     pub variable: Option<String>,
     pub start: NodePattern,
     pub segments: Vec<PathSegment>,
+    /// `shortestPath(...)` / `allShortestPaths(...)` で囲まれている場合の種別
+    pub shortest: Option<ShortestPathKind>,
+}
+
+/// 最短経路パターンの種別
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortestPathKind {
+    /// `shortestPath(...)`: 端点の組ごとに最短経路を 1 本
+    Single,
+    /// `allShortestPaths(...)`: 端点の組ごとに最短経路をすべて
+    All,
 }
 
 /// パスの1セグメント: -[r:TYPE]->(node)
@@ -921,17 +935,38 @@ pub struct AlterUserStatement {
     pub role: Option<String>,
 }
 
-/// プロシージャコール文: CALL proc.name(arg1, arg2) YIELD col1, col2 ...
+/// プロシージャコール文:
+/// `CALL proc.name(args) [YIELD col [AS alias], ...] [WHERE ...] [MATCH/WITH ...] [FOREACH (...) | RETURN ...]`
 ///
-/// 例: CALL db.index.fulltext.search('idx', 'query') YIELD node, score
+/// 例: CALL db.index.fulltext.search('idx', 'query') YIELD node AS doc, score WHERE score > 1.0 RETURN doc
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcedureCallStatement {
     /// プロシージャ名（ドット区切り、例: "db.index.fulltext.search"）
     pub procedure: String,
     /// 引数のリスト（リテラルまたはパラメータ参照）
     pub arguments: Vec<Expression>,
-    /// YIELD列名のリスト（省略時は空）
-    pub yield_columns: Vec<String>,
+    /// YIELD 項目のリスト（省略時は空 = プロシージャの全列）
+    pub yield_items: Vec<YieldItem>,
+    /// YIELD 後に続く WHERE / MATCH / WITH（MATCH 文と同じセグメント形式）
+    pub segments: Vec<QuerySegment>,
+    /// 末尾の FOREACH 句（省略可。RETURN とは排他）
+    pub foreach_clause: Option<ForeachStatement>,
     /// RETURN句（省略可）
     pub return_clause: Option<ReturnClause>,
+}
+
+/// YIELD 項目: `column [AS alias]`
+#[derive(Debug, Clone, PartialEq)]
+pub struct YieldItem {
+    /// プロシージャの出力列名
+    pub column: String,
+    /// 後続句から参照する名前（省略時は列名）
+    pub alias: Option<String>,
+}
+
+impl YieldItem {
+    /// 後続句から見える変数名
+    pub fn name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.column)
+    }
 }

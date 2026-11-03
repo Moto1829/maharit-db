@@ -198,8 +198,19 @@ impl Parser {
                 if matches!(next, Some(TokenKind::Ident(_))) {
                     return self.parse_procedure_call();
                 }
-                // Otherwise fall through to error (CALL { } must appear inside MATCH)
-                return Err(self.unexpected_token("procedure name after CALL"));
+                if next != Some(&TokenKind::LBrace) {
+                    return Err(self.unexpected_token("procedure name or { after CALL"));
+                }
+                // Standalone `CALL { … } RETURN …`: a MATCH statement with no
+                // segments, so the subquery runs once against an empty row.
+                let call_clause = Some(self.parse_call_subquery()?);
+                self.expect(TokenKind::Return)?;
+                let return_clause = self.parse_return_clause()?;
+                Statement::Match(MatchStatement {
+                    segments: vec![],
+                    call_clause,
+                    return_clause,
+                })
             }
             Some(_) => {
                 return Err(self.unexpected_token(
@@ -1989,6 +2000,7 @@ impl Parser {
     // ========== Fulltext Index ==========
 
     /// CREATE FULLTEXT INDEX name FOR (n:Label) ON (n.prop1, n.prop2)
+    /// CREATE FULLTEXT INDEX name FOR (n:Label) ON EACH [n.prop1, n.prop2]
     fn parse_create_fulltext_index(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Create)?;
         self.expect(TokenKind::Fulltext)?;
@@ -2003,8 +2015,18 @@ impl Parser {
         let label = self.expect_ident_or_keyword()?;
         self.expect(TokenKind::RParen)?;
 
+        // `ON (n.a, n.b)` or the Neo4j form `ON EACH [n.a, n.b]`
         self.expect(TokenKind::On)?;
-        self.expect(TokenKind::LParen)?;
+        let each =
+            matches!(self.peek_kind(), Some(TokenKind::Ident(w)) if w.eq_ignore_ascii_case("each"));
+        let close = if each {
+            self.advance();
+            self.expect(TokenKind::LBracket)?;
+            TokenKind::RBracket
+        } else {
+            self.expect(TokenKind::LParen)?;
+            TokenKind::RParen
+        };
 
         let mut properties = Vec::new();
         loop {
@@ -2025,7 +2047,7 @@ impl Parser {
             self.advance();
         }
 
-        self.expect(TokenKind::RParen)?;
+        self.expect(close)?;
 
         Ok(Statement::CreateFulltextIndex(
             CreateFulltextIndexStatement {
@@ -2164,7 +2186,14 @@ impl Parser {
     fn parse_call_subquery(&mut self) -> Result<CallSubquery, ParseError> {
         self.expect(TokenKind::Call)?;
         self.expect(TokenKind::LBrace)?;
+        let subquery = self.parse_call_subquery_branch()?;
+        self.expect(TokenKind::RBrace)?;
+        Ok(subquery)
+    }
 
+    /// One branch of a CALL subquery body: `[WITH vars] MATCH … [WHERE …] RETURN …`,
+    /// followed by any `UNION [ALL]` branches.
+    fn parse_call_subquery_branch(&mut self) -> Result<CallSubquery, ParseError> {
         // Optional WITH import: WITH var1, var2, ...
         let with_import = if self.check(TokenKind::With) {
             self.advance();
@@ -2200,13 +2229,25 @@ impl Parser {
             return_items.push(self.parse_call_return_item()?);
         }
 
-        self.expect(TokenKind::RBrace)?;
+        let union = if self.check(TokenKind::Union) {
+            self.advance();
+            let union_type = if self.check(TokenKind::All) {
+                self.advance();
+                UnionType::UnionAll
+            } else {
+                UnionType::Union
+            };
+            Some((union_type, Box::new(self.parse_call_subquery_branch()?)))
+        } else {
+            None
+        };
 
         Ok(CallSubquery {
             with_import,
             match_clause,
             where_clause,
             return_items,
+            union,
         })
     }
 
@@ -2251,34 +2292,129 @@ impl Parser {
         }
         self.expect(TokenKind::RParen)?;
 
-        // Optional YIELD clause
-        let yield_columns = if self.check(TokenKind::Yield) {
+        // Optional YIELD clause: col [AS alias], ...
+        let mut yield_items = Vec::new();
+        if self.check(TokenKind::Yield) {
             self.advance();
-            let mut cols = Vec::new();
-            cols.push(self.expect_ident()?);
-            while self.check(TokenKind::Comma) {
+            loop {
+                let column = self.expect_ident_or_keyword()?;
+                let alias = if self.check(TokenKind::As) {
+                    self.advance();
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                yield_items.push(YieldItem { column, alias });
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
                 self.advance();
-                cols.push(self.expect_ident()?);
             }
-            cols
+        }
+
+        let segments = self.parse_procedure_continuation(!yield_items.is_empty())?;
+
+        let foreach_clause = if self.check(TokenKind::Foreach) {
+            Some(self.parse_foreach_statement()?)
         } else {
-            Vec::new()
+            None
         };
 
         // Optional RETURN clause (for filtering/projection after YIELD)
-        let return_clause = if self.check(TokenKind::Return) {
+        let return_clause = if foreach_clause.is_none() && self.check(TokenKind::Return) {
             self.advance();
             Some(self.parse_return_clause()?)
         } else {
             None
         };
 
+        // MATCH / WITH after YIELD only make sense when something consumes their rows.
+        let has_reading_clause = segments
+            .iter()
+            .any(|seg| !seg.match_clauses.is_empty() || seg.with_clause.is_some());
+        if has_reading_clause && foreach_clause.is_none() && return_clause.is_none() {
+            return Err(self.unexpected_token("RETURN or FOREACH"));
+        }
+
         Ok(Statement::ProcedureCall(ProcedureCallStatement {
             procedure,
             arguments,
-            yield_columns,
+            yield_items,
+            segments,
+            foreach_clause,
             return_clause,
         }))
+    }
+
+    /// Parse the clauses that may follow `CALL proc() YIELD ...`:
+    /// an optional `WHERE`, then any number of `MATCH` / `OPTIONAL MATCH` /
+    /// `WITH [WHERE]` segments. `WHERE` / `MATCH` / `WITH` require a YIELD.
+    fn parse_procedure_continuation(
+        &mut self,
+        has_yield: bool,
+    ) -> Result<Vec<QuerySegment>, ParseError> {
+        let mut segments = Vec::new();
+        let continues = self.check(TokenKind::Where)
+            || self.check(TokenKind::Match)
+            || self.check(TokenKind::Optional)
+            || self.check(TokenKind::With);
+        if !continues {
+            return Ok(segments);
+        }
+        if !has_yield {
+            return Err(self.unexpected_token("YIELD before WHERE, MATCH or WITH"));
+        }
+
+        if self.check(TokenKind::Where) {
+            self.advance();
+            segments.push(QuerySegment {
+                match_clauses: vec![],
+                where_clause: Some(self.parse_expression()?),
+                with_clause: None,
+            });
+        }
+        loop {
+            if self.check(TokenKind::Match) {
+                let (segment, is_delete, set_clause, _) = self.parse_query_segment()?;
+                if is_delete || set_clause.is_some() {
+                    return Err(self.unexpected_token("RETURN, FOREACH, MATCH or WITH"));
+                }
+                segments.push(segment);
+            } else if self.check(TokenKind::Optional) {
+                // parse_query_segment only starts at a plain MATCH.
+                self.advance();
+                self.expect(TokenKind::Match)?;
+                let clause = self.parse_match_clause(true)?;
+                let where_clause = if self.check(TokenKind::Where) {
+                    self.advance();
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                segments.push(QuerySegment {
+                    match_clauses: vec![clause],
+                    where_clause,
+                    with_clause: None,
+                });
+            } else if self.check(TokenKind::With) {
+                segments.push(QuerySegment {
+                    match_clauses: vec![],
+                    where_clause: None,
+                    with_clause: Some(self.parse_with_clause()?),
+                });
+            } else if self.check(TokenKind::Where)
+                && segments.last().is_some_and(|seg| seg.with_clause.is_some())
+            {
+                self.advance();
+                segments.push(QuerySegment {
+                    match_clauses: vec![],
+                    where_clause: Some(self.parse_expression()?),
+                    with_clause: None,
+                });
+            } else {
+                return Ok(segments);
+            }
+        }
     }
 
     /// Expect an identifier or a keyword that can serve as an identifier in dotted names.
@@ -2404,6 +2540,27 @@ impl Parser {
             _ => None,
         };
 
+        // `shortestPath((a)-[*]-(b))` / `allShortestPaths(...)`
+        if let Some(kind) = self.peek_shortest_path_kind() {
+            self.advance(); // function name
+            self.expect(TokenKind::LParen)?;
+            let inner = self.parse_pattern()?;
+            self.expect(TokenKind::RParen)?;
+            let mut path = match inner {
+                Pattern::Path(p) if p.variable.is_none() && p.segments.len() == 1 => p,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "a single-relationship pattern such as (a)-[:T*]-(b) inside shortestPath()".to_string(),
+                        found: "other pattern".to_string(),
+                        span: self.current_span(),
+                    });
+                }
+            };
+            path.variable = path_variable;
+            path.shortest = Some(kind);
+            return Ok(Pattern::Path(path));
+        }
+
         let start = self.parse_node_pattern()?;
 
         // Check if it's a path pattern
@@ -2420,9 +2577,26 @@ impl Parser {
                 variable: path_variable,
                 start,
                 segments,
+                shortest: None,
             }))
         } else {
             Ok(Pattern::Node(start))
+        }
+    }
+
+    /// パターン位置で `shortestPath(` / `allShortestPaths(` が始まるならその種別を返す。
+    fn peek_shortest_path_kind(&self) -> Option<ShortestPathKind> {
+        let name = match self.peek_kind() {
+            Some(TokenKind::Ident(name)) => name,
+            _ => return None,
+        };
+        if self.tokens.get(self.pos + 1).map(|t| &t.kind) != Some(&TokenKind::LParen) {
+            return None;
+        }
+        match name.to_lowercase().as_str() {
+            "shortestpath" => Some(ShortestPathKind::Single),
+            "allshortestpaths" => Some(ShortestPathKind::All),
+            _ => None,
         }
     }
 
@@ -2801,6 +2975,7 @@ impl Parser {
                                 variable: None,
                                 start: start_node,
                                 segments,
+                                shortest: None,
                             })
                         } else {
                             Pattern::Node(start_node)

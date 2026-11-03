@@ -16,15 +16,15 @@ nav_order: 4
 
 ```cypher
 RETURN all(x IN [2, 4, 6, 8] WHERE x % 2 = 0)
--- 結果: true
+// 結果: true
 
 RETURN all(x IN [1, 2, 3] WHERE x > 0)
--- 結果: true
+// 結果: true
 
 RETURN all(x IN [1, 2, 3] WHERE x > 1)
--- 結果: false
+// 結果: false
 
--- パスのすべてのノードが条件を満たすか確認
+// パスのすべてのノードが条件を満たすか確認
 MATCH p = (start:City)-[:ROAD*]->(end:City)
 WHERE all(city IN nodes(p) WHERE city.accessible = true)
 RETURN start.name, end.name
@@ -36,12 +36,12 @@ RETURN start.name, end.name
 
 ```cypher
 RETURN any(x IN [1, 2, 3] WHERE x > 2)
--- 結果: true
+// 結果: true
 
 RETURN any(x IN [1, 2, 3] WHERE x > 5)
--- 結果: false
+// 結果: false
 
--- 友人の中に東京在住の人がいるか
+// 友人の中に東京在住の人がいるか
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WITH p, collect(f) AS friends
 WHERE any(friend IN friends WHERE friend.city = "Tokyo")
@@ -54,12 +54,12 @@ RETURN p.name
 
 ```cypher
 RETURN none(x IN [1, 2, 3] WHERE x > 5)
--- 結果: true
+// 結果: true
 
 RETURN none(x IN [1, 2, 3] WHERE x > 2)
--- 結果: false
+// 結果: false
 
--- ブロックされたユーザーがいないパスのみ
+// ブロックされたユーザーがいないパスのみ
 MATCH p = (a:Person)-[:KNOWS*]->(b:Person)
 WHERE none(n IN nodes(p) WHERE n.blocked = true)
 RETURN a.name, b.name
@@ -71,12 +71,12 @@ RETURN a.name, b.name
 
 ```cypher
 RETURN single(x IN [1, 2, 3] WHERE x = 2)
--- 結果: true
+// 結果: true
 
 RETURN single(x IN [1, 2, 3] WHERE x > 1)
--- 結果: false (2 つが条件を満たす)
+// 結果: false (2 つが条件を満たす)
 
--- 管理者が一人だけかを確認
+// 管理者が一人だけかを確認
 MATCH (dept:Department {name: "Engineering"})
 WITH [(dept)-[:HAS_MEMBER]->(m:Person) | m] AS members
 WHERE single(m IN members WHERE m.role = "admin")
@@ -90,17 +90,17 @@ RETURN dept.name
 プロパティやパターンが存在するかを確認します。
 
 ```cypher
--- プロパティの存在確認
+// プロパティの存在確認
 MATCH (n:Person)
 WHERE exists(n.email)
 RETURN n.name, n.email
 
--- パターンの存在確認
+// パターンの存在確認
 MATCH (n:Person)
 WHERE exists((n)-[:FOLLOWS]->(:Person))
 RETURN n.name
 
--- RETURN での使用
+// RETURN での使用
 MATCH (n:Person)
 RETURN n.name, exists(n.email) AS has_email
 ```
@@ -108,7 +108,7 @@ RETURN n.name, exists(n.email) AS has_email
 注意: プロパティの存在確認には `IS NOT NULL` も使えます。
 
 ```cypher
--- 以下は等価
+// 以下は等価
 WHERE exists(n.email)
 WHERE n.email IS NOT NULL
 ```
@@ -133,21 +133,21 @@ RETURN p.name
 リストまたは文字列が空かどうかを確認します。
 
 ```cypher
--- リストが空かどうか
+// リストが空かどうか
 RETURN isEmpty([])
--- 結果: true
+// 結果: true
 
 RETURN isEmpty([1, 2, 3])
--- 結果: false
+// 結果: false
 
--- 文字列が空かどうか
+// 文字列が空かどうか
 RETURN isEmpty("")
--- 結果: true
+// 結果: true
 
 RETURN isEmpty("hello")
--- 結果: false
+// 結果: false
 
--- プロパティのリストが空でないノードを検索
+// プロパティのリストが空でないノードを検索
 MATCH (n:Article)
 WHERE NOT isEmpty(n.tags)
 RETURN n.title, n.tags
@@ -156,17 +156,17 @@ RETURN n.title, n.tags
 ## 実用的な例
 
 ```cypher
--- すべての必須フィールドが設定されているユーザー
+// すべての必須フィールドが設定されているユーザー
 MATCH (u:User)
 WHERE all(field IN ["name", "email", "created_at"] WHERE exists(u[field]))
 RETURN u
 
--- 少なくとも 1 つのスキルが条件を満たすエンジニア
+// 少なくとも 1 つのスキルが条件を満たすエンジニア
 MATCH (e:Engineer)
 WHERE any(skill IN e.skills WHERE skill IN ["Rust", "Go", "C++"])
 RETURN e.name, e.skills
 
--- 同一パス上に同じ人が現れない（シンプルパス確認）
+// 同一パス上に同じ人が現れない（シンプルパス確認）
 MATCH p = (a:Person)-[:KNOWS*1..5]->(b:Person)
 WHERE a <> b
   AND single(n IN nodes(p) WHERE n = a)

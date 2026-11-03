@@ -48,11 +48,11 @@ FOREACH (n IN nodes |
 その後、コンポーネント ID でクエリできます：
 
 ```cypher
--- 特定のコンポーネントのノードを取得
+// 特定のコンポーネントのノードを取得
 MATCH (n:Person {component_id: 1})
 RETURN n.name
 
--- コンポーネントをまたぐクエリ
+// コンポーネントをまたぐクエリ
 MATCH (a:Person), (b:Person)
 WHERE a.component_id <> b.component_id
 RETURN a.name, b.name, "separated" AS status
@@ -118,7 +118,7 @@ fn main() {
 ## コンポーネントサイズの分布分析
 
 ```cypher
--- コンポーネントサイズの分布を確認
+// コンポーネントサイズの分布を確認
 CALL db.connectedComponents("KNOWS")
 YIELD component_id, node_count
 RETURN node_count, count(*) AS num_components
@@ -128,26 +128,26 @@ ORDER BY node_count DESC
 ## 孤立ノードの検出
 
 ```cypher
--- 接続のないノードを検出
+// 接続のないノードを検出
 MATCH (n:Person)
 WHERE NOT (n)-[:KNOWS]-()
 RETURN n.name, "isolated" AS status
 
--- または連結成分を使用
+// または連結成分を使用
 CALL db.connectedComponents("KNOWS")
 YIELD component_id, nodes, node_count
 WHERE node_count = 1
-RETURN [n IN nodes | n.name][0] AS isolated_node
+RETURN head([n IN nodes | n.name]) AS isolated_node
 ```
 
 ## グラフの連結性の確認
 
 ```cypher
--- グラフ全体が連結しているか確認
+// グラフ全体が連結しているか確認
 CALL db.connectedComponents("ROAD")
 YIELD component_id
 RETURN count(DISTINCT component_id) AS num_components
--- 1 であれば完全連結
+// 1 であれば完全連結
 ```
 
 ## ラベル伝播法（コミュニティ検出）
@@ -155,8 +155,8 @@ RETURN count(DISTINCT component_id) AS num_components
 連結成分よりも細かいコミュニティ構造を検出するには、ラベル伝播法を使用します。
 
 ```cypher
--- ラベル伝播でコミュニティを検出
-CALL db.labelPropagation("KNOWS", 50)  -- 50 回反復
+// ラベル伝播でコミュニティを検出
+CALL db.labelPropagation("KNOWS", 50)  // 50 回反復
 YIELD node, community_id
 RETURN community_id, collect(node.name) AS members, count(*) AS size
 ORDER BY size DESC

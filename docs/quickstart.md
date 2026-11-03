@@ -47,7 +47,7 @@ Type your Cypher query and press Enter. Type 'exit' to quit.
 
 ### ノードを作成する
 
-```cypher
+```text
 > CREATE (alice:Person {name: "Alice", age: 30})
 Created 1 node(s).
 
@@ -57,7 +57,7 @@ Created 1 node(s).
 
 ### リレーションシップを作成する
 
-```cypher
+```text
 > MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
   CREATE (a)-[:KNOWS {since: 2020}]->(b)
 Created 1 relationship(s).
@@ -65,7 +65,7 @@ Created 1 relationship(s).
 
 ### データを検索する
 
-```cypher
+```text
 > MATCH (n:Person) RETURN n.name, n.age
 +-------+-----+
 | n.name | n.age |
@@ -78,7 +78,7 @@ Created 1 relationship(s).
 
 ### グラフを走査する
 
-```cypher
+```text
 > MATCH (p:Person)-[:KNOWS]->(friend:Person)
   RETURN p.name AS person, friend.name AS friend
 +--------+--------+
@@ -91,7 +91,7 @@ Created 1 relationship(s).
 
 ### プロパティを更新する
 
-```cypher
+```text
 > MATCH (n:Person {name: "Alice"})
   SET n.email = "alice@example.com"
 Updated 1 node(s).
@@ -99,8 +99,8 @@ Updated 1 node(s).
 
 ### ノードを削除する
 
-```cypher
--- リレーションシップを含めて削除
+```text
+// リレーションシップを含めて削除
 > MATCH (n:Person {name: "Bob"})
   DETACH DELETE n
 Deleted 1 node(s), 1 relationship(s).

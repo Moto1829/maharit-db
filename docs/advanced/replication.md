@@ -77,7 +77,7 @@ Follower（リアルタイムで受信・適用）:
 ### レプリケーションラグの確認
 
 ```cypher
--- リーダーで実行（フォロワーの状態を確認）
+// リーダーで実行（フォロワーの状態を確認）
 CALL db.replication.status()
 YIELD follower_address, lag_bytes, lag_ms, last_lsn
 RETURN follower_address, lag_bytes, lag_ms

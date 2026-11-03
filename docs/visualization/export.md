@@ -15,12 +15,12 @@ DOT 形式は Graphviz で可視化できる標準的なグラフ記述言語で
 ### Cypher からのエクスポート
 
 ```cypher
--- グラフ全体を DOT 形式で出力
+// グラフ全体を DOT 形式で出力
 CALL db.export.dot()
 YIELD dot_string
 RETURN dot_string
 
--- 特定のサブグラフをエクスポート
+// 特定のサブグラフをエクスポート
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WHERE p.name = "Alice"
 CALL db.export.subgraph.dot(collect(p) + collect(f))

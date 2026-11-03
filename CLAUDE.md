@@ -45,6 +45,10 @@ cargo run --example traversal
 Rust は `rust-toolchain.toml` で固定（上げる時はワークフローの `dtolnay/rust-toolchain@<版>` も同時に更新）。
 Linux 専用コード（`cfg(target_os = "linux")`）は macOS の clippy では検査されない点に注意。
 
+### docs の Cypher 例
+
+`docs/` の ```cypher ブロックは `cargo test -p maharit-query --test docs_cypher_examples` で全てパース検査される。1 段落 1 ステートメント（空行区切り）、コメントは `//`（`--` は非対応）、出力例や REPL の入出力は ```text ブロックに書く。未対応のまま残す記述は `crates/maharit-query/tests/docs_cypher_known_failures.txt` に載せる。
+
 ### E2E テスト（Python スクリプト）
 
 CI と同じ E2E 一式は Docker なしで `bash scripts/run_e2e_local.sh`（要 `cargo build --release -p maharit-server`）。

@@ -13,25 +13,25 @@ MaharitDB はトランザクションをサポートしており、複数の操�
 ### 明示的なトランザクション
 
 ```cypher
--- トランザクション開始
+// トランザクション開始
 BEGIN
 
--- 複数の操作
+// 複数の操作
 CREATE (alice:Person {name: "Alice", balance: 1000})
 CREATE (bob:Person {name: "Bob", balance: 500})
 MATCH (alice:Person {name: "Alice"}), (bob:Person {name: "Bob"})
 SET alice.balance = alice.balance - 100
 SET bob.balance = bob.balance + 100
 
--- コミット（変更を確定）
+// コミット（変更を確定）
 COMMIT
 ```
 
 ```cypher
--- エラーが発生した場合はロールバック
+// エラーが発生した場合はロールバック
 BEGIN
 MATCH (n:Person {name: "Alice"})
-SET n.balance = n.balance - 10000  -- 残高不足だった場合
+SET n.balance = n.balance - 10000  // 残高不足だった場合
 ROLLBACK
 ```
 
@@ -40,7 +40,7 @@ ROLLBACK
 単一のクエリは自動的にトランザクション内で実行されます。
 
 ```cypher
--- このクエリ全体がアトミックに実行される
+// このクエリ全体がアトミックに実行される
 MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 CREATE (a)-[:KNOWS]->(b)
 SET a.updated_at = 2024
@@ -143,7 +143,7 @@ async fn transfer_with_retry(
 大量データの処理には UNWIND を使った一括操作を推奨します：
 
 ```cypher
--- 一度のトランザクションで 1000 件のノードを作成
+// 一度のトランザクションで 1000 件のノードを作成
 UNWIND $batch AS item
 CREATE (n:Person {name: item.name, age: item.age})
 ```

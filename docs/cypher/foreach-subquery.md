@@ -13,7 +13,7 @@ nav_order: 5
 ### 基本的な使い方
 
 ```cypher
--- リストの各要素でノードを作成
+// リストの各要素でノードを作成
 FOREACH (name IN ["Alice", "Bob", "Charlie"] |
   CREATE (:Person {name: name})
 )
@@ -22,8 +22,8 @@ FOREACH (name IN ["Alice", "Bob", "Charlie"] |
 ### パスのすべてのノードを更新
 
 ```cypher
--- パス上のすべてのノードにラベルを追加
-MATCH p = (start:Person {name: "Alice"})-[:KNOWS*]->(end:Person)
+// パス上のすべてのノードにラベルを追加
+MATCH p = (start:Person {name: "Alice"})-[:KNOWS*]->(target:Person)
 FOREACH (n IN nodes(p) |
   SET n.visited = true
 )
@@ -32,7 +32,7 @@ FOREACH (n IN nodes(p) |
 ### MATCH と組み合わせた使用
 
 ```cypher
--- タグリストを展開してリレーションを作成
+// タグリストを展開してリレーションを作成
 MATCH (a:Article {id: $id})
 FOREACH (tag IN $tags |
   MERGE (t:Tag {name: tag})
@@ -43,10 +43,10 @@ FOREACH (tag IN $tags |
 ### ネストした FOREACH
 
 ```cypher
--- 二重リストを処理
+// 二重リストを処理
 FOREACH (row IN [[1, "Alice"], [2, "Bob"]] |
   FOREACH (item IN row |
-    -- 内側の処理（実際の用途は限定的）
+    // 内側の処理（実際の用途は限定的）
     CREATE (:Log {value: item})
   )
 )
@@ -57,7 +57,7 @@ FOREACH (row IN [[1, "Alice"], [2, "Bob"]] |
 `FOREACH` は条件分岐の代わりとしても使用できます。条件が真の場合のみ実行したい場合：
 
 ```cypher
--- 条件が真の場合のみ実行（CASE でリストの長さを 0 または 1 に制御）
+// 条件が真の場合のみ実行（CASE でリストの長さを 0 または 1 に制御）
 MATCH (n:Person)
 FOREACH (_ IN CASE WHEN n.age >= 18 THEN [1] ELSE [] END |
   SET n:Adult
@@ -71,7 +71,7 @@ FOREACH (_ IN CASE WHEN n.age >= 18 THEN [1] ELSE [] END |
 ### 基本的な使い方
 
 ```cypher
--- 外部クエリとは独立したサブクエリ
+// 外部クエリとは独立したサブクエリ
 CALL {
   MATCH (n:Person)
   RETURN count(n) AS person_count
@@ -82,7 +82,7 @@ RETURN person_count
 ### 外部変数のインポート
 
 ```cypher
--- 外部クエリの変数を参照
+// 外部クエリの変数を参照
 MATCH (p:Person)
 CALL {
   WITH p
@@ -95,7 +95,7 @@ RETURN p.name, friend_count
 ### サブクエリによる集計
 
 ```cypher
--- 各人の友人数を集計
+// 各人の友人数を集計
 MATCH (p:Person)
 CALL {
   WITH p
@@ -112,7 +112,7 @@ ORDER BY num_friends DESC
 パターンの存在確認に使用します（`WHERE` 句内）。
 
 ```cypher
--- フォロワーが存在する人のみ返す
+// フォロワーが存在する人のみ返す
 MATCH (p:Person)
 WHERE EXISTS {
   MATCH (p)<-[:FOLLOWS]-(:Person)
@@ -125,7 +125,7 @@ RETURN p.name
 サブクエリの結果件数を数えます。
 
 ```cypher
--- フォロワー数を取得
+// フォロワー数を取得
 MATCH (p:Person)
 RETURN p.name,
        COUNT { MATCH (p)<-[:FOLLOWS]-(:Person) } AS follower_count
@@ -137,7 +137,7 @@ ORDER BY follower_count DESC
 サブクエリの結果をリストとして収集します。
 
 ```cypher
--- 各人の友人名をリストで取得
+// 各人の友人名をリストで取得
 MATCH (p:Person)
 RETURN p.name,
        COLLECT { MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name } AS friends

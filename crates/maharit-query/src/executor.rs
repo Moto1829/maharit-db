@@ -1608,10 +1608,12 @@ impl<'a> Executor<'a> {
 
         for item in &items {
             let mut bindings = outer_bindings.clone();
-            bindings.insert(
-                Arc::from(stmt.variable.as_str()),
-                BindingValue::Scalar(item.clone()),
-            );
+            // Bind nodes as nodes so `SET n.prop = …` can update them.
+            let value = match item {
+                Value::Node(id) | Value::NodeData { id, .. } => BindingValue::Node(*id),
+                other => BindingValue::Scalar(other.clone()),
+            };
+            bindings.insert(Arc::from(stmt.variable.as_str()), value);
 
             for clause in &stmt.clauses {
                 self.execute_foreach_clause(clause, &bindings)?;
@@ -2009,32 +2011,115 @@ impl<'a> Executor<'a> {
 
     // ========== PROCEDURE CALLS ==========
 
-    /// Execute a top-level procedure call: CALL proc.name(args) YIELD col1, col2 [RETURN ...]
+    /// Execute a top-level procedure call:
+    /// `CALL proc.name(args) [YIELD col [AS alias], ...] [WHERE / MATCH / WITH ...] [FOREACH | RETURN]`
+    ///
+    /// The procedure produces rows keyed by its output columns. YIELD picks
+    /// (and optionally renames) columns, after which the rows flow through the
+    /// trailing segments exactly like MATCH bindings.
     ///
     /// Currently supports:
-    ///   - `db.index.fulltext.search(indexName, query)` — returns (node, score) rows
+    ///   - `db.index.fulltext.search(indexName, query)` — (node, score)
+    ///   - `db.labels()` — (label)
     fn execute_procedure_call(
         &mut self,
         pc: ProcedureCallStatement,
     ) -> Result<ResultSet, ExecuteError> {
-        match pc.procedure.as_str() {
-            "db.index.fulltext.search" => self.execute_fulltext_search_procedure(pc),
-            other => Err(ExecuteError::TypeError(format!(
-                "unknown procedure: {}",
-                other
-            ))),
+        let (columns, rows) = match pc.procedure.as_str() {
+            "db.index.fulltext.search" => self.fulltext_search_procedure(&pc.arguments)?,
+            "db.labels" => self.labels_procedure(&pc.arguments)?,
+            other => {
+                return Err(ExecuteError::TypeError(format!(
+                    "unknown procedure: {}",
+                    other
+                )));
+            }
+        };
+
+        // YIELD: keep only the named columns, under their aliases.
+        let (out_columns, mut bindings): (Vec<String>, Vec<Bindings>) = if pc.yield_items.is_empty()
+        {
+            (columns.iter().map(|c| c.to_string()).collect(), rows)
+        } else {
+            for item in &pc.yield_items {
+                if !columns.contains(&item.column.as_str()) {
+                    return Err(ExecuteError::TypeError(format!(
+                        "{} does not yield '{}' (available: {})",
+                        pc.procedure,
+                        item.column,
+                        columns.join(", ")
+                    )));
+                }
+            }
+            let renamed = rows
+                .into_iter()
+                .map(|row| {
+                    pc.yield_items
+                        .iter()
+                        .filter_map(|item| {
+                            row.get(item.column.as_str())
+                                .map(|v| (Arc::from(item.name()), v.clone()))
+                        })
+                        .collect()
+                })
+                .collect();
+            (
+                pc.yield_items
+                    .iter()
+                    .map(|i| i.name().to_string())
+                    .collect(),
+                renamed,
+            )
+        };
+
+        for segment in &pc.segments {
+            bindings = self.execute_query_segment(segment, bindings)?;
         }
+
+        if let Some(foreach) = &pc.foreach_clause {
+            for b in &bindings {
+                self.execute_foreach_stmt_ref(foreach, b)?;
+            }
+            return Ok(ResultSet::new(
+                vec!["foreach_result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String("ok".to_string())],
+                }],
+            ));
+        }
+
+        if let Some(return_clause) = &pc.return_clause {
+            return self.build_result_set(return_clause, &bindings);
+        }
+
+        // No RETURN: project the yielded columns directly.
+        let rows = bindings
+            .iter()
+            .map(|b| Row {
+                columns: out_columns
+                    .iter()
+                    .map(|c| match b.get(c.as_str()) {
+                        Some(BindingValue::Node(id)) => Value::Node(*id),
+                        Some(BindingValue::Scalar(v)) => v.clone(),
+                        Some(BindingValue::Edge(id)) => Value::Int(*id as i64),
+                        Some(BindingValue::Path { nodes, edges }) => Value::Path {
+                            nodes: nodes.clone(),
+                            edges: edges.clone(),
+                        },
+                        None => Value::Null,
+                    })
+                    .collect(),
+            })
+            .collect();
+        Ok(ResultSet::new(out_columns, rows))
     }
 
-    /// Execute `CALL db.index.fulltext.search(indexName, query) YIELD node, score`.
-    ///
-    /// Returns a result set with columns derived from the YIELD clause.
-    /// Standard column names: `node` (NodeId as Node value) and `score` (Float).
-    fn execute_fulltext_search_procedure(
-        &mut self,
-        pc: ProcedureCallStatement,
-    ) -> Result<ResultSet, ExecuteError> {
-        if pc.arguments.len() != 2 {
+    /// `db.index.fulltext.search(indexName, query)` — rows of (node, score).
+    fn fulltext_search_procedure(
+        &self,
+        arguments: &[Expression],
+    ) -> Result<(&'static [&'static str], Vec<Bindings>), ExecuteError> {
+        if arguments.len() != 2 {
             return Err(ExecuteError::TypeError(
                 "db.index.fulltext.search requires exactly 2 arguments: (indexName, query)"
                     .to_string(),
@@ -2043,11 +2128,8 @@ impl<'a> Executor<'a> {
 
         // Evaluate arguments — they must resolve to strings
         let empty_bindings = Bindings::new();
-        let index_name_val = self.evaluate_expression(&pc.arguments[0], &empty_bindings)?;
-        let query_val = self.evaluate_expression(&pc.arguments[1], &empty_bindings)?;
-
-        let index_name = match &index_name_val {
-            Value::String(s) => s.clone(),
+        let index_name = match self.evaluate_expression(&arguments[0], &empty_bindings)? {
+            Value::String(s) => s,
             _ => {
                 return Err(ExecuteError::TypeError(
                     "db.index.fulltext.search: first argument must be a string (index name)"
@@ -2055,9 +2137,8 @@ impl<'a> Executor<'a> {
                 ));
             }
         };
-
-        let query = match &query_val {
-            Value::String(s) => s.clone(),
+        let query = match self.evaluate_expression(&arguments[1], &empty_bindings)? {
+            Value::String(s) => s,
             _ => {
                 return Err(ExecuteError::TypeError(
                     "db.index.fulltext.search: second argument must be a string (query)"
@@ -2066,55 +2147,51 @@ impl<'a> Executor<'a> {
             }
         };
 
-        // Perform the search
-        let search_results = self.fulltext.search(&index_name, &query)?;
+        let rows = self
+            .fulltext
+            .search(&index_name, &query)?
+            .iter()
+            .map(|result| {
+                let mut bindings = Bindings::new();
+                bindings.insert(Arc::from("node"), BindingValue::Node(result.node_id));
+                bindings.insert(
+                    Arc::from("score"),
+                    BindingValue::Scalar(Value::Float(result.score)),
+                );
+                bindings
+            })
+            .collect();
+        Ok((&["node", "score"], rows))
+    }
 
-        // Determine column names from YIELD clause (default: node, score)
-        let yield_cols = if pc.yield_columns.is_empty() {
-            vec!["node".to_string(), "score".to_string()]
-        } else {
-            pc.yield_columns.clone()
-        };
-
-        // Build bindings for each result row
-        let mut all_bindings: Vec<Bindings> = Vec::new();
-        for result in &search_results {
-            let mut bindings = Bindings::new();
-            // Always bind "node" and "score" so RETURN items can reference them
-            bindings.insert(Arc::from("node"), BindingValue::Node(result.node_id));
-            bindings.insert(
-                Arc::from("score"),
-                BindingValue::Scalar(Value::Float(result.score)),
-            );
-            all_bindings.push(bindings);
+    /// `db.labels()` — one row per distinct node label, in sorted order.
+    fn labels_procedure(
+        &self,
+        arguments: &[Expression],
+    ) -> Result<(&'static [&'static str], Vec<Bindings>), ExecuteError> {
+        if !arguments.is_empty() {
+            return Err(ExecuteError::TypeError(
+                "db.labels takes no arguments".to_string(),
+            ));
         }
-
-        // If RETURN clause present, use it for projection/ordering
-        if let Some(return_clause) = pc.return_clause {
-            return self.build_result_set(&return_clause, &all_bindings);
-        }
-
-        // Otherwise, project YIELD columns directly
-        let mut rows = Vec::new();
-        for bindings in &all_bindings {
-            let mut row_cols = Vec::new();
-            for col_name in &yield_cols {
-                let val = match bindings.get(col_name.as_str()) {
-                    Some(BindingValue::Node(id)) => Value::Node(*id),
-                    Some(BindingValue::Scalar(v)) => v.clone(),
-                    Some(BindingValue::Edge(id)) => Value::Int(*id as i64),
-                    Some(BindingValue::Path { nodes, edges }) => Value::Path {
-                        nodes: nodes.clone(),
-                        edges: edges.clone(),
-                    },
-                    None => Value::Null,
-                };
-                row_cols.push(val);
-            }
-            rows.push(Row { columns: row_cols });
-        }
-
-        Ok(ResultSet::new(yield_cols, rows))
+        let labels: std::collections::BTreeSet<String> = self
+            .graph_ref()
+            .all_nodes()
+            .into_iter()
+            .flat_map(|n| n.labels.into_iter())
+            .collect();
+        let rows = labels
+            .into_iter()
+            .map(|label| {
+                let mut bindings = Bindings::new();
+                bindings.insert(
+                    Arc::from("label"),
+                    BindingValue::Scalar(Value::String(label)),
+                );
+                bindings
+            })
+            .collect();
+        Ok((&["label"], rows))
     }
 
     // ========== EXPLAIN / PROFILE ==========
@@ -2334,71 +2411,34 @@ impl<'a> Executor<'a> {
         let mut result = Vec::new();
 
         for outer in outer_bindings {
-            // Build inner starting bindings from WITH imports
-            let inner_start = if let Some(ref imports) = call.with_import {
-                let mut inner = Bindings::new();
-                for var in imports {
-                    if let Some(val) = outer.get(var.as_str()) {
-                        inner.insert(Arc::from(var.as_str()), val.clone());
-                    }
+            // Run every UNION branch and concatenate their rows.
+            let (col_names, mut rows) = self.call_subquery_branch_rows(call, &outer)?;
+            let mut dedup = false;
+            let mut branch = call;
+            while let Some((union_type, next)) = &branch.union {
+                let (next_cols, next_rows) = self.call_subquery_branch_rows(next, &outer)?;
+                if next_cols != col_names {
+                    return Err(ExecuteError::TypeError(format!(
+                        "all UNION branches in CALL {{}} must return the same columns: [{}] vs [{}]",
+                        col_names.join(", "),
+                        next_cols.join(", ")
+                    )));
                 }
-                inner
-            } else {
-                // Without WITH, inner subquery has no access to outer bindings
-                Bindings::new()
-            };
-
-            // Execute inner MATCH
-            let mut inner_bindings = vec![inner_start];
-            inner_bindings = self.execute_match_clause(&call.match_clause, inner_bindings)?;
-
-            // Apply inner WHERE
-            if let Some(ref where_expr) = call.where_clause {
-                inner_bindings.retain(|b| {
-                    self.evaluate_expression(where_expr, b)
-                        .map(|v| matches!(v, Value::Bool(true)))
-                        .unwrap_or(false)
+                rows.extend(next_rows);
+                dedup |= *union_type == UnionType::Union;
+                branch = next;
+            }
+            if dedup {
+                let mut seen = HashSet::new();
+                rows.retain(|row| {
+                    let key: Vec<String> = row.columns.iter().map(|v| format!("{}", v)).collect();
+                    seen.insert(key.join("\x00"))
                 });
             }
 
-            // Evaluate each return item for all inner bindings
-            // We build a temporary ReturnClause to use build_result_set for aggregation support
-            let temp_return_clause = ReturnClause {
-                distinct: false,
-                items: call
-                    .return_items
-                    .iter()
-                    .map(|ri| ri.expression.clone())
-                    .collect(),
-                order_by: None,
-                skip: None,
-                limit: None,
-            };
-            let inner_result = self.build_result_set(&temp_return_clause, &inner_bindings)?;
-
-            // Compute effective column names (alias takes priority over generated name)
-            let col_names: Vec<String> = call
-                .return_items
-                .iter()
-                .enumerate()
-                .map(|(i, ri)| {
-                    ri.alias.clone().unwrap_or_else(|| {
-                        inner_result
-                            .columns
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| format!("col{}", i))
-                    })
-                })
-                .collect();
-
-            if inner_result.rows.is_empty() {
-                // No inner results - skip this outer row (inner join semantics)
-                continue;
-            }
-
-            // Merge: for each inner row, combine outer binding + inner row columns as scalars
-            for inner_row in &inner_result.rows {
+            // No inner results - skip this outer row (inner join semantics).
+            // Otherwise combine the outer binding with each inner row's columns as scalars.
+            for inner_row in &rows {
                 let mut merged = outer.clone();
                 for (col_name, col_val) in col_names.iter().zip(inner_row.columns.iter()) {
                     merged.insert(
@@ -2411,6 +2451,74 @@ impl<'a> Executor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Evaluate one CALL subquery branch (ignoring its UNION continuation) for
+    /// a single outer row. Returns the output column names and rows.
+    fn call_subquery_branch_rows(
+        &self,
+        call: &CallSubquery,
+        outer: &Bindings,
+    ) -> Result<(Vec<String>, Vec<Row>), ExecuteError> {
+        // Build inner starting bindings from WITH imports
+        let inner_start = if let Some(ref imports) = call.with_import {
+            let mut inner = Bindings::new();
+            for var in imports {
+                if let Some(val) = outer.get(var.as_str()) {
+                    inner.insert(Arc::from(var.as_str()), val.clone());
+                }
+            }
+            inner
+        } else {
+            // Without WITH, inner subquery has no access to outer bindings
+            Bindings::new()
+        };
+
+        // Execute inner MATCH
+        let mut inner_bindings = vec![inner_start];
+        inner_bindings = self.execute_match_clause(&call.match_clause, inner_bindings)?;
+
+        // Apply inner WHERE
+        if let Some(ref where_expr) = call.where_clause {
+            inner_bindings.retain(|b| {
+                self.evaluate_expression(where_expr, b)
+                    .map(|v| matches!(v, Value::Bool(true)))
+                    .unwrap_or(false)
+            });
+        }
+
+        // Evaluate each return item for all inner bindings
+        // We build a temporary ReturnClause to use build_result_set for aggregation support
+        let temp_return_clause = ReturnClause {
+            distinct: false,
+            items: call
+                .return_items
+                .iter()
+                .map(|ri| ri.expression.clone())
+                .collect(),
+            order_by: None,
+            skip: None,
+            limit: None,
+        };
+        let inner_result = self.build_result_set(&temp_return_clause, &inner_bindings)?;
+
+        // Compute effective column names (alias takes priority over generated name)
+        let col_names: Vec<String> = call
+            .return_items
+            .iter()
+            .enumerate()
+            .map(|(i, ri)| {
+                ri.alias.clone().unwrap_or_else(|| {
+                    inner_result
+                        .columns
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("col{}", i))
+                })
+            })
+            .collect();
+
+        Ok((col_names, inner_result.rows))
     }
 
     fn execute_query_segment(
@@ -2589,6 +2697,7 @@ impl<'a> Executor<'a> {
                             node: Self::augment_node_pattern(&seg.node, eqs),
                         })
                         .collect(),
+                    shortest: pp.shortest,
                 }),
             })
             .collect()
@@ -3189,7 +3298,10 @@ impl<'a> Executor<'a> {
         let mut bindings = self.match_node_pattern(&pattern.start, current_bindings)?;
         let mut prev = &pattern.start;
         for segment in &pattern.segments {
-            bindings = self.match_segment(segment, prev, bindings)?;
+            bindings = match pattern.shortest {
+                Some(kind) => self.match_shortest_segment(segment, prev, bindings, kind)?,
+                None => self.match_segment(segment, prev, bindings)?,
+            };
             prev = &segment.node;
         }
 
@@ -3412,6 +3524,140 @@ impl<'a> Executor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// `shortestPath` / `allShortestPaths` の 1 セグメントを BFS で解く。
+    ///
+    /// 始点ごとに幅優先で探索し、終点パターンに合うノードそれぞれについて
+    /// 最短経路（`All` なら同じ長さの経路すべて）を束縛する。探索は始点からの
+    /// 距離で層ごとに進むため、各ノードに最初に届いた層がその最短距離になる。
+    fn match_shortest_segment(
+        &self,
+        segment: &PathSegment,
+        prev_pattern: &NodePattern,
+        current_bindings: Vec<Bindings>,
+        kind: ShortestPathKind,
+    ) -> Result<Vec<Bindings>, ExecuteError> {
+        let (min, max) = match &segment.edge.length_range {
+            Some(range) => (range.min, range.max),
+            None => (1, Some(1)),
+        };
+        if min > 1 {
+            return Err(ExecuteError::TypeError(
+                "shortestPath() supports only a minimum length of 0 or 1".to_string(),
+            ));
+        }
+        let prev_var = prev_pattern
+            .variable
+            .as_ref()
+            .ok_or_else(|| ExecuteError::TypeError("path pattern requires variable".to_string()))?;
+
+        let mut result = Vec::new();
+        for bindings in current_bindings {
+            let start_id = bindings
+                .get(prev_var.as_str())
+                .and_then(|v| v.as_node())
+                .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
+            // When the end node is already bound only its layer needs to be reached.
+            let bound_end = segment
+                .node
+                .variable
+                .as_deref()
+                .and_then(|v| bindings.get(v))
+                .and_then(|v| v.as_node());
+
+            // dist[n]: hop count from start; preds[n]: (previous node, edge) on a shortest path.
+            let mut dist: HashMap<NodeId, u32> = HashMap::from([(start_id, 0)]);
+            let mut preds: HashMap<NodeId, Vec<(NodeId, u64)>> = HashMap::new();
+            let mut targets = Vec::new();
+            let mut frontier = vec![start_id];
+            let mut depth = 0u32;
+            while !frontier.is_empty() {
+                for &node in &frontier {
+                    if depth >= min && self.node_matches_pattern(node, &segment.node, &bindings)? {
+                        targets.push(node);
+                    }
+                }
+                if bound_end.is_some_and(|end| dist.contains_key(&end))
+                    || max.is_some_and(|m| depth >= m)
+                {
+                    break;
+                }
+                let mut next = Vec::new();
+                for &node in &frontier {
+                    for edge in self.get_edges_by_direction(node, segment.edge.direction) {
+                        if let Some(ref edge_type) = segment.edge.edge_type
+                            && &edge.label != edge_type
+                        {
+                            continue;
+                        }
+                        let to = self.get_next_node(node, &edge, segment.edge.direction);
+                        match dist.get(&to) {
+                            None => {
+                                dist.insert(to, depth + 1);
+                                preds.insert(to, vec![(node, edge.id)]);
+                                next.push(to);
+                            }
+                            Some(&d) if d == depth + 1 && kind == ShortestPathKind::All => {
+                                preds.entry(to).or_default().push((node, edge.id));
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+                frontier = next;
+                depth += 1;
+            }
+
+            for end_id in targets {
+                for (nodes, edges) in Self::shortest_paths_to(&preds, start_id, end_id, kind) {
+                    let mut new_bindings = bindings.clone();
+                    if let Some(var) = &segment.node.variable {
+                        new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(end_id));
+                    }
+                    if let Some(var) = &segment.edge.variable {
+                        new_bindings
+                            .insert(Arc::from(var.as_str()), BindingValue::Path { nodes, edges });
+                    }
+                    result.push(new_bindings);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// BFS の先行リストから `start` → `end` の最短経路を復元する
+    /// （`Single` なら 1 本、`All` ならすべて）。戻り値は (ノード列, エッジ列)。
+    fn shortest_paths_to(
+        preds: &HashMap<NodeId, Vec<(NodeId, u64)>>,
+        start: NodeId,
+        end: NodeId,
+        kind: ShortestPathKind,
+    ) -> Vec<(Vec<NodeId>, Vec<u64>)> {
+        // Partial paths are built backwards from `end`.
+        let mut done = Vec::new();
+        let mut stack = vec![(vec![end], Vec::new())];
+        while let Some((mut nodes, mut edges)) = stack.pop() {
+            let head = *nodes.last().unwrap();
+            if head == start {
+                nodes.reverse();
+                edges.reverse();
+                done.push((nodes, edges));
+                if kind == ShortestPathKind::Single {
+                    break;
+                }
+                continue;
+            }
+            let Some(ps) = preds.get(&head) else { continue };
+            for &(prev, edge) in ps {
+                let mut n = nodes.clone();
+                let mut e = edges.clone();
+                n.push(prev);
+                e.push(edge);
+                stack.push((n, e));
+            }
+        }
+        done
     }
 
     fn get_edges_by_direction(&self, node_id: NodeId, direction: EdgeDirection) -> Vec<Edge> {
@@ -5665,13 +5911,19 @@ impl<'a> Executor<'a> {
                             .map(Value::from)
                             .unwrap_or(Value::Null))
                     }
-                    BindingValue::Scalar(scalar_val) => {
-                        if let Value::Map(map) = scalar_val {
-                            Ok(map.get(prop).cloned().unwrap_or(Value::Null))
-                        } else {
-                            Self::access_temporal_field(scalar_val, prop)
+                    BindingValue::Scalar(scalar_val) => match scalar_val {
+                        Value::Map(map) => Ok(map.get(prop).cloned().unwrap_or(Value::Null)),
+                        // Nodes held as values, e.g. `[n IN nodes(p) | n.name]`.
+                        Value::Node(node_id) => Ok(self
+                            .graph_ref()
+                            .get_node(*node_id)
+                            .and_then(|node| node.get_property(prop).map(Value::from))
+                            .unwrap_or(Value::Null)),
+                        Value::NodeData { properties, .. } => {
+                            Ok(properties.get(prop).map(Value::from).unwrap_or(Value::Null))
                         }
-                    }
+                        _ => Self::access_temporal_field(scalar_val, prop),
+                    },
                     _ => Err(ExecuteError::TypeError(format!(
                         "cannot access property '{}' on path value",
                         prop
@@ -9937,6 +10189,164 @@ mod tests {
         }
     }
 
+    /// Fulltext fixture for the YIELD-continuation tests: two Rust articles
+    /// (one by Alice, one by Bob) and one unrelated article.
+    fn fulltext_yield_fixture(executor: &mut Executor) {
+        for q in [
+            "CREATE FULLTEXT INDEX articleIndex FOR (n:Article) ON (n.title)",
+            "CREATE (:Article {title: 'Rust async guide'})",
+            "CREATE (:Article {title: 'Rust basics'})",
+            "CREATE (:Article {title: 'Cooking pasta'})",
+            "CREATE (:Person {name: 'Alice'})",
+            "CREATE (:Person {name: 'Bob'})",
+            "MATCH (a:Article {title: 'Rust async guide'}), (p:Person {name: 'Alice'}) CREATE (a)-[:AUTHORED_BY]->(p)",
+            "MATCH (a:Article {title: 'Rust basics'}), (p:Person {name: 'Bob'}) CREATE (a)-[:AUTHORED_BY]->(p)",
+        ] {
+            executor
+                .execute(Parser::new(q).unwrap().parse().unwrap())
+                .unwrap();
+        }
+    }
+
+    fn run_query(executor: &mut Executor, q: &str) -> Result<ResultSet, ExecuteError> {
+        executor.execute(Parser::new(q).unwrap().parse().unwrap())
+    }
+
+    #[test]
+    fn test_procedure_yield_alias_where_match() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        fulltext_yield_fixture(&mut executor);
+
+        let result = run_query(
+            &mut executor,
+            "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node AS article, score \
+             WHERE score > 0.0 \
+             MATCH (article)-[:AUTHORED_BY]->(author:Person) \
+             RETURN article.title AS title, author.name AS author ORDER BY title",
+        )
+        .unwrap();
+        assert_eq!(result.columns, vec!["title", "author"]);
+        let rows: Vec<Vec<Value>> = result.rows.into_iter().map(|r| r.columns).collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::String("Rust async guide".into()),
+                    Value::String("Alice".into())
+                ],
+                vec![
+                    Value::String("Rust basics".into()),
+                    Value::String("Bob".into())
+                ],
+            ]
+        );
+
+        // The original column name is not bound once aliased.
+        let result = run_query(
+            &mut executor,
+            "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node AS article RETURN node",
+        )
+        .unwrap();
+        assert!(result.rows.iter().all(|r| r.columns == vec![Value::Null]));
+        // Unknown YIELD columns are rejected.
+        assert!(
+            run_query(
+                &mut executor,
+                "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD nope RETURN nope",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_procedure_yield_with_aggregation() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        fulltext_yield_fixture(&mut executor);
+
+        let result = run_query(
+            &mut executor,
+            "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node \
+             WITH count(node) AS hits WHERE hits > 1 RETURN hits",
+        )
+        .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].columns, vec![Value::Int(2)]);
+    }
+
+    #[test]
+    fn test_procedure_yield_foreach() {
+        let mut graph = Graph::new();
+        let mut executor = Executor::new(&mut graph);
+        fulltext_yield_fixture(&mut executor);
+
+        let stmt = Parser::new(
+            "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node \
+             FOREACH (n IN [node] | SET n.topic = 'rust')",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        assert!(!is_read_only(&stmt), "FOREACH after YIELD writes");
+        executor.execute(stmt).unwrap();
+
+        let result = run_query(
+            &mut executor,
+            "MATCH (a:Article) WHERE a.topic = 'rust' RETURN count(a)",
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].columns, vec![Value::Int(2)]);
+    }
+
+    #[test]
+    fn test_call_subquery_union_column_mismatch_and_explain() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:Person {name: 'Alice'})").unwrap();
+        let mut executor = Executor::new(&mut graph);
+        // UNION branches must agree on their columns.
+        assert!(
+            run_query(
+                &mut executor,
+                "CALL { MATCH (n:Person) RETURN n.name AS a UNION MATCH (n:Person) RETURN n.name AS b } RETURN a",
+            )
+            .is_err()
+        );
+        // Standalone CALL { } and shortestPath plans can be explained.
+        for q in [
+            "EXPLAIN CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c",
+            "EXPLAIN MATCH p = shortestPath((a:Person)-[*]-(b:Person)) RETURN p",
+            "EXPLAIN CALL db.labels() YIELD label AS l MATCH (n) RETURN l, n",
+        ] {
+            run_query(&mut executor, q).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_procedure_continuation_requires_yield_and_return() {
+        // WHERE / MATCH need YIELD first.
+        assert!(
+            Parser::new("CALL db.labels() WHERE label = 'A' RETURN label")
+                .unwrap()
+                .parse()
+                .is_err()
+        );
+        // MATCH after YIELD needs something to consume its rows.
+        assert!(
+            Parser::new("CALL db.labels() YIELD label MATCH (n)")
+                .unwrap()
+                .parse()
+                .is_err()
+        );
+        // A bare YIELD … WHERE is a valid standalone call.
+        assert!(
+            Parser::new("CALL db.labels() YIELD label WHERE label = 'A'")
+                .unwrap()
+                .parse()
+                .is_ok()
+        );
+    }
+
     #[test]
     fn test_parse_procedure_call() {
         let stmt =
@@ -9948,7 +10358,13 @@ mod tests {
         if let Statement::ProcedureCall(pc) = stmt {
             assert_eq!(pc.procedure, "db.index.fulltext.search");
             assert_eq!(pc.arguments.len(), 2);
-            assert_eq!(pc.yield_columns, vec!["node", "score"]);
+            assert_eq!(
+                pc.yield_items
+                    .iter()
+                    .map(|i| i.column.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["node", "score"]
+            );
         } else {
             panic!("expected ProcedureCall statement");
         }

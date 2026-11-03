@@ -15,13 +15,13 @@ MaharitDB はロールベースアクセス制御（RBAC）を実装しており
 新しいユーザーを作成します。
 
 ```cypher
--- 基本的なユーザー作成
+// 基本的なユーザー作成
 CREATE USER alice WITH PASSWORD "securepassword"
 
--- ロールを指定してユーザーを作成
+// ロールを指定してユーザーを作成
 CREATE USER bob WITH PASSWORD "password123" ROLE reader
 
--- 管理者ユーザーを作成
+// 管理者ユーザーを作成
 CREATE USER admin_user WITH PASSWORD "adminpass" ROLE admin
 ```
 
@@ -32,13 +32,13 @@ CREATE USER admin_user WITH PASSWORD "adminpass" ROLE admin
 既存のユーザーのパスワードやロールを変更します。
 
 ```cypher
--- パスワードを変更
+// パスワードを変更
 ALTER USER alice SET PASSWORD "newpassword"
 
--- ロールを変更
+// ロールを変更
 ALTER USER alice SET ROLE writer
 
--- 複数の変更を同時に行う
+// 複数の変更を同時に行う
 ALTER USER alice SET PASSWORD "newpass" SET ROLE admin
 ```
 

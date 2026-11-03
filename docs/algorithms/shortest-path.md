@@ -15,7 +15,7 @@ MaharitDB は BFS（幅優先探索）による重みなし最短経路と、Dij
 ### Cypher での使用
 
 ```cypher
--- 最短経路を取得
+// 最短経路を取得
 MATCH p = shortestPath((a:Person {name: "Alice"})-[:KNOWS*]-(b:Person {name: "Charlie"}))
 RETURN p, length(p) AS hops
 ```
@@ -23,7 +23,7 @@ RETURN p, length(p) AS hops
 ### 複数の最短経路
 
 ```cypher
--- すべての最短経路を取得
+// すべての最短経路を取得
 MATCH p = allShortestPaths((a:Person {name: "Alice"})-[:KNOWS*]-(b:Person {name: "Charlie"}))
 RETURN p
 ```
@@ -31,11 +31,11 @@ RETURN p
 ### 方向の指定
 
 ```cypher
--- 有向グラフでの最短経路
+// 有向グラフでの最短経路
 MATCH p = shortestPath((a:City {name: "Tokyo"})-[:ROAD*]->(b:City {name: "Osaka"}))
 RETURN p, length(p) AS hops
 
--- 無向グラフとして扱う（どちらの方向でも可）
+// 無向グラフとして扱う（どちらの方向でも可）
 MATCH p = shortestPath((a:Person)-[:KNOWS*]-(b:Person))
 WHERE a.name = "Alice" AND b.name = "Eve"
 RETURN p
@@ -49,10 +49,10 @@ RETURN p
 
 ```cypher
 CALL db.shortestPath.dijkstra(
-  "Alice",        -- 始点ノードの名前または ID
-  "Osaka",        -- 終点ノードの名前または ID
-  "ROAD",         -- エッジタイプ
-  "distance"      -- 重みプロパティ名
+  "Alice",        // 始点ノードの名前または ID
+  "Osaka",        // 終点ノードの名前または ID
+  "ROAD",         // エッジタイプ
+  "distance"      // 重みプロパティ名
 )
 YIELD path, total_weight
 RETURN path, total_weight
@@ -103,7 +103,7 @@ fn main() {
 ## ホップ数の制限
 
 ```cypher
--- 最大 5 ホップ以内の最短経路
+// 最大 5 ホップ以内の最短経路
 MATCH p = shortestPath((a:Person {name: "Alice"})-[:KNOWS*..5]-(b:Person {name: "Bob"}))
 RETURN p, length(p) AS hops
 ```
@@ -111,7 +111,7 @@ RETURN p, length(p) AS hops
 ## 経路の条件付き検索
 
 ```cypher
--- 特定の条件を満たすノードを通る最短経路
+// 特定の条件を満たすノードを通る最短経路
 MATCH p = shortestPath(
   (a:City {name: "Tokyo"})-[:ROAD*]->(b:City {name: "Osaka"})
 )

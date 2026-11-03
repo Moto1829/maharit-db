@@ -15,10 +15,10 @@ MaharitDB は Cypher の日時型（`date`、`datetime`、`duration`）をサポ
 ### 作成
 
 ```cypher
--- 現在日付
+// 現在日付
 RETURN date()
 
--- 文字列からパース (ISO 8601 形式: YYYY-MM-DD)
+// 文字列からパース (ISO 8601 形式: YYYY-MM-DD)
 RETURN date("2024-01-15")
 ```
 
@@ -35,11 +35,12 @@ CREATE (e:Event {name: "Conference", date: date("2024-06-15")})
 ### 作成
 
 ```cypher
--- 現在日時 (UTC)
+// 現在日時 (UTC)
 RETURN datetime()
 
--- 文字列からパース (ISO 8601 形式)
+// 文字列からパース (ISO 8601 形式)
 RETURN datetime("2024-06-15T12:30:00Z")
+
 RETURN datetime("2024-06-15T12:30:00.500Z")
 ```
 
@@ -50,12 +51,15 @@ RETURN datetime("2024-06-15T12:30:00.500Z")
 ### 作成
 
 ```cypher
--- ISO 8601 期間文字列
--- P[nY][nM][nD][T[nH][nM][nS]]
-RETURN duration("P1Y")        -- 1年
-RETURN duration("P1Y2M3D")    -- 1年2ヶ月3日
-RETURN duration("PT2H30M")    -- 2時間30分
-RETURN duration("P1DT12H")    -- 1日12時間
+// ISO 8601 期間文字列
+// P[nY][nM][nD][T[nH][nM][nS]]
+RETURN duration("P1Y")        // 1年
+
+RETURN duration("P1Y2M3D")    // 1年2ヶ月3日
+
+RETURN duration("PT2H30M")    // 2時間30分
+
+RETURN duration("P1DT12H")    // 1日12時間
 ```
 
 ## 演算
@@ -63,17 +67,18 @@ RETURN duration("P1DT12H")    -- 1日12時間
 ### 日付の加算・減算
 
 ```cypher
--- date + duration → date
-RETURN date("2024-01-01") + duration("P1D")  -- 2024-01-02
-RETURN date("2024-01-01") + duration("P1M")  -- 2024-02-01
+// date + duration → date
+RETURN date("2024-01-01") + duration("P1D")  // 2024-01-02
 
--- datetime + duration → datetime
+RETURN date("2024-01-01") + duration("P1M")  // 2024-02-01
+
+// datetime + duration → datetime
 RETURN datetime("2024-01-01T00:00:00Z") + duration("PT1H")
 
--- date - date → duration
-RETURN date("2024-01-10") - date("2024-01-01")  -- P0Y0M9D
+// date - date → duration
+RETURN date("2024-01-10") - date("2024-01-01")  // P0Y0M9D
 
--- datetime - datetime → duration
+// datetime - datetime → duration
 RETURN datetime("2024-01-02T00:00:00Z") - datetime("2024-01-01T00:00:00Z")
 ```
 

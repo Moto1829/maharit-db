@@ -13,17 +13,17 @@ nav_order: 6
 ### 基本的な使い方
 
 ```cypher
--- 名前の昇順（デフォルト）
+// 名前の昇順（デフォルト）
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.name
 
--- 年齢の降順
+// 年齢の降順
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.age DESC
 
--- 昇順を明示
+// 昇順を明示
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.age ASC
@@ -32,7 +32,7 @@ ORDER BY n.age ASC
 ### 複数キーでのソート
 
 ```cypher
--- 都市名の昇順、同じ都市内では年齢の降順
+// 都市名の昇順、同じ都市内では年齢の降順
 MATCH (n:Person)
 RETURN n.name, n.city, n.age
 ORDER BY n.city ASC, n.age DESC
@@ -41,7 +41,7 @@ ORDER BY n.city ASC, n.age DESC
 ### エイリアスでのソート
 
 ```cypher
--- RETURN で定義したエイリアスでソート可能
+// RETURN で定義したエイリアスでソート可能
 MATCH (n:Person)-[:KNOWS]->(f:Person)
 RETURN n.name AS name, count(f) AS friend_count
 ORDER BY friend_count DESC, name ASC
@@ -55,7 +55,7 @@ ORDER BY friend_count DESC, name ASC
 MATCH (n:Person)
 RETURN n.name, n.score
 ORDER BY n.score DESC
--- score が null のノードは最初に来る
+// score が null のノードは最初に来る
 ```
 
 ## LIMIT
@@ -63,12 +63,12 @@ ORDER BY n.score DESC
 `LIMIT` は返す行数の上限を指定します。
 
 ```cypher
--- 最初の 10 件を返す
+// 最初の 10 件を返す
 MATCH (n:Person)
 RETURN n.name, n.age
 LIMIT 10
 
--- ORDER BY と組み合わせて上位を取得
+// ORDER BY と組み合わせて上位を取得
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.age DESC
@@ -88,7 +88,7 @@ LIMIT $limit
 `SKIP` は指定した行数をスキップしてから結果を返します。ページネーションに使用します。
 
 ```cypher
--- 最初の 10 件をスキップして次の 10 件を返す（2 ページ目）
+// 最初の 10 件をスキップして次の 10 件を返す（2 ページ目）
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.name
@@ -99,7 +99,7 @@ LIMIT 10
 ### ページネーションのパターン
 
 ```cypher
--- ページ番号とページサイズをパラメータで受け取る
+// ページ番号とページサイズをパラメータで受け取る
 MATCH (n:Person)
 RETURN n.name, n.age
 ORDER BY n.name
@@ -127,7 +127,7 @@ LIMIT ...
 ```
 
 ```cypher
--- すべてを組み合わせた例
+// すべてを組み合わせた例
 MATCH (n:Person)
 WHERE n.age >= 18
 RETURN n.name, n.age, n.city
@@ -141,7 +141,7 @@ LIMIT 10
 `WITH` の後にも `ORDER BY`、`SKIP`、`LIMIT` を使用できます。
 
 ```cypher
--- 上位 10 人を取得してさらに処理
+// 上位 10 人を取得してさらに処理
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WITH p, count(f) AS friends
 ORDER BY friends DESC

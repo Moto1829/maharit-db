@@ -13,15 +13,15 @@ nav_order: 3
 ### 基本的な使い方
 
 ```cypher
--- プロパティを設定
+// プロパティを設定
 MATCH (n:Person {name: "Alice"})
 SET n.age = 31
 
--- 複数プロパティを同時に設定
+// 複数プロパティを同時に設定
 MATCH (n:Person {name: "Alice"})
 SET n.age = 31, n.email = "alice@example.com"
 
--- エッジのプロパティを設定
+// エッジのプロパティを設定
 MATCH (a:Person)-[r:KNOWS]->(b:Person)
 WHERE a.name = "Alice" AND b.name = "Bob"
 SET r.since = 2022
@@ -32,15 +32,15 @@ SET r.since = 2022
 `SET n:Label` でノードにラベルを追加します。既存のラベルはそのまま保持されます。
 
 ```cypher
--- ラベルを追加（既存ラベルは保持）
+// ラベルを追加（既存ラベルは保持）
 MATCH (n:Person {name: "Alice"})
 SET n:Admin
--- Alice は Person と Admin の両方のラベルを持つ
+// Alice は Person と Admin の両方のラベルを持つ
 
--- 一度に複数のラベルを追加
+// 一度に複数のラベルを追加
 MATCH (n:Person {name: "Alice"})
 SET n:Admin:Moderator
--- Alice は Person・Admin・Moderator の3つのラベルを持つ
+// Alice は Person・Admin・Moderator の3つのラベルを持つ
 ```
 
 追加後のラベル一覧は `labels(n)` で確認できます。
@@ -49,17 +49,17 @@ SET n:Admin:Moderator
 MATCH (n:Person {name: "Alice"})
 SET n:Admin
 RETURN n.name, labels(n)
--- 結果: ["Person", "Admin"]
+// 結果: ["Person", "Admin"]
 ```
 
 ### マップでプロパティを一括設定
 
 ```cypher
--- マップを使った一括更新（既存プロパティは維持）
+// マップを使った一括更新（既存プロパティは維持）
 MATCH (n:Person {name: "Alice"})
 SET n += {age: 32, city: "Tokyo"}
 
--- マップで全プロパティを置き換え（既存プロパティは削除）
+// マップで全プロパティを置き換え（既存プロパティは削除）
 MATCH (n:Person {name: "Alice"})
 SET n = {name: "Alice", age: 32}
 ```
@@ -67,12 +67,12 @@ SET n = {name: "Alice", age: 32}
 ### MATCH+SET の組み合わせ
 
 ```cypher
--- フィルタして更新
+// フィルタして更新
 MATCH (n:Person)
 WHERE n.age < 18
 SET n:Minor
 
--- 計算式で更新
+// 計算式で更新
 MATCH (n:Product)
 SET n.price = n.price * 1.1
 ```
@@ -84,11 +84,11 @@ SET n.price = n.price * 1.1
 ### プロパティを削除する
 
 ```cypher
--- 特定のプロパティを削除
+// 特定のプロパティを削除
 MATCH (n:Person {name: "Alice"})
 REMOVE n.temporary_flag
 
--- 複数プロパティを同時に削除
+// 複数プロパティを同時に削除
 MATCH (n:Person {name: "Alice"})
 REMOVE n.flag1, n.flag2
 ```
@@ -98,12 +98,12 @@ REMOVE n.flag1, n.flag2
 `REMOVE n:Label` で特定のラベルを削除します。他のラベルは保持されます。
 
 ```cypher
--- ラベルを削除（他のラベルは保持）
+// ラベルを削除（他のラベルは保持）
 MATCH (n:Person:Temp {name: "Alice"})
 REMOVE n:Temp
--- Alice は Person のみになる
+// Alice は Person のみになる
 
--- 複数のラベルを同時に削除
+// 複数のラベルを同時に削除
 MATCH (n)
 WHERE n:Draft AND n:Review
 REMOVE n:Draft, n:Review
@@ -117,10 +117,10 @@ SET n:Published
 ### 基本的な使い方
 
 ```cypher
--- 存在しなければ作成
+// 存在しなければ作成
 MERGE (n:Person {name: "Alice"})
 
--- 存在確認後に作成・更新を分岐
+// 存在確認後に作成・更新を分岐
 MERGE (n:Person {name: "Alice"})
 ON CREATE SET n.created_at = 2024, n.age = 30
 ON MATCH SET n.updated_at = 2024
@@ -129,11 +129,11 @@ ON MATCH SET n.updated_at = 2024
 ### エッジの MERGE
 
 ```cypher
--- リレーションシップが存在しなければ作成
+// リレーションシップが存在しなければ作成
 MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 MERGE (a)-[:KNOWS]->(b)
 
--- ON CREATE / ON MATCH を使用
+// ON CREATE / ON MATCH を使用
 MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 MERGE (a)-[r:KNOWS]->(b)
 ON CREATE SET r.since = 2024
@@ -143,7 +143,7 @@ ON MATCH SET r.last_seen = 2024
 ### パターン全体の MERGE
 
 ```cypher
--- ノードとエッジを含むパターン全体をマージ
+// ノードとエッジを含むパターン全体をマージ
 MERGE (a:Person {name: "Alice"})-[:WORKS_AT]->(c:Company {name: "Acme"})
 ```
 
@@ -152,7 +152,7 @@ MERGE (a:Person {name: "Alice"})-[:WORKS_AT]->(c:Company {name: "Acme"})
 ### MERGE の典型的なユースケース
 
 ```cypher
--- ユーザーのログイン記録（初回はノードを作成、以降は更新）
+// ユーザーのログイン記録（初回はノードを作成、以降は更新）
 MERGE (u:User {email: $email})
 ON CREATE SET
   u.created_at = $now,

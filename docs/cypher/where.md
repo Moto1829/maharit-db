@@ -30,12 +30,12 @@ RETURN n.name, n.age
 | `>=` | 以上 | `n.age >= 30` |
 
 ```cypher
--- 年齢が 25 以上 40 以下の人
+// 年齢が 25 以上 40 以下の人
 MATCH (n:Person)
 WHERE n.age >= 25 AND n.age <= 40
 RETURN n.name
 
--- 特定の名前以外
+// 特定の名前以外
 MATCH (n:Person)
 WHERE n.name <> "Alice"
 RETURN n.name
@@ -51,22 +51,22 @@ RETURN n.name
 | `XOR` | 排他的論理和 |
 
 ```cypher
--- AND の使用
+// AND の使用
 MATCH (n:Person)
 WHERE n.age > 20 AND n.city = "Tokyo"
 RETURN n.name
 
--- OR の使用
+// OR の使用
 MATCH (n:Person)
 WHERE n.city = "Tokyo" OR n.city = "Osaka"
 RETURN n.name
 
--- NOT の使用
+// NOT の使用
 MATCH (n:Person)
 WHERE NOT n.name = "Bob"
 RETURN n.name
 
--- 複合条件
+// 複合条件
 MATCH (n:Person)
 WHERE (n.age > 30 OR n.role = "admin") AND NOT n.deleted = true
 RETURN n.name
@@ -75,17 +75,17 @@ RETURN n.name
 ## 文字列述語
 
 ```cypher
--- 前方一致
+// 前方一致
 MATCH (n:Person)
 WHERE n.name STARTS WITH "Al"
 RETURN n.name
 
--- 後方一致
+// 後方一致
 MATCH (n:Person)
 WHERE n.email ENDS WITH "@example.com"
 RETURN n.name
 
--- 部分一致
+// 部分一致
 MATCH (n:Person)
 WHERE n.bio CONTAINS "engineer"
 RETURN n.name
@@ -106,12 +106,12 @@ RETURN n.name, n.city
 プロパティの存在チェックを行います。
 
 ```cypher
--- email が設定されていないユーザー
+// email が設定されていないユーザー
 MATCH (n:Person)
 WHERE n.email IS NULL
 RETURN n.name
 
--- email が設定されているユーザー
+// email が設定されているユーザー
 MATCH (n:Person)
 WHERE n.email IS NOT NULL
 RETURN n.name, n.email
@@ -122,12 +122,12 @@ RETURN n.name, n.email
 `WHERE` 句でパターンの存在確認ができます。
 
 ```cypher
--- フォロワーが存在するユーザー
+// フォロワーが存在するユーザー
 MATCH (n:Person)
 WHERE (n)-[:FOLLOWS]->(:Person)
 RETURN n.name
 
--- 特定のラベルを持つノードと接続しているもの
+// 特定のラベルを持つノードと接続しているもの
 MATCH (n:Person)
 WHERE NOT (n)-[:BLOCKED]->(:Person)
 RETURN n.name
@@ -136,7 +136,7 @@ RETURN n.name
 ## ラベルチェック
 
 ```cypher
--- 特定のラベルを持つかどうか確認
+// 特定のラベルを持つかどうか確認
 MATCH (n)
 WHERE n:Person OR n:Company
 RETURN n.name
@@ -145,7 +145,7 @@ RETURN n.name
 ## 範囲指定
 
 ```cypher
--- プロパティが範囲内にあることを確認
+// プロパティが範囲内にあることを確認
 MATCH (p:Product)
 WHERE 100 <= p.price <= 1000
 RETURN p.name, p.price
@@ -156,10 +156,10 @@ RETURN p.name, p.price
 プロパティが等値条件の場合、パターン内に直接記述することも `WHERE` 句で記述することも等価です。
 
 ```cypher
--- パターン内フィルタ（簡潔）
+// パターン内フィルタ（簡潔）
 MATCH (n:Person {name: "Alice"}) RETURN n
 
--- WHERE 句（可読性が高い場合もある）
+// WHERE 句（可読性が高い場合もある）
 MATCH (n:Person)
 WHERE n.name = "Alice"
 RETURN n

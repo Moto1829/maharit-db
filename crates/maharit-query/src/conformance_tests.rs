@@ -283,17 +283,104 @@ fn cases() -> Vec<Case> {
             Exact,
             [["Alice", 1], ["Bob", 2], ["Carol", 1]]
         ),
+        // ── shortestPath / allShortestPaths ──────────────────────────────
+        case!(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*]-(b:Person {name: 'Carol'})) RETURN length(p)",
+            Any,
+            [[2]]
+        ),
+        case!(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[*]-(b:Person {name: 'Carol'})) RETURN length(p), head([n IN nodes(p) | n.name])",
+            Any,
+            [[2, "Alice"]]
+        ),
+        case!(
+            "MATCH p = allShortestPaths((a:Person {name: 'Alice'})-[*]-(b:Person {name: 'Carol'})) RETURN [n IN nodes(p) | n.name] AS route",
+            Any,
+            [[["Alice", "Acme", "Carol"]], [["Alice", "Bob", "Carol"]]]
+        ),
+        case!(
+            "MATCH p = shortestPath((a:Person)-[:KNOWS*]->(b:Person)) WHERE a.name = 'Alice' RETURN b.name, length(p) ORDER BY b.name",
+            Exact,
+            [["Bob", 1], ["Carol", 2]]
+        ),
+        case!(
+            "MATCH p = shortestPath((a:Person {name: 'Carol'})-[:KNOWS*]->(b:Person)) RETURN b.name",
+            Any,
+            []
+        ),
+        case!(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..1]-(b:Person {name: 'Carol'})) RETURN length(p)",
+            Any,
+            []
+        ),
+        // ── CALL { … UNION … } ───────────────────────────────────────────
+        case!(
+            "MATCH (p:Person {name: 'Alice'}) CALL { WITH p MATCH (p)-[:KNOWS]->(f:Person) RETURN f.name AS name, 'knows' AS rel UNION WITH p MATCH (p)-[:WORKS_AT]->(c:Company) RETURN c.name AS name, 'works_at' AS rel } RETURN p.name, name, rel",
+            Any,
+            [["Alice", "Bob", "knows"], ["Alice", "Acme", "works_at"]]
+        ),
+        case!(
+            "MATCH (p:Person {name: 'Alice'}) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name UNION WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name } RETURN name",
+            Any,
+            [["Bob"]]
+        ),
+        case!(
+            "MATCH (p:Person {name: 'Alice'}) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name UNION ALL WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name } RETURN name",
+            Any,
+            [["Bob"], ["Bob"]]
+        ),
+        case!(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name UNION WITH p MATCH (p)-[:WORKS_AT]->(c) RETURN c.name AS name } RETURN p.name, name",
+            Any,
+            [
+                ["Alice", "Bob"],
+                ["Alice", "Acme"],
+                ["Bob", "Carol"],
+                ["Carol", "Acme"]
+            ]
+        ),
+        case!(
+            "CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c",
+            Any,
+            [[3]]
+        ),
+        case!(
+            "CALL { MATCH (n:Person) WHERE n.age > 28 RETURN n.name AS name UNION MATCH (c:Company) RETURN c.name AS name } RETURN name",
+            Any,
+            [["Alice"], ["Carol"], ["Acme"]]
+        ),
+        // ── CALL procedure … YIELD … ─────────────────────────────────────
+        case!(
+            "CALL db.labels() YIELD label AS l RETURN l",
+            Any,
+            [["Company"], ["Person"]]
+        ),
+        case!(
+            "CALL db.labels() YIELD label WHERE label <> 'Company' RETURN label",
+            Any,
+            [["Person"]]
+        ),
+        case!(
+            "CALL db.labels() YIELD label AS l MATCH (n) WHERE l IN labels(n) RETURN l, count(n) AS c ORDER BY l",
+            Exact,
+            [["Company", 1], ["Person", 3]]
+        ),
+        case!(
+            "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'P' RETURN label",
+            Any,
+            [["Person"]]
+        ),
     ]
 }
 
 /// Queries that are standard Cypher but not supported yet. Each must still
 /// fail; move it to `cases()` once it works.
 const KNOWN_UNSUPPORTED: &[&str] = &[
-    "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*]-(b:Person {name: 'Carol'})) RETURN length(p)",
     "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n.name",
     "MATCH (n:Person) RETURN count(n) + 1",
+    // Neo4j 3.x syntax; deliberately unsupported (use FOR … REQUIRE).
     "CREATE CONSTRAINT ON (n:Person) ASSERT n.name IS UNIQUE",
-    "CALL db.labels() YIELD label AS l RETURN l",
 ];
 
 fn fixture_graph() -> Graph {

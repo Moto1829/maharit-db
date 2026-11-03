@@ -11,12 +11,12 @@ nav_order: 2
 ## Cypher での使用
 
 ```cypher
--- Alice から Bob への最大 4 ホップ以内のすべての経路
+// Alice から Bob への最大 4 ホップ以内のすべての経路
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person {name: "Bob"})
 RETURN p, length(p) AS hops
 ORDER BY hops ASC
 
--- すべての経路の長さを確認
+// すべての経路の長さを確認
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person {name: "Bob"})
 RETURN length(p) AS hops, count(*) AS path_count
 ORDER BY hops
@@ -28,10 +28,10 @@ ORDER BY hops
 
 ```cypher
 CALL db.allPaths(
-  "Alice",    -- 始点ノードの識別子
-  "Bob",      -- 終点ノードの識別子
-  "KNOWS",    -- エッジタイプ
-  4           -- 最大ホップ数
+  "Alice",    // 始点ノードの識別子
+  "Bob",      // 終点ノードの識別子
+  "KNOWS",    // エッジタイプ
+  4           // 最大ホップ数
 )
 YIELD path, length
 RETURN path, length
@@ -83,11 +83,11 @@ Found 3 paths:
 ## エッジタイプのフィルタリング
 
 ```cypher
--- 特定のエッジタイプのみを使用した経路
+// 特定のエッジタイプのみを使用した経路
 MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
 RETURN p, length(p) AS hops
 
--- エッジタイプを問わない全経路
+// エッジタイプを問わない全経路
 MATCH p = (a:Node {id: 1})-[*1..3]->(b:Node {id: 10})
 RETURN p, length(p)
 ```
@@ -97,15 +97,15 @@ RETURN p, length(p)
 `all_paths` はシンプルパス（同じノードを 2 度通らない経路）のみを返します。循環経路は含まれません。
 
 ```cypher
--- シンプルパスのみ（デフォルト動作）
+// シンプルパスのみ（デフォルト動作）
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..5]->(b:Person {name: "Alice"})
-RETURN p  -- 結果なし（シンプルパスの場合 Alice に戻れない）
+RETURN p  // 結果なし（シンプルパスの場合 Alice に戻れない）
 ```
 
 ## 経路の統計分析
 
 ```cypher
--- 全経路の統計を集計
+// 全経路の統計を集計
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person)
 WHERE b.name <> "Alice"
 RETURN
@@ -125,7 +125,7 @@ ORDER BY min_hops, path_count DESC
 - 経路数が多い場合は `LIMIT` を使用して制限してください
 
 ```cypher
--- 最初の 100 経路のみ取得
+// 最初の 100 経路のみ取得
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person)
 RETURN p
 LIMIT 100

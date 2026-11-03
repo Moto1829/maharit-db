@@ -21,33 +21,33 @@ MaharitDB はラベルおよびプロパティ単位の細粒度アクセス制�
 ### ラベルへのアクセス権を付与
 
 ```cypher
--- ユーザー alice に Person ラベルへの読み取り権限を付与
+// ユーザー alice に Person ラベルへの読み取り権限を付与
 GRANT READ ON LABEL Person TO alice
 
--- 書き込み権限を付与
+// 書き込み権限を付与
 GRANT WRITE ON LABEL Person TO alice
 
--- すべてのラベルへの読み取り権限
+// すべてのラベルへの読み取り権限
 GRANT READ ON ALL LABELS TO alice
 ```
 
 ### ラベルへのアクセス権を剥奪
 
 ```cypher
--- 読み取り権限を剥奪
+// 読み取り権限を剥奪
 REVOKE READ ON LABEL Person FROM alice
 
--- 書き込み権限を剥奪
+// 書き込み権限を剥奪
 REVOKE WRITE ON LABEL Person FROM alice
 ```
 
 ### アクセス権の確認
 
 ```cypher
--- ユーザーの ACL 一覧を表示
+// ユーザーの ACL 一覧を表示
 SHOW ACL FOR alice
 
--- 特定ラベルのアクセス権を確認
+// 特定ラベルのアクセス権を確認
 SHOW ACL ON LABEL Person
 ```
 
@@ -58,10 +58,10 @@ SHOW ACL ON LABEL Person
 ### プロパティへのアクセス権を付与
 
 ```cypher
--- Person ノードの name プロパティの読み取りを許可
+// Person ノードの name プロパティの読み取りを許可
 GRANT READ ON PROPERTY name ON LABEL Person TO alice
 
--- 機密プロパティ（salary）の書き込みを禁止
+// 機密プロパティ（salary）の書き込みを禁止
 DENY WRITE ON PROPERTY salary ON LABEL Employee TO default_user
 ```
 
@@ -70,9 +70,9 @@ DENY WRITE ON PROPERTY salary ON LABEL Employee TO default_user
 アクセス権のないプロパティは `null` として返されます。
 
 ```cypher
--- salary プロパティへのアクセス権がない場合
+// salary プロパティへのアクセス権がない場合
 MATCH (e:Employee {name: "Alice"})
-RETURN e.name, e.salary  -- salary は null として返される
+RETURN e.name, e.salary  // salary は null として返される
 ```
 
 ## ロールベース ACL
@@ -80,10 +80,10 @@ RETURN e.name, e.salary  -- salary は null として返される
 個別ユーザーではなくロールに対して ACL を設定できます。
 
 ```cypher
--- reader ロールに Product ラベルの読み取りを許可
+// reader ロールに Product ラベルの読み取りを許可
 GRANT READ ON LABEL Product TO ROLE reader
 
--- 機密ラベルへのアクセスを reader ロールに禁止
+// 機密ラベルへのアクセスを reader ロールに禁止
 DENY READ ON LABEL FinancialRecord TO ROLE reader
 ```
 
@@ -94,7 +94,7 @@ DENY READ ON LABEL FinancialRecord TO ROLE reader
 3. デフォルトはロールの権限に従う
 
 ```cypher
--- admin ロールのユーザーでも特定ラベルを拒否できる
+// admin ロールのユーザーでも特定ラベルを拒否できる
 DENY READ ON LABEL SecretProject TO specific_user
 ```
 
@@ -103,13 +103,13 @@ DENY READ ON LABEL SecretProject TO specific_user
 ### 部門ごとにデータを分離する
 
 ```cypher
--- 営業部門のユーザー（sales_user）は Customer ラベルのみアクセス可
+// 営業部門のユーザー（sales_user）は Customer ラベルのみアクセス可
 GRANT READ ON LABEL Customer TO sales_user
 GRANT WRITE ON LABEL Customer TO sales_user
-DENY READ ON ALL LABELS TO sales_user  -- 他はすべて拒否
-GRANT READ ON LABEL Customer TO sales_user  -- Customer は許可（順序に注意）
+DENY READ ON ALL LABELS TO sales_user  // 他はすべて拒否
+GRANT READ ON LABEL Customer TO sales_user  // Customer は許可（順序に注意）
 
--- エンジニア（eng_user）は技術的なラベルのみ
+// エンジニア（eng_user）は技術的なラベルのみ
 GRANT READ ON LABEL Repository TO eng_user
 GRANT READ ON LABEL PullRequest TO eng_user
 GRANT READ ON LABEL Issue TO eng_user
@@ -118,7 +118,7 @@ GRANT READ ON LABEL Issue TO eng_user
 ### 機密プロパティの保護
 
 ```cypher
--- HR マネージャーのみ給与情報にアクセス可
+// HR マネージャーのみ給与情報にアクセス可
 DENY READ ON PROPERTY salary ON LABEL Employee TO ROLE reader
 DENY READ ON PROPERTY salary ON LABEL Employee TO ROLE writer
 GRANT READ ON PROPERTY salary ON LABEL Employee TO ROLE hr_manager
@@ -129,7 +129,7 @@ GRANT READ ON PROPERTY salary ON LABEL Employee TO ROLE hr_manager
 新規ユーザー作成時のデフォルト ACL を設定できます。
 
 ```cypher
--- デフォルトで Public ラベルのみ読み取り可
+// デフォルトで Public ラベルのみ読み取り可
 SET DEFAULT ACL READ ON LABEL Public
 ```
 

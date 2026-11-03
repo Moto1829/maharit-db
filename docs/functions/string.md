@@ -16,7 +16,7 @@ MaharitDB は Cypher クエリ内で使用できる豊富な文字列関数を�
 
 ```cypher
 RETURN toLower("Hello World")
--- 結果: "hello world"
+// 結果: "hello world"
 
 MATCH (n:Person)
 WHERE toLower(n.name) = "alice"
@@ -29,7 +29,7 @@ RETURN n
 
 ```cypher
 RETURN toUpper("Hello World")
--- 結果: "HELLO WORLD"
+// 結果: "HELLO WORLD"
 ```
 
 ## 空白処理
@@ -40,7 +40,7 @@ RETURN toUpper("Hello World")
 
 ```cypher
 RETURN trim("  hello  ")
--- 結果: "hello"
+// 結果: "hello"
 ```
 
 ### ltrim(string)
@@ -49,7 +49,7 @@ RETURN trim("  hello  ")
 
 ```cypher
 RETURN ltrim("  hello  ")
--- 結果: "hello  "
+// 結果: "hello  "
 ```
 
 ### rtrim(string)
@@ -58,7 +58,7 @@ RETURN ltrim("  hello  ")
 
 ```cypher
 RETURN rtrim("  hello  ")
--- 結果: "  hello"
+// 結果: "  hello"
 ```
 
 ## 部分文字列
@@ -69,10 +69,10 @@ RETURN rtrim("  hello  ")
 
 ```cypher
 RETURN substring("Hello World", 6)
--- 結果: "World"
+// 結果: "World"
 
 RETURN substring("Hello World", 0, 5)
--- 結果: "Hello"
+// 結果: "Hello"
 ```
 
 ### left(string, count)
@@ -81,7 +81,7 @@ RETURN substring("Hello World", 0, 5)
 
 ```cypher
 RETURN left("Hello World", 5)
--- 結果: "Hello"
+// 結果: "Hello"
 ```
 
 ### right(string, count)
@@ -90,7 +90,7 @@ RETURN left("Hello World", 5)
 
 ```cypher
 RETURN right("Hello World", 5)
--- 結果: "World"
+// 結果: "World"
 ```
 
 ## 文字列情報
@@ -101,7 +101,7 @@ RETURN right("Hello World", 5)
 
 ```cypher
 RETURN size("Hello")
--- 結果: 5
+// 結果: 5
 
 MATCH (n:Person)
 WHERE size(n.name) > 5
@@ -114,7 +114,7 @@ RETURN n.name
 
 ```cypher
 RETURN length("Hello")
--- 結果: 5
+// 結果: 5
 ```
 
 ## 検索・一致
@@ -125,7 +125,7 @@ RETURN length("Hello")
 
 ```cypher
 RETURN startsWith("Hello World", "Hello")
--- 結果: true
+// 結果: true
 
 MATCH (n:Person)
 WHERE n.name STARTS WITH "Al"
@@ -138,7 +138,7 @@ RETURN n.name
 
 ```cypher
 RETURN endsWith("alice@example.com", "@example.com")
--- 結果: true
+// 結果: true
 ```
 
 ### contains(string, substring)
@@ -147,7 +147,7 @@ RETURN endsWith("alice@example.com", "@example.com")
 
 ```cypher
 RETURN contains("Hello World", "World")
--- 結果: true
+// 結果: true
 
 MATCH (n:Article)
 WHERE n.body CONTAINS "グラフ"
@@ -162,9 +162,9 @@ RETURN n.title
 
 ```cypher
 RETURN split("a,b,c", ",")
--- 結果: ["a", "b", "c"]
+// 結果: ["a", "b", "c"]
 
--- タグ文字列を展開
+// タグ文字列を展開
 MATCH (a:Article)
 UNWIND split(a.tag_string, ",") AS tag
 RETURN a.title, trim(tag) AS tag
@@ -176,7 +176,7 @@ RETURN a.title, trim(tag) AS tag
 
 ```cypher
 RETURN replace("Hello World", "World", "Rust")
--- 結果: "Hello Rust"
+// 結果: "Hello Rust"
 ```
 
 ## 型変換
@@ -187,13 +187,13 @@ RETURN replace("Hello World", "World", "Rust")
 
 ```cypher
 RETURN toString(42)
--- 結果: "42"
+// 結果: "42"
 
 RETURN toString(3.14)
--- 結果: "3.14"
+// 結果: "3.14"
 
 RETURN toString(true)
--- 結果: "true"
+// 結果: "true"
 ```
 
 ### toInteger(string)
@@ -202,10 +202,10 @@ RETURN toString(true)
 
 ```cypher
 RETURN toInteger("42")
--- 結果: 42
+// 結果: 42
 
 RETURN toInteger("abc")
--- 結果: null
+// 結果: null
 ```
 
 ### toFloat(string)
@@ -214,23 +214,23 @@ RETURN toInteger("abc")
 
 ```cypher
 RETURN toFloat("3.14")
--- 結果: 3.14
+// 結果: 3.14
 ```
 
 ## 実用的な例
 
 ```cypher
--- メールアドレスのドメインを抽出
+// メールアドレスのドメインを抽出
 MATCH (u:User)
 RETURN u.email,
        substring(u.email, size(split(u.email, "@")[0]) + 1) AS domain
 
--- 名前を正規化して一致チェック
+// 名前を正規化して一致チェック
 MATCH (n:Person)
 WHERE toLower(trim(n.name)) = toLower(trim($search_name))
 RETURN n
 
--- ユーザー名を生成
+// ユーザー名を生成
 MATCH (p:Person)
 RETURN toLower(replace(p.name, " ", "_")) AS username
 ```

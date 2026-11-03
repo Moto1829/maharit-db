@@ -438,7 +438,6 @@ impl<'a> Lexer<'a> {
             }
             '/' => {
                 self.advance();
-                // コメント対応（将来的に）
                 TokenKind::Slash
             }
             '(' => {
@@ -522,9 +521,25 @@ impl<'a> Lexer<'a> {
         Some(ch)
     }
 
+    /// 空白とコメント（`// …` 行コメント、`/* … */` ブロックコメント）を読み飛ばす
     fn skip_whitespace(&mut self) {
-        while let Some(ch) = self.peek() {
-            if ch.is_whitespace() {
+        loop {
+            while self.peek().is_some_and(char::is_whitespace) {
+                self.advance();
+            }
+            let rest = &self.input[self.pos..];
+            if rest.starts_with("//") {
+                while self.peek().is_some_and(|ch| ch != '\n') {
+                    self.advance();
+                }
+            } else if rest.starts_with("/*") {
+                self.advance();
+                self.advance();
+                // An unterminated block comment runs to the end of the input.
+                while self.peek().is_some() && !self.input[self.pos..].starts_with("*/") {
+                    self.advance();
+                }
+                self.advance();
                 self.advance();
             } else {
                 break;
@@ -937,6 +952,32 @@ mod tests {
         assert_eq!(
             tokenize("union all"),
             vec![TokenKind::Union, TokenKind::All, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_comments_are_skipped() {
+        assert_eq!(
+            tokenize("// leading\nMATCH /* inline */ (n) // trailing\nRETURN n"),
+            vec![
+                TokenKind::Match,
+                TokenKind::LParen,
+                TokenKind::Ident("n".to_string()),
+                TokenKind::RParen,
+                TokenKind::Return,
+                TokenKind::Ident("n".to_string()),
+                TokenKind::Eof
+            ]
+        );
+        // `//` inside a string literal is not a comment; a lone `/` is division.
+        assert_eq!(
+            tokenize("'http://x' / 2"),
+            vec![
+                TokenKind::String("http://x".to_string()),
+                TokenKind::Slash,
+                TokenKind::Int(2),
+                TokenKind::Eof
+            ]
         );
     }
 }
