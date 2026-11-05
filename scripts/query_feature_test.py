@@ -248,7 +248,11 @@ def test_aggregation(client: MaharitClient):
     resp = run_query(client, "MATCH (n:Person) RETURN COLLECT(n.name) AS names")
     rows = resp.get("rows", [])
     names_raw = rows[0].get("names") if rows else None
-    check("COLLECT(n.name) が非空のリストを返す", names_raw is not None, f"names={names_raw}")
+    check(
+        "COLLECT(n.name) がリストを返す",
+        isinstance(names_raw, list) and len(names_raw) > 0 and all(isinstance(x, str) for x in names_raw),
+        f"names={names_raw!r}",
+    )
 
 
 def test_order_by_limit_skip(client: MaharitClient):

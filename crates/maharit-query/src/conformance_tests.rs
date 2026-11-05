@@ -381,6 +381,22 @@ fn cases() -> Vec<Case> {
             Exact,
             [[2015], [2010]]
         ),
+        // ── collect() returns a list (bug/126) ───────────────────────────
+        case!(
+            "UNWIND [3, 1, 2] AS x RETURN collect(x)",
+            Any,
+            [[[3, 1, 2]]]
+        ),
+        case!(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS name } RETURN p.name, collect(name) AS linked",
+            Any,
+            [["Alice", ["Bob"]], ["Bob", ["Carol"]]]
+        ),
+        case!(
+            "MATCH (n:Person) WITH collect(n.name) AS names RETURN size(names)",
+            Any,
+            [[3]]
+        ),
         // ── CALL procedure … YIELD … ─────────────────────────────────────
         case!(
             "CALL db.labels() YIELD label AS l RETURN l",

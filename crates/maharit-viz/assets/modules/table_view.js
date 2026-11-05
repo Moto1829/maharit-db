@@ -20,9 +20,11 @@ export function render({ columns, rows }, host) {
     headerFilter: "input",
     formatter: (cell) => {
       const v = cell.getValue();
-      return v === null || v === undefined
-        ? '<span style="color:#666">null</span>'
-        : escapeHtml(String(v));
+      if (v === null || v === undefined) {
+        return '<span style="color:#666">null</span>';
+      }
+      // Lists (e.g. collect()) and maps are shown as JSON, not "a,b".
+      return escapeHtml(typeof v === "object" ? JSON.stringify(v) : String(v));
     },
   }));
   tabulator = new Tabulator(host, {

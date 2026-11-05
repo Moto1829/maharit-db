@@ -5594,16 +5594,15 @@ impl<'a> Executor<'a> {
                     Ok(max.unwrap_or(Value::Null))
                 }
                 AggregateFunction::Collect(inner) => {
-                    let collected: Vec<String> = bindings_list
+                    let collected: Vec<Value> = bindings_list
                         .iter()
                         .filter_map(|bindings| {
                             self.evaluate_return_item(inner, bindings)
                                 .ok()
                                 .filter(|v| !matches!(v, Value::Null))
-                                .map(|v| format!("{}", v))
                         })
                         .collect();
-                    Ok(Value::String(format!("[{}]", collected.join(", "))))
+                    Ok(Value::List(collected))
                 }
                 AggregateFunction::PercentileCont(inner, percentile_item) => {
                     let mut values: Vec<f64> = Vec::new();
