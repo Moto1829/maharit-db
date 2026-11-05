@@ -1,80 +1,118 @@
 # MaharitDB
 
-Rust で実装されたグラフデータベースエンジンです。Cypher ライクなクエリ言語による直感的なグラフ操作と、本番環境向けのサーバー機能を提供します。
+English | [日本語](README.ja.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+A graph database engine written in Rust. It offers intuitive graph operations through a Cypher-like query language, plus the server features you need in production.
 
-## 特徴
+[![Test](https://github.com/Moto1829/maharit-db/actions/workflows/test.yml/badge.svg)](https://github.com/Moto1829/maharit-db/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-1.98.1-orange.svg)](rust-toolchain.toml)
 
-- **Cypher ライクなクエリ言語** — `MATCH`、`CREATE`、`MERGE`、`DELETE`、`UNWIND`、`WITH`、`UNION`、`FOREACH`、`CALL {}` サブクエリをサポート
-- **BM25 全文検索（日本語対応）** — lindera IPADIC による形態素解析、フレーズ検索・ファジー検索対応
-- **グラフアルゴリズム** — PageRank、最短経路（Dijkstra / BFS）、媒介中心性、近接中心性、連結成分
-- **WAL による耐障害性** — Write-Ahead Log でクラッシュ後も確実にリカバリ
-- **TLS/SSL 対応** — rustls による TLS 1.2/1.3 サポート、証明書ホットリロード
-- **認証・RBAC** — ユーザー管理とロールベースアクセス制御（admin / writer / reader）
-- **細粒度 ACL** — ラベル・プロパティ単位のアクセス権限制御
-- **Prometheus メトリクス** — `/metrics`、`/health` エンドポイントで監視基盤と連携
-- **OpenTelemetry トレーシング** — クエリ実行経路の分散トレーシング
-- **レプリケーション** — WAL ストリーミングによるリーダー/フォロワー構成
-- **バックアップ・PITR** — gzip 圧縮、増分バックアップ、ポイントインタイムリカバリ
-- **非同期 Rust クライアント** — tokio ベース、コネクションプール対応
+## Features
 
-## ドキュメント
+- **Cypher-like query language** — `MATCH`, `CREATE`, `MERGE`, `DELETE`, `UNWIND`, `WITH`, `UNION`, `FOREACH`, `CALL {}` subqueries, and `$param` parameters
+- **BM25 full-text search** — phrase and fuzzy search. Japanese morphological analysis (lindera IPADIC) is available when built with the `japanese` feature
+- **Indexes and constraints** — property indexes; UNIQUE, NOT NULL, type, and composite UNIQUE constraints
+- **Graph algorithms** — PageRank, shortest paths (Dijkstra / A* / BFS), betweenness centrality, closeness centrality, connected components, strongly connected components, cycle detection, and topological sort
+- **Durability with a WAL** — a write-ahead log (with group commit) for crash recovery
+- **TLS/SSL** — TLS 1.2/1.3 via rustls, with certificate hot reload
+- **Authentication and RBAC** — user management and role-based access control (admin / writer / reader)
+- **Fine-grained ACLs** — access control per label and per property
+- **Prometheus metrics** — `/metrics` and `/health` endpoints for your monitoring stack
+- **OpenTelemetry tracing** — distributed tracing of query execution
+- **Replication** — leader/follower setup with WAL streaming and failover
+- **Backup and restore** — gzip / zstd compression and incremental backups
+- **Clients** — an async Rust client (tokio, connection pooling, plus a blocking API) and a [Python client](clients/python/)
+- **Visualization** — DOT / SVG / ASCII output, and a web app (`maharit-viz`) that shows query results as tables and graphs in the browser
 
-完全なドキュメントは [`docs/`](docs/) をご覧ください。
-mdBook 形式で提供しており、クエリ言語リファレンス・運用ガイド・API リファレンスを網羅しています。
+## Documentation
 
-## インストール
+**https://moto1829.github.io/maharit-db/** — query language reference, function reference, operations guide, and API reference (MkDocs; sources in [`docs/`](docs/)). The documentation is currently in Japanese; an English translation is in progress.
 
-Rust ツールチェーン（1.75 以降）が必要です。
+## Installation
+
+### Prebuilt binaries
+
+Binaries for Linux / macOS (x86_64 and aarch64) and Windows (x86_64) are published on [GitHub Releases](https://github.com/Moto1829/maharit-db/releases) (v0.2.0 and later).
 
 ```bash
-git clone https://github.com/suzukishimei/maharit-db.git
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Moto1829/maharit-db/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Moto1829/maharit-db/main/install.ps1 | iex
+```
+
+### Building from source
+
+You need a Rust toolchain. The version is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and rustup fetches it automatically.
+
+```bash
+git clone https://github.com/Moto1829/maharit-db.git
 cd maharit-db
-cargo build --release -p maharit-server
+cargo build --release -p maharit-server   # target/release/maharit
+
+# With Japanese morphological analysis (embeds the IPADIC dictionary, so the binary is larger)
+cargo build --release -p maharit-server --features japanese
 ```
 
-## クイックスタート
+## Quick start
 
-### REPL（対話モード）
+### REPL (interactive mode)
 
 ```bash
-cargo run -p maharit-server
+maharit            # from source: cargo run -p maharit-server
 ```
 
-```cypher
-> CREATE (alice:Person {name: "Alice", age: 30})
-Created 1 node(s).
+```text
+maharit> CREATE (alice:Person {name: "Alice", age: 30})
+created_nodes | created_edges
+--------------------------------
+1 | 0
 
-> CREATE (bob:Person {name: "Bob", age: 25})
-Created 1 node(s).
+1 row(s) returned
+maharit> CREATE (bob:Person {name: "Bob", age: 25})
+...
+maharit> MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS {since: 2020}]->(b)
+created_nodes | created_edges
+--------------------------------
+0 | 1
 
-> MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
-  CREATE (a)-[:KNOWS {since: 2020}]->(b)
-Created 1 relationship(s).
+1 row(s) returned
+maharit> MATCH (n:Person) RETURN n.name, n.age ORDER BY n.name
+n.name | n.age
+-----------------
+"Alice" | 30
+"Bob" | 25
 
-> MATCH (n:Person) RETURN n.name, n.age
-+--------+-------+
-| n.name | n.age |
-+--------+-------+
-| Alice  | 30    |
-| Bob    | 25    |
-+--------+-------+
-2 rows returned.
+2 row(s) returned
 ```
 
-### TCP サーバー
+Type `:help` for the list of commands and `:quit` to exit.
+
+### TCP server
 
 ```bash
-# デフォルト設定（127.0.0.1:7687）で起動
-cargo run -p maharit-server -- server
+# Start with the defaults (127.0.0.1:7687, data file ./maharit.db)
+maharit server
 
-# すべてのインタフェースにバインド
-cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687
+# Bind to all interfaces and choose the data file
+maharit server --host 0.0.0.0 --port 7687 --data /var/lib/maharit/maharit.db
 ```
 
-### Rust クライアント
+See `maharit --help` for the other subcommands (`backup` / `restore` / `admin`) and options.
+
+### Docker
+
+```bash
+docker-compose up -d
+```
+
+This starts the TCP server (`localhost:7687`) and the visualization web app (http://localhost:8080).
+
+### Rust client
 
 ```rust
 use maharit_client::Client;
@@ -94,22 +132,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## クレート構成
+## Crates
 
-MaharitDB は 8 個のクレートからなる Cargo workspace です。`maharit-core` を基盤に各クレートが構築されています。
+MaharitDB is a Cargo workspace of eight crates, all built on top of `maharit-core`.
 
-| クレート | 説明 |
+| Crate | Description |
 |---------|------|
-| `maharit-core` | グラフデータ構造・アルゴリズム・全文検索エンジン |
-| `maharit-query` | Cypher クエリパーサー・エグゼキュータ・プランナー |
-| `maharit-storage` | WAL・永続化・トランザクション・バックアップ |
-| `maharit-cluster` | シャーディング・ルーティング戦略 |
-| `maharit-server` | TCP サーバー・認証・メトリクス・レプリケーション |
-| `maharit-client` | 非同期/同期クライアント・コネクションプール |
-| `maharit-io` | CSV / JSON / GraphML インポート・エクスポート |
-| `maharit-viz` | DOT / SVG 可視化・WebSocket リアルタイム表示 |
+| `maharit-core` | Graph data structures, algorithms, full-text search engine, constraints |
+| `maharit-query` | Cypher lexer, parser, planner, and executor |
+| `maharit-storage` | WAL, persistence, MVCC transactions, backups |
+| `maharit-cluster` | Sharding and routing strategies |
+| `maharit-server` | The `maharit` binary (REPL, TCP server, authentication, metrics, replication) |
+| `maharit-client` | Async/blocking client and connection pool |
+| `maharit-io` | CSV / JSON / GraphML import and export |
+| `maharit-viz` | DOT / SVG / ASCII visualization and the visualization web app |
 
-### クレート依存関係
+### Crate dependencies
 
 ```mermaid
 graph TD
@@ -136,43 +174,43 @@ graph TD
     class core foundation;
 ```
 
-- `maharit-core` は他のどのクレートにも依存しない基盤クレートです。
-- `maharit-client` は独立した tokio TCP クライアントで、`maharit-core` には依存しません（`maharit-viz` からのみ利用）。
-- `maharit-server` はバイナリ `maharit` を生成するエントリポイントで、`query` / `storage` / `cluster` を統合します。
+- `maharit-core` is the foundation crate and depends on no other crate in the workspace.
+- `maharit-client` is a standalone tokio TCP client that does not depend on `maharit-core` (only `maharit-viz` uses it).
+- `maharit-server` is the entry point that builds the `maharit` binary and ties together `query`, `storage`, and `cluster`.
 
-## グラフアルゴリズム（Rust API）
+## Graph algorithms (Rust API)
 
 ```rust
-use maharit_core::{Graph, algorithms::*};
+use maharit_core::{
+    Dijkstra, Graph, PageRankConfig, betweenness_centrality, connected_components, pagerank,
+};
 
 let graph = Graph::new();
-// ... ノードとエッジを追加 ...
+// ... add nodes and edges ...
 
 let scores     = pagerank(&graph, &PageRankConfig::default());
-let path       = dijkstra(&graph, source_id, target_id, "weight");
+let path       = Dijkstra::with_weight_property(&graph, "weight").find_path(source_id, target_id);
 let centrality = betweenness_centrality(&graph);
 let components = connected_components(&graph);
 ```
 
-## データの入出力
+## Import and export
 
 ```rust
 use maharit_io::{CsvImporter, JsonExporter};
 
-// CSV からインポート
+// Import from CSV
 let stats = CsvImporter::import_nodes(&mut graph, nodes_csv)?;
 CsvImporter::import_edges(&mut graph, edges_csv, &stats.id_map)?;
 
-// JSON へエクスポート
+// Export to JSON
 JsonExporter::export(&graph, writer)?;
 ```
 
-## Docker
+## Changelog
 
-```bash
-docker-compose up -d
-```
+See [CHANGELOG.md](CHANGELOG.md) (currently in Japanese). Versions follow [Semantic Versioning](https://semver.org/).
 
-## ライセンス
+## License
 
-MIT License — 詳細は [LICENSE](LICENSE) を参照してください。
+MIT License

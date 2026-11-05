@@ -24,7 +24,7 @@ panic = "abort"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/suzukishimei/maharit-db"
+repository = "https://github.com/Moto1829/maharit-db"
 
 [workspace.dependencies]
 maharit-core = { path = "crates/maharit-core" }

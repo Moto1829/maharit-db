@@ -13,7 +13,7 @@ Rust ツールチェーン（1.75 以降）が必要です。まだインスト�
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/suzukishimei/maharit-db.git
+git clone https://github.com/Moto1829/maharit-db.git
 cd maharit-db
 
 # リリースビルド（推奨）
