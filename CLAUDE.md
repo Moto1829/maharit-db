@@ -50,6 +50,15 @@ Linux 専用コード（`cfg(target_os = "linux")`）は macOS の clippy では
 
 `docs/` の ```cypher ブロックは `cargo test -p maharit-query --test docs_cypher_examples` で全てパース検査される。1 段落 1 ステートメント（空行区切り）、コメントは `//`（`--` は非対応）、出力例や REPL の入出力は ```text ブロックに書く。未対応のまま残す記述は `crates/maharit-query/tests/docs_cypher_known_failures.txt` に載せる。
 
+### docs の英語版（i18n）
+
+- 日本語 `docs/foo.md` が正本。英語は同じフォルダの `docs/foo.en.md`（mkdocs-static-i18n の suffix 構成）。サイトは日本語が `/`、英語が `/en/`。英語版が無いページは英語サイトでも日本語版が表示される。README は `README.md`（英語）/ `README.ja.md`（日本語）。
+- 訳語・書式は `docs/_i18n/GLOSSARY.md` に従う（サイトには出ない）。英語ファイルの先頭に `source_commit: <翻訳元の日本語ファイルの最新コミット>` を書く。
+- 日本語ページを変更したら、対応する `.en.md` も同じコミットで直して `source_commit` を上げる。その場で訳せないときは `.en.md` の冒頭に `!!! warning "This translation may be outdated"` を付ける。
+- `.en.md` の ```cypher ブロックは `//` コメント以外を日本語版と完全に一致させる（`docs_cypher_examples` テストが検査。known-failures は日本語ファイル名のキーで共有）。
+- `mkdocs.yml` の nav に見出しを追加・変更したら、`plugins.i18n` の `nav_translations` も更新する。
+- ローカル確認: `python3 -m venv .venv-docs && .venv-docs/bin/pip install -r requirements-docs.txt && .venv-docs/bin/mkdocs build --strict`（CI と同じ。PR でも `docs.yml` が `--strict` ビルドする）。
+
 ### E2E テスト（Python スクリプト）
 
 CI と同じ E2E 一式は Docker なしで `bash scripts/run_e2e_local.sh`（要 `cargo build --release -p maharit-server`）。

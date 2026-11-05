@@ -7,3 +7,6 @@ __pycache__/
 
 # macOS Finder metadata
 .DS_Store
+# MkDocs (requirements-docs.txt)
+.venv-docs/
+/site/

@@ -6,10 +6,14 @@ repo_name: Moto1829/maharit-db
 
 docs_dir: docs
 
+# _i18n/ は翻訳用の用語集・スタイルガイド（サイトには出さない）
+exclude_docs: |
+  _i18n/
+
 theme:
   name: material
   custom_dir: overrides
-  language: ja
+  # language は i18n プラグインが言語ごとに設定する（reconfigure_material）
   features:
     - navigation.tabs
     - navigation.sections
@@ -19,6 +23,78 @@ theme:
     - search.highlight
     - content.code.copy
 
+
+# 英語版: mkdocs-static-i18n の suffix 構成。foo.md（日本語・正本）の隣に foo.en.md を置く。
+# 日本語は従来どおり /、英語は /en/ に出力。英語版が無いページは日本語版を表示する。
+# nav の見出しを追加・変更したら nav_translations も更新すること。
+plugins:
+  - search:
+      lang: [ja, en]
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: ja
+          default: true
+          name: 日本語
+          build: true
+        - locale: en
+          name: English
+          build: true
+          site_name: MaharitDB Documentation
+          site_description: High-performance graph database with Cypher queries
+          nav_translations:
+            ホーム: Home
+            クイックスタート: Quick start
+            アーキテクチャ: Architecture
+            Cypher クエリ言語: Cypher query language
+            基本構文: Basic syntax
+            WHERE 句・フィルタリング: WHERE and filtering
+            FOREACH / サブクエリ: FOREACH and subqueries
+            パラメータ（$param 構文）: Parameters ($param syntax)
+            関数リファレンス: Function reference
+            文字列関数: String functions
+            数学関数: Math functions
+            リスト操作: List operations
+            述語関数: Predicate functions
+            集計関数: Aggregation functions
+            全文検索関数: Full-text search functions
+            テンポラル型関数: Temporal functions
+            インデックス・制約: Indexes and constraints
+            プロパティインデックス: Property indexes
+            全文検索インデックス: Full-text indexes
+            スキーマ制約: Schema constraints
+            サーバー・運用: Server and operations
+            サーバー設定: Server configuration
+            TLS/SSL 設定: TLS/SSL
+            認証・ロール管理: Authentication and roles
+            アクセス制御（ACL）: Access control (ACL)
+            メトリクス・ヘルスチェック: Metrics and health checks
+            OpenTelemetry トレーシング: OpenTelemetry tracing
+            バックアップ・リストア: Backup and restore
+            Docker での使用: Docker
+            高度なトピック: Advanced topics
+            トランザクション: Transactions
+            レプリケーション: Replication
+            シャーディング: Sharding
+            クエリ最適化（EXPLAIN / PROFILE）: Query optimization (EXPLAIN / PROFILE)
+            並列化とパフォーマンス: Parallelism and performance
+            API リファレンス: API reference
+            Rust クライアント: Rust client
+            Python クライアント: Python client
+            TCP プロトコル仕様: TCP protocol
+            グラフアルゴリズム: Graph algorithms
+            最短経路: Shortest paths
+            全経路探索: All paths
+            PageRank / 中心性指標: PageRank and centrality
+            連結成分: Connected components
+            サイクル検出: Cycle detection
+            可視化: Visualization
+            Web アプリ: Web app
+            DOT / SVG エクスポート: DOT / SVG export
+            ASCII テキスト可視化: ASCII visualization
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -77,6 +153,7 @@ nav:
     - レプリケーション: advanced/replication.md
     - シャーディング: advanced/sharding.md
     - クエリ最適化（EXPLAIN / PROFILE）: advanced/query-optimization.md
+    - 並列化とパフォーマンス: advanced/parallelization.md
   - API リファレンス:
     - api/index.md
     - Rust クライアント: api/rust-client.md
@@ -88,6 +165,9 @@ nav:
     - 全経路探索: algorithms/all-paths.md
     - PageRank / 中心性指標: algorithms/centrality.md
     - 連結成分: algorithms/connected-components.md
+    - サイクル検出: algorithms/cycle-detection.md
   - 可視化:
     - visualization/index.md
+    - Web アプリ: visualization/web-app.md
     - DOT / SVG エクスポート: visualization/export.md
+    - ASCII テキスト可視化: visualization/ascii.md

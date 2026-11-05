@@ -1,22 +1,33 @@
 name: Deploy Docs to GitHub Pages
 
+# 日本語（/）と英語（/en/）の docs をビルドする（mkdocs-static-i18n）。
+# PR ではビルド（--strict）のみ行い、main への push / 手動実行のときだけデプロイする。
+
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'overrides/**'
       - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'overrides/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: "pages"
-  cancel-in-progress: false
+  group: pages-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -26,21 +37,30 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
 
-      - name: Install MkDocs Material
-        run: pip install mkdocs-material
+      - name: Install MkDocs (pinned)
+        run: pip install -r requirements-docs.txt
+
+      - name: Build MkDocs (ja + en)
+        # --strict: 壊れたリンクや設定の誤りを警告ではなく失敗にする
+        run: mkdocs build --strict --site-dir _site
 
       - uses: actions/configure-pages@v4
-
-      - name: Build MkDocs
-        run: mkdocs build --site-dir _site
+        if: github.event_name != 'pull_request'
 
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: _site
 
   deploy:
+    if: github.event_name != 'pull_request'
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
