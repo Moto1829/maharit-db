@@ -2825,6 +2825,15 @@ impl<'a> Executor<'a> {
                     projected.push(value.clone());
                 }
 
+                // `WITH x` / `WITH x AS y` passes the binding through unchanged, so a
+                // relationship stays a relationship (a `Value` cannot represent one).
+                if let ReturnItem::Variable(v) = &item.expression
+                    && let Some(bound) = binding.get(v.as_str())
+                {
+                    new_binding.insert(Arc::from(var_name.as_str()), bound.clone());
+                    continue;
+                }
+
                 // Convert Value back to BindingValue for the new binding
                 match value {
                     Value::Node(id) | Value::NodeData { id, .. } => {
@@ -2845,7 +2854,11 @@ impl<'a> Executor<'a> {
 
             if let Some(ref order_by) = with_clause.order_by {
                 let row = Row { columns: projected };
-                keys.push(self.order_keys(order_by, &col_names, &row, Some(binding))?);
+                // ORDER BY may use both the incoming variables and the WITH
+                // aliases (e.g. `WITH r AS rel ORDER BY rel.since`).
+                let mut scope = binding.clone();
+                scope.extend(new_binding.iter().map(|(k, v)| (k.clone(), v.clone())));
+                keys.push(self.order_keys(order_by, &col_names, &row, Some(&scope))?);
             }
             result.push(new_binding);
         }
@@ -3411,6 +3424,17 @@ impl<'a> Executor<'a> {
                 continue;
             }
 
+            // A relationship variable bound earlier only matches that relationship.
+            if let Some(bound) = segment
+                .edge
+                .variable
+                .as_deref()
+                .and_then(|v| bindings.get(v))
+                && !matches!(bound, BindingValue::Edge(id) if *id == edge.id)
+            {
+                continue;
+            }
+
             // Get the other node
             let next_id = self.get_next_node(prev_id, &edge, segment.edge.direction);
 
@@ -3692,6 +3716,14 @@ impl<'a> Executor<'a> {
         pattern: &NodePattern,
         bindings: &Bindings,
     ) -> Result<bool, ExecuteError> {
+        // A variable bound earlier (previous pattern, WITH, subquery import)
+        // only matches that same node.
+        if let Some(bound) = pattern.variable.as_deref().and_then(|v| bindings.get(v))
+            && bound.as_node() != Some(node_id)
+        {
+            return Ok(false);
+        }
+
         let backend = self.graph_ref();
 
         // Check labels without cloning the whole node. A node must have ALL

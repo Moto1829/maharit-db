@@ -350,6 +350,37 @@ fn cases() -> Vec<Case> {
             Any,
             [["Alice"], ["Carol"], ["Acme"]]
         ),
+        // ── variables bound earlier must match the same element (bug/125) ─
+        case!(
+            "MATCH (p:Person {name: 'Bob'}), (f)-[:KNOWS]->(p) RETURN f.name, p.name",
+            Any,
+            [["Alice", "Bob"]]
+        ),
+        case!(
+            "MATCH (p:Person {name: 'Bob'}) WITH p MATCH (f)-[:KNOWS]->(p) RETURN f.name",
+            Any,
+            [["Alice"]]
+        ),
+        case!(
+            "MATCH (p:Person {name: 'Alice'}) CALL { WITH p MATCH (f)-[:KNOWS]->(p) RETURN f.name AS name } RETURN name",
+            Any,
+            []
+        ),
+        case!(
+            "MATCH (c:Person {name: 'Carol'}) WITH c MATCH (a)-[:KNOWS*]->(c) RETURN a.name",
+            Any,
+            [["Alice"], ["Bob"]]
+        ),
+        case!(
+            "MATCH (a:Person {name: 'Alice'})-[r:KNOWS]->(b) WITH r MATCH (x)-[r]->(y) RETURN x.name, y.name",
+            Any,
+            [["Alice", "Bob"]]
+        ),
+        case!(
+            "MATCH (a)-[r:KNOWS]->(b) WITH r AS rel ORDER BY rel.since DESC RETURN rel.since",
+            Exact,
+            [[2015], [2010]]
+        ),
         // ── CALL procedure … YIELD … ─────────────────────────────────────
         case!(
             "CALL db.labels() YIELD label AS l RETURN l",
