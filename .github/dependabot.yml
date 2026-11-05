@@ -19,6 +19,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    ignore:
+      # The ref is the Rust version itself (pinned with rust-toolchain.toml),
+      # not the action's version; bump both together by hand.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]
