@@ -1,6 +1,6 @@
 # タスク 137: README の英語化
 
-前提: タスク 136 の方針（README.md を英語、README.ja.md を日本語）。日本語をトップに残す判断になった場合は、ファイル名を逆にして `README.en.md` を作る。
+方針（2026-11-05 決定）: GitHub のトップに出す `README.md` を英語にし、日本語は `README.ja.md` に移す。
 
 ## 作業内容
 - [ ] 現在の `README.md` を `git mv README.md README.ja.md` で移す（履歴を残す）

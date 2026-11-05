@@ -17,7 +17,7 @@ docs（MkDocs Material、57 ページ・約 217KB）と README.md は日本語�
 | 仕組み | [mkdocs-static-i18n](https://github.com/ultrabug/mkdocs-static-i18n) の **suffix 構成**（`basics.md` = 日本語、`basics.en.md` = 英語） | 既存ファイルを移動しないので、日本語ページの URL、`docs_cypher_known_failures.txt` のキー、外部からのリンクが変わらない |
 | URL | 日本語は現状どおり `/`、英語は `/en/` | 既存 URL を壊さない。英語をルートにしたくなったら後から `default` を入れ替えれば済む |
 | 未翻訳ページ | `fallback_to_default: true` で日本語版を表示 | 段階的に翻訳を進められる。英語ナビゲーションが途中で切れない |
-| README | `README.md` を英語にし、日本語は `README.ja.md` に移す。両方の先頭に相互リンク | GitHub は `README.md` だけをトップに表示する。国外の利用者が最初に見るのはここ（**要確認**: 日本語をトップのままにしたい場合は逆にして `README.en.md` を作る） |
+| README | `README.md` を英語にし、日本語は `README.ja.md` に移す。両方の先頭に相互リンク | GitHub は `README.md` だけをトップに表示する。国外の利用者が最初に見るのはここ（2026-11-05 ユーザー決定: トップは英語） |
 | 用語 | 用語集 `docs/_i18n/GLOSSARY.md` を作り、訳語を固定する | ページごとに訳語が揺れるのを防ぐ（ノード=node、リレーションシップ=relationship、エッジ=edge の使い分けなど） |
 | 翻訳手段 | Claude で下訳 → 用語集と照合 → コード例・コマンド・出力は一切変えない | 量が多い（約 217KB）。コード部分は翻訳対象外 |
 | 鮮度管理 | 英語ファイルの front matter に、翻訳元の日本語ファイルのコミットを記録（`source_commit: <sha>`）。CI で日本語側に新しい変更があれば警告（タスク 141） | 「英語版が古い」ことを機械的に検出できる |
