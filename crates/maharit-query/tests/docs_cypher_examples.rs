@@ -119,32 +119,63 @@ fn failure_key(rel: &Path, stmt: &str) -> String {
     format!("docs/{}: {first}", file.display())
 }
 
-/// `line` without a trailing `//` comment (one outside string literals).
-fn strip_line_comment(line: &str) -> &str {
+/// `code` without `//` and `/* */` comments (those outside string literals).
+/// Block comments keep their newlines so line structure is preserved.
+fn strip_comments(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
     let mut quote: Option<char> = None;
-    let mut prev = '\0';
-    for (i, c) in line.char_indices() {
-        match quote {
-            Some(q) if c == q && prev != '\\' => quote = None,
-            Some(_) => {}
-            None if c == '"' || c == '\'' || c == '`' => quote = Some(c),
-            None if c == '/' && prev == '/' => return &line[..i - 1],
-            None => {}
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else if c == q {
+                quote = None;
+            }
+            continue;
         }
-        prev = c;
+        match (c, chars.peek()) {
+            ('"' | '\'' | '`', _) => {
+                quote = Some(c);
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                // line comment: drop up to (not including) the newline
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+            }
+            ('/', Some('*')) => {
+                // block comment: drop through the closing */, keep its newlines
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
     }
-    line
+    out
 }
 
-/// Cypher statements of `markdown` with all `//` comments removed: the part a
-/// translation must leave untouched.
 fn cypher_code(markdown: &str) -> Vec<(usize, String)> {
     cypher_statements(markdown)
         .into_iter()
         .filter_map(|(line, stmt)| {
-            let code: Vec<&str> = stmt
+            let stripped = strip_comments(&stmt);
+            let code: Vec<&str> = stripped
                 .lines()
-                .map(|l| strip_line_comment(l).trim_end())
+                .map(str::trim_end)
                 .filter(|l| !l.trim().is_empty())
                 .collect();
             (!code.is_empty()).then(|| (line, code.join("\n")))
@@ -253,7 +284,7 @@ fn translated_cypher_blocks_match_source() {
                 None => format!("docs/{}: (no more statements)", path.display()),
             };
             problems.push(format!(
-                "cypher differs from the source (only // comments may be translated):\n  translation: {}\n  source:      {}",
+                "cypher differs from the source (only // and /* */ comments may be translated):\n  translation: {}\n  source:      {}",
                 show(t, rel).replace('\n', "\n    "),
                 show(o, &source_rel).replace('\n', "\n    ")
             ));
@@ -263,16 +294,22 @@ fn translated_cypher_blocks_match_source() {
 }
 
 #[test]
-fn strip_line_comment_keeps_strings() {
-    assert_eq!(strip_line_comment("MATCH (n) // 説明"), "MATCH (n) ");
+fn strip_comments_keeps_strings() {
+    assert_eq!(strip_comments("MATCH (n) // 説明"), "MATCH (n) ");
     assert_eq!(
-        strip_line_comment(r#"RETURN "http://example.com" // url"#),
+        strip_comments(r#"RETURN "http://example.com" // url"#),
         r#"RETURN "http://example.com" "#
     );
-    assert_eq!(strip_line_comment("RETURN 'a\\'//b'"), "RETURN 'a\\'//b'");
-    assert_eq!(strip_line_comment("RETURN 4 / 2"), "RETURN 4 / 2");
+    assert_eq!(strip_comments("RETURN 'a\\'//b'"), "RETURN 'a\\'//b'");
+    assert_eq!(strip_comments("RETURN 4 / 2"), "RETURN 4 / 2");
+    assert_eq!(strip_comments("RETURN 1 /* x */ + 2"), "RETURN 1  + 2");
+    assert_eq!(strip_comments("RETURN '/* x */'"), "RETURN '/* x */'");
     assert_eq!(
         cypher_code("```cypher\n// 見出し\nMATCH (n) // a\nRETURN n\n```\n"),
         cypher_code("```cypher\n// heading\nMATCH (n) // b\nRETURN n\n```\n")
+    );
+    assert_eq!(
+        cypher_code("```cypher\nMATCH (n)\n/* 複数行の\n   コメント */\nRETURN n\n```\n"),
+        cypher_code("```cypher\nMATCH (n)\n/* a block\n   comment */\nRETURN n\n```\n")
     );
 }
