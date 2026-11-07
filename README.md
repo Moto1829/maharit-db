@@ -14,7 +14,7 @@ A graph database engine written in Rust. It offers intuitive graph operations th
 - **BM25 full-text search** — phrase and fuzzy search. Japanese morphological analysis (lindera IPADIC) is available when built with the `japanese` feature
 - **Indexes and constraints** — property indexes; UNIQUE, NOT NULL, type, and composite UNIQUE constraints
 - **Graph algorithms** — PageRank, shortest paths (Dijkstra / A* / BFS), betweenness centrality, closeness centrality, connected components, strongly connected components, cycle detection, and topological sort
-- **Durability with a WAL** — a write-ahead log (with group commit) for crash recovery
+- **Persistence** — single-file storage, saved on graceful shutdown; a write-ahead log (with group commit) is available in the `maharit-storage` API (the server does not yet write an on-disk WAL)
 - **TLS/SSL** — TLS 1.2/1.3 via rustls, with certificate hot reload
 - **Authentication and RBAC** — user management and role-based access control (admin / writer / reader)
 - **Fine-grained ACLs** — access control per label and per property

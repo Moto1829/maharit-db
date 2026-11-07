@@ -14,10 +14,11 @@ MaharitDB は Rust のワークスペース構成を採用し、責任ごとに�
 | `maharit-core` | グラフデータ構造、アルゴリズム、全文検索エンジン |
 | `maharit-query` | Cypher クエリパーサー、エグゼキュータ、プランナー |
 | `maharit-storage` | WAL、永続化、トランザクション、バックアップ |
+| `maharit-cluster` | シャーディング（Hash / Range 戦略）、ルーティング |
 | `maharit-server` | TCP サーバー、認証、メトリクス、レプリケーション |
 | `maharit-client` | 非同期/同期クライアント、コネクションプール |
 | `maharit-io` | CSV/JSON/GraphML インポート・エクスポート |
-| `maharit-viz` | DOT/SVG 可視化 |
+| `maharit-viz` | DOT/SVG/ASCII 可視化、Web アプリ |
 
 ## 各クレートの詳細
 
@@ -25,7 +26,7 @@ MaharitDB は Rust のワークスペース構成を採用し、責任ごとに�
 
 グラフの中心的なデータ構造と操作を提供します。
 
-- **Graph 構造体**: ノード（`Node`）とエッジ（`Edge`）を `HashMap` で管理
+- **Graph 構造体**: ノード（`Node`）とエッジ（`Edge`）を ID で引ける配列で管理
 - **トラバーサル**: DFS/BFS、最短経路（Dijkstra）、全経路列挙
 - **グラフアルゴリズム**: PageRank、中心性指標（媒介・近接）、連結成分
 - **全文検索エンジン**: 転置インデックス、BM25 スコアリング、lindera による日本語形態素解析
@@ -37,7 +38,10 @@ maharit-core/src/
 ├── graph.rs        -- Graph, Node, Edge の定義
 ├── traversal.rs    -- トラバーサルと経路探索
 ├── algorithms.rs   -- PageRank, 中心性, 連結成分
-└── fulltext.rs     -- 全文検索インデックス（FulltextManager）
+├── fulltext.rs     -- 全文検索インデックス（FulltextManager）
+├── constraint.rs   -- スキーマ制約
+├── property_index.rs -- プロパティインデックス
+└── concurrent_graph.rs -- 並行読み書き向けの ConcurrentGraph
 ```
 
 ### maharit-query
@@ -72,7 +76,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 
 データの永続化とトランザクション管理を担います。
 
-- **WAL（Write-Ahead Log）**: 変更操作をディスクに先行書き込み
+- **WAL（Write-Ahead Log）**: 変更操作をディスクに先行書き込み（Rust API。サーバーはまだディスク上の WAL を使っていない）
 - **スナップショット**: グラフ全体のシリアライズ/デシリアライズ
 - **トランザクション**: MVCC によるスナップショット分離レベル
 - **バックアップ**: gzip 圧縮付きフルバックアップ・増分バックアップ
@@ -89,6 +93,14 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 - **OpenTelemetry**: 分散トレーシング
 - **レプリケーション**: WAL ストリーミング、リーダー/フォロワー構成
 
+### maharit-cluster
+
+複数サーバーへのシャーディングを担当します。
+
+- **シャーディング戦略**: Hash / Range
+- **ルーター**: クエリを担当シャードへ振り分け
+- **コーディネーター**: `maharit-server` の `coordinator.rs` から利用
+
 ### maharit-client
 
 サーバーへの接続クライアントを提供します。
@@ -96,7 +108,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 - **非同期クライアント**: `Client`（tokio ベース）
 - **同期クライアント**: `SyncClient`（非同期ランタイムをラップ）
 - **コネクションプール**: 接続の再利用と管理
-- **パラメータ化クエリ**: `$param` 形式のパラメータバインディング
+- **クエリ実行**: `query`（結果を受け取る）/ `execute`（結果を捨てる）。TCP プロトコルはまだクエリパラメータを送れない
 
 ### maharit-io
 
@@ -128,7 +140,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
               ↓
          Executor
           ├── maharit-core（Graph 操作）
-          └── maharit-storage（WAL 書き込み）
+          └── RecordingGraph（変更を WAL エントリとして記録し、フォロワーへ配信）
               ↓
          結果を返却
               ↑
@@ -145,7 +157,8 @@ maharit-server
   │     └── maharit-core
   ├── maharit-storage
   │     └── maharit-core
-  └── maharit-client（テスト用）
+  └── maharit-cluster
+        └── maharit-core
 
 maharit-io
   └── maharit-core
@@ -153,19 +166,23 @@ maharit-io
 maharit-viz
   ├── maharit-core
   └── maharit-client（Web アプリのみ）
+
+maharit-client（独立。maharit-core にも依存しない）
 ```
 
 ## メモリモデル
 
-グラフデータはインメモリで管理されます。`Graph` 構造体は以下の `HashMap` を保持します：
+グラフデータはインメモリで管理されます。`Graph` 構造体は ID を添字とする配列でノードとエッジを保持します：
 
-- `nodes: HashMap<NodeId, Node>`: ノードの格納
-- `edges: HashMap<EdgeId, Edge>`: エッジの格納
-- `adjacency: HashMap<NodeId, Vec<EdgeId>>`: 出力エッジのインデックス
-- `reverse_adjacency: HashMap<NodeId, Vec<EdgeId>>`: 入力エッジのインデックス
+- `nodes: Vec<Option<Node>>`: ノードの格納（削除済みの位置は `None`）
+- `edges: Vec<Option<Edge>>`: エッジの格納
+- `outgoing_edges: Vec<HashSet<EdgeId>>`: 出力エッジの隣接リスト（削除が O(1)）
+- `incoming_edges: Vec<HashSet<EdgeId>>`: 入力エッジの隣接リスト
+- `node_free_list` / `edge_free_list`: 削除で空いた ID の再利用リスト
 - `label_index: HashMap<String, HashSet<NodeId>>`: ラベルによる逆引きインデックス
 
-永続化はバックグラウンドで WAL とスナップショットによって行われます。
+ノードとエッジのプロパティは `Arc<HashMap<..>>` で共有し、結果を返すときのコピーを減らしています。
+サーバーは停止時（SIGINT / SIGTERM）にグラフ全体をデータファイルへ保存します。変更はリーダーからフォロワーへ WAL エントリとして送られますが、ディスク上の WAL にはまだ書き込まれません。
 
 ## 永続化モード
 

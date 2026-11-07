@@ -35,76 +35,96 @@ cargo run -p maharit-server
 ./target/release/maharit
 ```
 
-起動すると以下のプロンプトが表示されます。
+起動すると以下のメッセージが表示され、`maharit>` プロンプトでクエリを入力できます。`:help` でコマンド一覧、`:quit` で終了します。
 
-```
-MaharitDB v0.1.0
-Type your Cypher query and press Enter. Type 'exit' to quit.
->
+```text
+MaharitDB - Graph Database v0.2.0
+Type :help for available commands
+
+maharit>
 ```
 
 ## 3. 最初のクエリ
 
+書き込みクエリは、作成・更新・削除した件数を表で返します。
+
 ### ノードを作成する
 
 ```text
-> CREATE (alice:Person {name: "Alice", age: 30})
-Created 1 node(s).
+maharit> CREATE (alice:Person {name: "Alice", age: 30})
+created_nodes | created_edges
+--------------------------------
+1 | 0
 
-> CREATE (bob:Person {name: "Bob", age: 25})
-Created 1 node(s).
+1 row(s) returned
+maharit> CREATE (bob:Person {name: "Bob", age: 25})
+created_nodes | created_edges
+--------------------------------
+1 | 0
+
+1 row(s) returned
 ```
 
 ### リレーションシップを作成する
 
 ```text
-> MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
-  CREATE (a)-[:KNOWS {since: 2020}]->(b)
-Created 1 relationship(s).
+maharit> MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS {since: 2020}]->(b)
+created_nodes | created_edges
+--------------------------------
+0 | 1
+
+1 row(s) returned
 ```
 
 ### データを検索する
 
 ```text
-> MATCH (n:Person) RETURN n.name, n.age
-+-------+-----+
-| n.name | n.age |
-+-------+-----+
-| Alice  | 30   |
-| Bob    | 25   |
-+-------+-----+
-2 rows returned.
+maharit> MATCH (n:Person) RETURN n.name, n.age ORDER BY n.name
+n.name | n.age
+-----------------
+"Alice" | 30
+"Bob" | 25
+
+2 row(s) returned
 ```
 
 ### グラフを走査する
 
 ```text
-> MATCH (p:Person)-[:KNOWS]->(friend:Person)
-  RETURN p.name AS person, friend.name AS friend
-+--------+--------+
-| person | friend |
-+--------+--------+
-| Alice  | Bob    |
-+--------+--------+
-1 row returned.
+maharit> MATCH (p:Person)-[:KNOWS]->(friend:Person) RETURN p.name AS person, friend.name AS friend
+person | friend
+------------------
+"Alice" | "Bob"
+
+1 row(s) returned
 ```
 
 ### プロパティを更新する
 
 ```text
-> MATCH (n:Person {name: "Alice"})
-  SET n.email = "alice@example.com"
-Updated 1 node(s).
+maharit> MATCH (n:Person {name: "Alice"}) SET n.email = "alice@example.com"
+properties_set
+-----------------
+1
+
+1 row(s) returned
 ```
 
 ### ノードを削除する
 
+`DETACH DELETE` はノードと、そのノードにつながるリレーションシップをまとめて削除します。
+
 ```text
-// リレーションシップを含めて削除
-> MATCH (n:Person {name: "Bob"})
-  DETACH DELETE n
-Deleted 1 node(s), 1 relationship(s).
+maharit> MATCH (n:Person {name: "Bob"}) DETACH DELETE n
+deleted_nodes | deleted_edges
+--------------------------------
+1 | 0
+
+1 row(s) returned
 ```
+
+!!! note
+    現在の実装では、`DETACH DELETE` で一緒に消えたリレーションシップは `deleted_edges` に数えられません（リレーションシップ自体は削除されています）。
 
 ## 4. サーバーモードで起動する
 
@@ -121,12 +141,16 @@ cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687
 cargo run -p maharit-server -- server --host 0.0.0.0 --port 7687 --max-connections 200
 ```
 
-サーバーが起動すると以下のログが表示されます。
+デフォルト設定で起動すると、以下のようなログが表示されます（実際には JSON 形式の構造化ログも同時に出力されます）。認証は既定で無効です。本番環境での設定は [認証](./operations/auth.md) を参照してください。
 
+```text
+Starting with empty database (will save to maharit.db)
+HTTP monitoring server listening on 127.0.0.1:9090
+Server listening on 127.0.0.1:7687
+WARN: maharit-server authentication is DISABLED. All requests are accepted without sessionToken.
 ```
-{"level":"INFO","message":"MaharitDB server starting","host":"0.0.0.0","port":7687}
-{"level":"INFO","message":"Server listening","addr":"0.0.0.0:7687"}
-```
+
+`Ctrl+C`（SIGINT）または SIGTERM で停止すると、データをファイルに保存してから終了します。
 
 ## 5. クライアントから接続する
 
@@ -163,23 +187,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### パラメータ化クエリ
-
-SQL インジェクション対策として、値を直接クエリに埋め込む代わりにパラメータを使用してください。
-
-```rust
-use std::collections::HashMap;
-use serde_json::json;
-
-let mut params = HashMap::new();
-params.insert("name".to_string(), json!("Alice"));
-params.insert("age".to_string(), json!(30));
-
-let result = client.query_with_params(
-    "MATCH (n:Person {name: $name}) WHERE n.age >= $age RETURN n",
-    params
-).await?;
-```
+!!! warning "クエリパラメータ"
+    Cypher の `$param` 構文は組み込みの実行器（`maharit-query`）では使えますが、現在の TCP プロトコルとクライアントはパラメータを送れません。利用者の入力をクエリに含めるときは、文字列リテラルの `"` と `\` をエスケープしてから組み立ててください。
 
 ## 6. Web UI (`maharit-viz`) で可視化する
 
@@ -220,7 +229,7 @@ docker run -it maharit-db
 docker run -p 7687:7687 maharit-db server --host 0.0.0.0 --port 7687
 
 # データを永続化してサーバーを起動
-docker run -v maharit-data:/data -p 7687:7687 maharit-db server --host 0.0.0.0
+docker run -v maharit-data:/data -p 7687:7687 maharit-db server --host 0.0.0.0 --data /data/maharit.db
 ```
 
 ### docker-compose で server + Web UI を同時起動
