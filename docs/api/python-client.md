@@ -62,6 +62,15 @@ with Client.connect("localhost:7687") as client:
 !!! warning "0.2 以前の `query_with_params`"
     以前の `query_with_params` はサーバーにパラメータを送らず、値をエスケープせずにクエリ文字列へ埋め込んでいました（引用符を含む値でクエリを書き換えられる）。サーバーとクライアントの両方を更新してください。
 
+### TLS で接続する
+
+サーバーを `--tls-cert` / `--tls-key` 付きで起動している場合は、`ca_file`（信頼する CA 証明書。自己署名なら証明書そのもの）か `ssl=True`（システムの CA ストアで検証）を指定します。`AsyncClient`・`ConnectionPool`・`AsyncConnectionPool` も同じ引数を受け付けます（[TLS/SSL 設定](../operations/tls.md)）。
+
+```python
+with Client.connect("db.example.com:7687", ca_file="/etc/maharit/ca.crt") as client:
+    client.query("MATCH (n) RETURN count(n)")
+```
+
 ## 非同期 API
 
 `AsyncClient` クラスは asyncio ベースの非同期クライアントです。
@@ -151,7 +160,7 @@ with Client.connect("localhost:7687") as client:
 
 | メソッド | 説明 |
 |--------|------|
-| `Client.connect(address, timeout=30.0)` | サーバーに接続 |
+| `Client.connect(address, timeout=30.0, ssl=None, ca_file=None)` | サーバーに接続（`ssl` / `ca_file` で TLS） |
 | `client.execute(query, params=None)` | Cypher クエリを実行（`params` は `$name` に渡す値の dict） |
 | `client.query(query, params=None)` | `execute` のエイリアス |
 | `client.query_with_params(query, params)` | `execute(query, params)` と同じ |

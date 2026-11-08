@@ -111,6 +111,11 @@ fn run_server(args: &[String]) {
     // Monitoring HTTP server bind address (metrics + health)
     let mut metrics_bind: Option<String> = None;
 
+    // TLS for client connections
+    let mut tls_cert: Option<String> = None;
+    let mut tls_key: Option<String> = None;
+    let mut tls_min_version: Option<String> = None;
+
     // Sharding options
     let mut shard_mode = false;
     let mut shard_id: Option<u32> = None;
@@ -182,6 +187,24 @@ fn run_server(args: &[String]) {
             "--replication-secret" => {
                 if i + 1 < args.len() {
                     replication_secret = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--tls-cert" => {
+                if i + 1 < args.len() {
+                    tls_cert = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--tls-key" => {
+                if i + 1 < args.len() {
+                    tls_key = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--tls-min-version" => {
+                if i + 1 < args.len() {
+                    tls_min_version = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -267,8 +290,14 @@ fn run_server(args: &[String]) {
         i += 1;
     }
 
+    let tls = resolve_tls(tls_cert, tls_key, tls_min_version);
+
     // ── Coordinator mode: no local graph needed ───────────────────────────────
     if coordinator_mode {
+        if tls.is_some() {
+            eprintln!("Error: TLS (--tls-cert/--tls-key) is not supported in coordinator mode yet");
+            std::process::exit(1);
+        }
         let coord_bind = {
             let host = config.bind_address.split(':').next().unwrap_or("127.0.0.1");
             let port = coordinator_port.as_deref().unwrap_or("7690");
@@ -413,6 +442,9 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(t) = tls.clone() {
+                server = server.with_tls(t);
+            }
             if let Some(d) = durability {
                 server = server.with_durability(d);
             }
@@ -462,6 +494,9 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(t) = tls.clone() {
+                server = server.with_tls(t);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
@@ -490,6 +525,9 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(t) = tls.clone() {
+                server = server.with_tls(t);
+            }
             if let Some(d) = durability {
                 server = server.with_durability(d);
             }
@@ -504,6 +542,58 @@ fn run_server(args: &[String]) {
                     std::process::exit(1);
                 }
             });
+        }
+    }
+}
+
+/// Resolve the TLS settings for client connections from the flags, falling
+/// back to `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` / `MAHARIT_TLS_MIN_VERSION`.
+/// Exits when only one of the certificate and key is given or they cannot be
+/// loaded, so a misconfigured server never falls back to plaintext.
+fn resolve_tls(
+    cert: Option<String>,
+    key: Option<String>,
+    min_version: Option<String>,
+) -> Option<crate::tls::ReloadableTlsAcceptor> {
+    use crate::tls::{ProtocolVersion, ReloadableTlsAcceptor, TlsConfig};
+
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let cert = cert.or_else(|| env("MAHARIT_TLS_CERT"));
+    let key = key.or_else(|| env("MAHARIT_TLS_KEY"));
+    let min_version = min_version.or_else(|| env("MAHARIT_TLS_MIN_VERSION"));
+
+    let (cert, key) = match (cert, key) {
+        (None, None) => {
+            if min_version.is_some() {
+                eprintln!("Error: --tls-min-version requires --tls-cert and --tls-key");
+                std::process::exit(1);
+            }
+            return None;
+        }
+        (Some(c), Some(k)) => (c, k),
+        _ => {
+            eprintln!("Error: --tls-cert and --tls-key must be given together");
+            std::process::exit(1);
+        }
+    };
+    let mut config = TlsConfig::new(&cert, &key);
+    match min_version.as_deref() {
+        None => {}
+        Some("1.2") => config = config.with_min_protocol(ProtocolVersion::Tls12),
+        Some("1.3") => config = config.with_min_protocol(ProtocolVersion::Tls13),
+        Some(other) => {
+            eprintln!("Error: --tls-min-version must be 1.2 or 1.3 (got {other})");
+            std::process::exit(1);
+        }
+    }
+    match ReloadableTlsAcceptor::new(config) {
+        Ok(acceptor) => {
+            println!("TLS enabled (certificate: {cert})");
+            Some(acceptor)
+        }
+        Err(e) => {
+            eprintln!("Error: failed to load the TLS certificate/key: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -1030,6 +1120,18 @@ fn print_server_help() {
     );
     println!(
         "    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth"
+    );
+    println!(
+        "    --tls-cert <PATH>                PEM certificate (chain) for client connections (env: MAHARIT_TLS_CERT)"
+    );
+    println!(
+        "    --tls-key <PATH>                 PEM private key for --tls-cert (env: MAHARIT_TLS_KEY)"
+    );
+    println!(
+        "                                     Both files are re-read within 30 s after they change."
+    );
+    println!(
+        "    --tls-min-version <1.2|1.3>      Minimum TLS version (env: MAHARIT_TLS_MIN_VERSION, default: 1.2)"
     );
     println!(
         "    --metrics-bind <ADDR>            Monitoring HTTP (metrics/health) bind address (default: 127.0.0.1:9090, loopback only)"

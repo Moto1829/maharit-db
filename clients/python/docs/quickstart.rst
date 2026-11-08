@@ -31,6 +31,10 @@ Synchronous client
    client.execute("CREATE (n:Person {name: 'Bob'})")
    client.close()
 
+   # TLS (server started with --tls-cert / --tls-key)
+   with Client.connect("db.example.com:7687", ca_file="ca.crt") as client:
+       client.execute("MATCH (n) RETURN count(n)")
+
 Asynchronous client
 ~~~~~~~~~~~~~~~~~~~
 

@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Iterator, List, Optional
 
+from ._tls import SslOption, make_ssl_context
 from .exceptions import ConnectionError, MaharitError, QueryError, TransactionError
 from .protocol import recv_message, send_message
 
@@ -117,6 +118,10 @@ class Client:
             result = client.query("MATCH (n:Person) RETURN n.name")
             for row in result:
                 print(row["n.name"])
+
+        # TLS (server started with --tls-cert / --tls-key)
+        with Client.connect("db.example.com:7687", ssl=True) as client:
+            ...
     """
 
     def __init__(
@@ -126,12 +131,15 @@ class Client:
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
     ) -> None:
         self._host = host
         self._port = port
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._ssl_context = make_ssl_context(ssl, ca_file)
         self._sock: Optional[socket.socket] = None
 
     @classmethod
@@ -141,6 +149,8 @@ class Client:
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
     ) -> "Client":
         """Connect to a MaharitDB server.
 
@@ -151,6 +161,11 @@ class Client:
                 (default 3). Set to 0 to disable auto-reconnect.
             retry_delay: Base delay in seconds between retry attempts. Each
                 attempt waits ``retry_delay * attempt`` seconds (default 1.0).
+            ssl: Connect over TLS. ``True`` verifies the server certificate
+                against the system CA store; an :class:`ssl.SSLContext` is
+                used as is. Default: plain TCP.
+            ca_file: PEM file with the CA (or self-signed server) certificate
+                to trust. Setting it enables TLS.
 
         Returns:
             A connected :class:`Client` instance.
@@ -159,7 +174,7 @@ class Client:
         if not host:
             host = "localhost"
         port = int(port_str) if port_str else 7687
-        client = cls(host, port, timeout, max_retries, retry_delay)
+        client = cls(host, port, timeout, max_retries, retry_delay, ssl, ca_file)
         client._connect()
         return client
 
@@ -168,6 +183,8 @@ class Client:
         sock.settimeout(self._timeout)
         try:
             sock.connect((self._host, self._port))
+            if self._ssl_context is not None:
+                sock = self._ssl_context.wrap_socket(sock, server_hostname=self._host)
         except OSError as e:
             sock.close()
             raise ConnectionError(f"Cannot connect to {self._host}:{self._port}: {e}") from e

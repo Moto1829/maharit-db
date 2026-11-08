@@ -6,163 +6,138 @@ nav_order: 2
 
 # TLS/SSL 設定
 
-MaharitDB は rustls を使用した TLS 1.2/1.3 対応の暗号化通信をサポートしています。
+`maharit server` に証明書と秘密鍵を渡すと、クライアント接続（デフォルト 7687 番ポート）を TLS 1.2/1.3 で暗号化します（rustls を使用）。指定しない場合は平文で待ち受けます。
 
-## 証明書の準備
+!!! warning "TLS で保護されない通信"
+    TLS がかかるのはクライアント接続だけです。次の通信は平文のままなので、信頼できるネットワーク内に閉じてください。
 
-### 自己署名証明書の生成（開発用）
+    - レプリケーション（`--replication-bind`、デフォルト 7688 番）。`--replication-secret` のシークレットも平文で送られます
+    - メトリクス・ヘルスチェックの HTTP（`--metrics-bind`、デフォルトは `127.0.0.1:9090` でループバックのみ）
+    - コーディネーターとシャードの間の通信。コーディネーターモードでは TLS を指定すると起動を拒否します
 
-```bash
-# 秘密鍵の生成
-openssl genrsa -out server.key 2048
-
-# 証明書署名要求（CSR）の生成
-openssl req -new -key server.key -out server.csr \
-  -subj "/C=JP/ST=Tokyo/L=Tokyo/O=MyOrg/CN=localhost"
-
-# 自己署名証明書の生成（有効期間 365 日）
-openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
-
-# 確認
-openssl x509 -in server.crt -text -noout
-```
-
-### Let's Encrypt を使用する場合
-
-```bash
-# certbot のインストール
-sudo apt install certbot
-
-# 証明書の取得
-sudo certbot certonly --standalone -d yourdomain.com
-
-# 証明書は以下のパスに保存される
-# /etc/letsencrypt/live/yourdomain.com/fullchain.pem
-# /etc/letsencrypt/live/yourdomain.com/privkey.pem
-```
-
-## サーバーの TLS 設定
-
-証明書ファイルと秘密鍵ファイルをコマンドラインオプションで指定します。
+## サーバーの設定
 
 ```bash
 maharit server \
   --host 0.0.0.0 \
-  --port 7687 \
-  --tls-cert /path/to/server.crt \
-  --tls-key /path/to/server.key
-```
-
-環境変数での設定：
-
-```bash
-export MAHARIT_TLS_CERT=/etc/maharit/server.crt
-export MAHARIT_TLS_KEY=/etc/maharit/server.key
-maharit server --host 0.0.0.0
-```
-
-## クライアントの TLS 設定
-
-### 自己署名証明書を使用する場合
-
-サーバーの証明書をクライアント側で信頼するよう設定します。
-
-```rust
-use maharit_client::ClientBuilder;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ClientBuilder::new("localhost:7687")
-        .with_tls(true)
-        .with_ca_cert("/path/to/server.crt")  // 自己署名証明書の場合
-        .build()
-        .await?;
-
-    Ok(())
-}
-```
-
-### 正式な CA 証明書を使用する場合
-
-```rust
-use maharit_client::ClientBuilder;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ClientBuilder::new("yourdomain.com:7687")
-        .with_tls(true)
-        // CA 証明書が信頼されている場合は追加設定不要
-        .build()
-        .await?;
-
-    Ok(())
-}
-```
-
-## TLS バージョン
-
-MaharitDB は TLS 1.2 および TLS 1.3 をサポートします。セキュリティ上の理由から TLS 1.0 および 1.1 は使用できません。
-
-```
-対応 TLS バージョン:
-- TLS 1.2 (最低要件)
-- TLS 1.3 (推奨)
-```
-
-## 対応している暗号スイート（TLS 1.3）
-
-- `TLS_AES_256_GCM_SHA384`
-- `TLS_AES_128_GCM_SHA256`
-- `TLS_CHACHA20_POLY1305_SHA256`
-
-## 証明書のホットリロード
-
-サーバーを停止せずに証明書を更新できます。
-
-```bash
-# 新しい証明書を配置した後、SIGHUP シグナルを送信
-kill -HUP $(pgrep maharit)
-```
-
-サーバーログで確認：
-
-```json
-{"level":"INFO","message":"Reloading TLS certificates","timestamp":"2024-06-01T00:00:00Z"}
-{"level":"INFO","message":"TLS certificates reloaded successfully","timestamp":"2024-06-01T00:00:00Z"}
-```
-
-## mTLS（クライアント証明書認証）
-
-クライアント証明書による相互 TLS 認証にも対応しています。
-
-```bash
-# クライアント証明書付きでサーバーを起動
-maharit server \
   --tls-cert /etc/maharit/server.crt \
-  --tls-key /etc/maharit/server.key \
-  --tls-ca /etc/maharit/ca.crt  # クライアント証明書の検証に使用する CA
+  --tls-key /etc/maharit/server.key
 ```
 
+| オプション | 環境変数 | 説明 |
+|-----------|---------|------|
+| `--tls-cert <PATH>` | `MAHARIT_TLS_CERT` | PEM 形式のサーバー証明書。中間証明書がある場合は、サーバー証明書に続けて同じファイルに入れる |
+| `--tls-key <PATH>` | `MAHARIT_TLS_KEY` | PEM 形式の秘密鍵（PKCS#8、PKCS#1（RSA）、SEC1（EC）） |
+| `--tls-min-version <1.2\|1.3>` | `MAHARIT_TLS_MIN_VERSION` | 受け付ける最小の TLS バージョン（デフォルト `1.2`） |
+
+起動すると、次のように表示されます。
+
+```text
+TLS enabled (certificate: /etc/maharit/server.crt)
+Server listening on 0.0.0.0:7687 (TLS)
+```
+
+- 証明書と秘密鍵は両方指定します。片方だけの場合や、ファイルが読めない、証明書と鍵が対応しない場合は、平文に戻さずに起動を中止します。
+- TLS を指定せずにループバック以外のアドレス（`--host 0.0.0.0` など）で待ち受けると、通信が暗号化されていないことを警告します。
+- TLS ハンドシェイクが `read_timeout`（30 秒）以内に終わらない接続は切断します。平文で接続してきたクライアントには応答しません。
+
+## 証明書の準備
+
+### 公的な CA の証明書（Let's Encrypt など）
+
+```bash
+sudo certbot certonly --standalone -d db.example.com
+```
+
+`fullchain.pem`（中間証明書を含む）を `--tls-cert` に、`privkey.pem` を `--tls-key` に指定します。
+
+```bash
+maharit server --host 0.0.0.0 \
+  --tls-cert /etc/letsencrypt/live/db.example.com/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/db.example.com/privkey.pem
+```
+
+### 自己署名証明書（開発・社内向け）
+
+クライアント側では、この証明書ファイルそのものを「信頼する CA」として指定します。
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout server.key -out server.crt -days 365 \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+  -addext "basicConstraints=critical,CA:FALSE"
+```
+
+- クライアントは接続先のホスト名（または IP アドレス）が `subjectAltName` に含まれているかを検証します。実際に接続するホスト名を入れてください。
+- `basicConstraints=critical,CA:FALSE` は省略しないでください。OpenSSL の既定では CA 証明書（`CA:TRUE`）が作られ、Rust クライアント（rustls）が `CaUsedAsEndEntity` で接続を拒否します。
+
+## クライアントの設定
+
+### Python
+
+`ca_file` に信頼する CA 証明書（自己署名の場合はサーバー証明書）を指定すると、TLS で接続します。公的な CA の証明書なら `ssl=True` だけで接続できます。
+
+```python
+from maharit import AsyncClient, Client, ConnectionPool
+
+# 自己署名証明書
+with Client.connect("localhost:7687", ca_file="server.crt") as client:
+    client.query("MATCH (n) RETURN count(n)")
+
+# 公的な CA の証明書（システムの CA ストアで検証）
+with Client.connect("db.example.com:7687", ssl=True) as client:
+    ...
+
+# 非同期クライアントとコネクションプールも同じ引数
+client = await AsyncClient.connect("localhost:7687", ca_file="server.crt")
+pool = ConnectionPool("localhost:7687", ca_file="server.crt")
+```
+
+`ssl` には `ssl.SSLContext` も渡せます（クライアント証明書の設定など、細かく制御したい場合）。
+
+### Rust（`maharit-client`）
+
 ```rust
-// クライアント証明書を使用して接続
-let client = ClientBuilder::new("localhost:7687")
-    .with_tls(true)
-    .with_client_cert("/path/to/client.crt", "/path/to/client.key")
-    .build()
-    .await?;
+use maharit_client::{Client, TlsClientConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 第 1 引数は証明書を検証するホスト名
+    let tls = TlsClientConfig::new("localhost").with_ca_cert("server.crt");
+    let mut client = Client::connect_tls("localhost:7687", tls).await?;
+    client.ping().await?;
+    Ok(())
+}
+```
+
+`with_ca_cert` を省略すると、公的な CA（Mozilla のルート証明書）で検証します。`with_skip_verify(true)` は検証を無効にするので、テスト以外では使わないでください。
+
+## 証明書の更新（ホットリロード）
+
+サーバーは証明書と秘密鍵のファイルの更新時刻を 30 秒ごとに確認し、変わっていれば読み込み直します。再起動は不要です。
+
+- 読み込み直した後の新しい接続から、新しい証明書を使います。確立済みの接続はそのまま続きます。
+- 新しいファイルが読めない、または証明書と鍵が対応しない場合は、エラーを記録して前の証明書を使い続けます。
+- 鍵と証明書は、それぞれ一時ファイルに書いてから `mv` で置き換えると、書きかけのファイルを読む心配がありません。certbot の更新はそのまま使えます。
+
+読み込み直すと、サーバーのログに次のように出ます。
+
+```text
+TLS certificate reloaded from /etc/maharit/server.crt
 ```
 
 ## トラブルシューティング
 
-### "certificate verify failed" エラー
+| 症状 | 原因と対処 |
+|------|-----------|
+| クライアントで `certificate verify failed` / `UnknownIssuer` | クライアントが証明書を信頼していない。自己署名なら `ca_file` / `with_ca_cert` にサーバー証明書を指定する |
+| `CaUsedAsEndEntity` | 自己署名証明書が `CA:TRUE` で作られている。`-addext "basicConstraints=critical,CA:FALSE"` を付けて作り直す |
+| `NotValidForName` / `Hostname mismatch` | 接続先のホスト名が証明書の `subjectAltName` にない |
+| サーバーログに `TLS handshake failed` | クライアントが平文で接続している、または証明書を拒否した |
+| 起動時に `failed to load the TLS certificate/key` | パスの誤り、PEM でない、証明書と鍵の取り違え |
 
-自己署名証明書を使用している場合、クライアント側で CA 証明書を指定してください。
-
-### "TLS handshake timeout" エラー
-
-ファイアウォールがポートをブロックしていないか確認してください。
-
-### 証明書の有効期限確認
+証明書の有効期限は次のコマンドで確認できます。
 
 ```bash
 openssl x509 -in server.crt -noout -dates

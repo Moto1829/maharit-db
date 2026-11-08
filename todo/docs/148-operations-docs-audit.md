@@ -6,8 +6,8 @@
 ## 確認済みの不一致
 - `backup.md`: `--data-dir`、`--compress gzip`、`--type incremental`、`CALL db.backup(...)`、`maharit wal list`、`restore --wal-dir --target-time / --target-lsn` は存在しない。実際は `maharit backup --source <DB> --output <PATH> [--compress|--compress-zstd] [--description]`、`maharit backup --list <PATH>`、`maharit restore <BACKUP> --output <DB>`。増分バックアップ・PITR は `maharit-storage` の Rust API のみ
 - `backup.md`「バックアップの内容」: インデックス・スキーマ制約は含まれない（`save_concurrent` は `indexes: vec![]`）
-- `tls.md`: TLS はサーバーに未組み込み（server/147）
+- `tls.md`: server/147 で実装に合わせて書き直し済み（2026-11-08）
 
 ## 作業
-- [ ] operations/ 配下の各ページ（auth / acl / metrics / tracing / backup / docker / tls）のコマンド・フラグ・出力例を `maharit <cmd> --help` と実機で照合して直す
+- [ ] operations/ 配下の各ページ（auth / acl / metrics / tracing / backup / docker）のコマンド・フラグ・出力例を `maharit <cmd> --help` と実機で照合して直す
 - [ ] 英語版（task 140）はこのタスクの後に訳す

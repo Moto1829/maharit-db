@@ -79,7 +79,8 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 /// TLS client configuration
 #[derive(Debug, Clone)]
 pub struct TlsClientConfig {
-    /// Custom CA certificate path
+    /// CA certificate (PEM) to trust. When `None`, the public web PKI roots
+    /// are trusted.
     pub ca_cert_path: Option<String>,
     /// Skip certificate verification (for dev/testing - DO NOT use in production)
     pub skip_verify: bool,
@@ -594,13 +595,12 @@ impl Client {
                 })?;
             }
         } else {
-            // Use system certificates
-            // Note: We don't use webpki-roots as it's not in dependencies
-            // In production, you should either provide a CA cert or add webpki-roots
+            // No CA file: trust the public web PKI roots (Mozilla's set).
+            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
 
         // Build TLS config
-        let mut rustls_config = if tls_config.skip_verify {
+        let rustls_config = if tls_config.skip_verify {
             // Create a dangerous config that skips verification.
             // 証明書検証を無効化すると中間者攻撃に対して無防備になるため警告する。
             eprintln!(
@@ -616,9 +616,6 @@ impl Client {
                 .with_root_certificates(root_cert_store)
                 .with_no_client_auth()
         };
-
-        // Enable ALPN if needed
-        rustls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         let connector = TlsConnector::from(Arc::new(rustls_config));
 

@@ -72,6 +72,8 @@ maharit server [OPTIONS]
 | `--checkpoint-mb` | | `64` | WAL がこのサイズ（MB）を超えたらチェックポイントを取る。`0` で停止時のみ |
 | `--require-auth` | | オフ | すべてのリクエストに有効なセッショントークンを要求する（[認証](auth.md)） |
 | `--admin-password` | | なし | 初期管理者パスワード（環境変数: `MAHARIT_ADMIN_PASSWORD`）。`--require-auth` では必須 |
+| `--tls-cert` / `--tls-key` | | なし | クライアント接続を TLS にする証明書と秘密鍵（PEM）。環境変数: `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY`（[TLS/SSL 設定](tls.md)） |
+| `--tls-min-version` | | `1.2` | 受け付ける最小の TLS バージョン: `1.2` / `1.3`（環境変数: `MAHARIT_TLS_MIN_VERSION`） |
 | `--metrics-bind` | | `127.0.0.1:9090` | メトリクス・ヘルスチェック用 HTTP のアドレス（[メトリクス](metrics.md)） |
 | `--replication-role` | | なし | `leader` / `follower`（[レプリケーション](../advanced/replication.md)） |
 | `--replication-bind` | | `127.0.0.1:7688` | レプリケーションの待ち受けアドレス（リーダー） |
@@ -133,8 +135,15 @@ maharit server --metrics-bind 0.0.0.0:9090
 
 起動後、`http://localhost:9090/metrics` で Prometheus メトリクスが取得できます。
 
-!!! warning "TLS"
-    TLS の実装（`maharit-server` の `tls` モジュール）はありますが、現在の TCP サーバーには組み込まれていません。ネットワーク越しに使う場合は、TLS 終端のプロキシ（stunnel、HAProxy など）を前段に置くか、信頼できるネットワーク内で使ってください。
+### TLS で待ち受ける
+
+```bash
+maharit server --host 0.0.0.0 \
+  --tls-cert /etc/maharit/server.crt \
+  --tls-key /etc/maharit/server.key
+```
+
+ネットワーク越しに使う場合は TLS を有効にしてください。TLS なしでループバック以外のアドレスに待ち受けると、起動時に警告が出ます。レプリケーションとメトリクスの通信は TLS の対象外です（[TLS/SSL 設定](tls.md)）。
 
 ## 環境変数
 
@@ -147,6 +156,8 @@ maharit server --metrics-bind 0.0.0.0:9090
 | `MAHARIT_ADMIN_PASSWORD` | `--admin-password` |
 | `MAHARIT_REPLICATION_SECRET` | `--replication-secret` |
 | `MAHARIT_NODE_ID` | `--node-id` |
+| `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` | `--tls-cert` / `--tls-key` |
+| `MAHARIT_TLS_MIN_VERSION` | `--tls-min-version` |
 | `RUST_LOG` | ログレベル |
 
 ```bash

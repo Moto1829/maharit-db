@@ -154,20 +154,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## TLS 接続
 
+サーバーを `--tls-cert` / `--tls-key` 付きで起動している場合は、`connect_tls` で接続します（[TLS/SSL 設定](../operations/tls.md)）。
+
 ```rust
-use maharit_client::ClientBuilder;
+use maharit_client::{Client, TlsClientConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ClientBuilder::new("secure-db.example.com:7687")
-        .with_tls(true)
-        .with_ca_cert("/path/to/ca.crt")  // 自己署名証明書の場合
-        .build()
-        .await?;
-
+    // 第 1 引数は証明書を検証するホスト名。with_ca_cert を省略すると公的な CA で検証する
+    let tls = TlsClientConfig::new("secure-db.example.com").with_ca_cert("/path/to/ca.crt");
+    let mut client = Client::connect_tls("secure-db.example.com:7687", tls).await?;
+    client.ping().await?;
     Ok(())
 }
 ```
+
+TLS 接続では `reconnect()` は使えません。切断されたら `connect_tls` で接続し直してください。
 
 ## 認証
 

@@ -3,6 +3,7 @@
 //! Provides:
 //! - TCP connection handling with async I/O
 //! - Length-prefixed message framing
+//! - Optional TLS (with certificate hot reload)
 //! - JSON request/response protocol
 //! - Connection pool management
 //! - Graceful shutdown
@@ -19,8 +20,8 @@ use maharit_core::{
 use maharit_query::{AstCache, Executor, Parser, Value, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 use tracing::Instrument;
@@ -30,6 +31,7 @@ use crate::mutation_log::RecordingGraph;
 use crate::replication::{
     FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
 };
+use crate::tls::{DEFAULT_TLS_RELOAD_INTERVAL, ReloadableTlsAcceptor};
 use crate::tracing_setup::TracingConfig;
 use maharit_storage::UndoRecord;
 
@@ -543,6 +545,8 @@ pub struct TcpServer {
     /// On-disk WAL + checkpoint settings. `None` keeps the old behaviour of
     /// saving only at shutdown.
     durability: Option<Arc<Durability>>,
+    /// TLS for client connections. `None` serves plaintext.
+    tls: Option<ReloadableTlsAcceptor>,
 }
 
 /// On-disk durability for a server: the WAL and the snapshot it applies to.
@@ -829,6 +833,7 @@ impl TcpServer {
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
+            tls: None,
         }
     }
 
@@ -846,6 +851,7 @@ impl TcpServer {
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
+            tls: None,
         }
     }
 
@@ -863,6 +869,7 @@ impl TcpServer {
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
+            tls: None,
         }
     }
 
@@ -904,6 +911,13 @@ impl TcpServer {
         })
     }
 
+    /// Serve client connections over TLS. Connections that do not complete a
+    /// TLS handshake within `read_timeout` are closed.
+    pub fn with_tls(mut self, tls: ReloadableTlsAcceptor) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Attach a follower replication manager so the `stats` response can report
     /// this follower's view of leader liveness.
     pub fn with_follower(mut self, manager: Arc<FollowerReplicationManager>) -> Self {
@@ -917,8 +931,25 @@ impl TcpServer {
         let _tracing_guard = TracingConfig::default().init();
 
         let listener = TcpListener::bind(&self.config.bind_address).await?;
-        tracing::info!(address = %self.config.bind_address, "Server listening");
-        println!("Server listening on {}", self.config.bind_address);
+        let transport = if self.tls.is_some() {
+            "TLS"
+        } else {
+            "plaintext"
+        };
+        tracing::info!(address = %self.config.bind_address, transport, "Server listening");
+        println!(
+            "Server listening on {} ({})",
+            self.config.bind_address, transport
+        );
+        if self.tls.is_none() && !is_loopback_bind(&self.config.bind_address) {
+            tracing::warn!(
+                "client connections are NOT encrypted; use --tls-cert/--tls-key when the port is reachable from other hosts"
+            );
+            eprintln!(
+                "WARN: client connections are NOT encrypted (no --tls-cert/--tls-key) and the server listens on {}.",
+                self.config.bind_address
+            );
+        }
 
         // 認証無効時に警告を出す（運用者が見落とさないよう WARN レベル）
         if !self.config.require_auth {
@@ -940,6 +971,10 @@ impl TcpServer {
     pub async fn start_with_listener(&self, listener: TcpListener) -> std::io::Result<()> {
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+        if let Some(tls) = &self.tls {
+            tls.spawn_watcher(DEFAULT_TLS_RELOAD_INTERVAL, Arc::clone(&self.shutdown));
+        }
 
         // Checkpoint whenever the WAL grows past the configured size.
         if let Some(checkpointer) = self.checkpointer()
@@ -998,13 +1033,13 @@ impl TcpServer {
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
                     let durability = self.durability.clone();
+                    let tls = self.tls.as_ref().map(ReloadableTlsAcceptor::acceptor);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
-                        let result = handle_connection(
-                            socket,
+                        let ctx = ConnectionContext {
                             graph,
-                            stats.clone(),
+                            stats: stats.clone(),
                             shutdown,
                             tx_manager,
                             managers,
@@ -1014,9 +1049,29 @@ impl TcpServer {
                             auth,
                             ast_cache,
                             durability,
-                            &mut shutdown_rx,
-                        )
-                        .await;
+                        };
+                        let result = match tls {
+                            None => handle_connection(socket, ctx, &mut shutdown_rx).await,
+                            // The handshake runs in the connection task so a slow
+                            // client cannot stall the accept loop.
+                            Some(acceptor) => {
+                                match timeout(ctx.config.read_timeout, acceptor.accept(socket))
+                                    .await
+                                {
+                                    Ok(Ok(tls_stream)) => {
+                                        handle_connection(tls_stream, ctx, &mut shutdown_rx).await
+                                    }
+                                    Ok(Err(e)) => Err(std::io::Error::new(
+                                        e.kind(),
+                                        format!("TLS handshake failed: {e}"),
+                                    )),
+                                    Err(_) => Err(std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "TLS handshake timed out",
+                                    )),
+                                }
+                            }
+                        };
 
                         if let Err(e) = result {
                             tracing::warn!(peer = %addr, error = %e, "Connection error");
@@ -1051,10 +1106,21 @@ impl TcpServer {
     }
 }
 
-/// Handle a single client connection
-#[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    mut socket: TcpStream,
+/// Whether `bind_address` only accepts connections from this host.
+fn is_loopback_bind(bind_address: &str) -> bool {
+    let host = bind_address
+        .rsplit_once(':')
+        .map_or(bind_address, |(h, _)| h)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Server state shared with one connection task.
+struct ConnectionContext {
     graph: Arc<ConcurrentGraph>,
     stats: Arc<ServerStats>,
     shutdown: Arc<AtomicBool>,
@@ -1066,8 +1132,30 @@ async fn handle_connection(
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
     durability: Option<Arc<Durability>>,
+}
+
+/// Handle a single client connection (plain TCP or TLS).
+async fn handle_connection<S>(
+    mut socket: S,
+    ctx: ConnectionContext,
     shutdown_rx: &mut broadcast::Receiver<()>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let ConnectionContext {
+        graph,
+        stats,
+        shutdown,
+        tx_manager,
+        managers,
+        config,
+        replication,
+        follower,
+        auth,
+        ast_cache,
+        durability,
+    } = ctx;
     let mut buffer = BytesMut::with_capacity(4096);
     let sinks = WriteSinks {
         replication: replication.as_deref(),
@@ -1336,8 +1424,8 @@ async fn handle_connection(
 }
 
 /// Read a length-prefixed message from the socket
-async fn read_message(
-    socket: &mut TcpStream,
+async fn read_message<S: AsyncRead + Unpin>(
+    socket: &mut S,
     buffer: &mut BytesMut,
     read_timeout: Duration,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -1384,8 +1472,8 @@ async fn read_message(
 }
 
 /// Send a response with length prefix
-async fn send_response(
-    socket: &mut TcpStream,
+async fn send_response<S: AsyncWrite + Unpin>(
+    socket: &mut S,
     response: &Response,
     write_timeout: Duration,
 ) -> std::io::Result<()> {
@@ -1412,8 +1500,8 @@ async fn send_response(
 
 /// Execute a streaming query and send results in chunks
 #[allow(clippy::too_many_arguments)]
-async fn execute_streaming_query(
-    socket: &mut TcpStream,
+async fn execute_streaming_query<S: AsyncWrite + Unpin>(
+    socket: &mut S,
     graph: &Arc<ConcurrentGraph>,
     stats: &Arc<ServerStats>,
     query: &str,
@@ -1682,6 +1770,7 @@ async fn emit_wal_entries(entries: Vec<WalEntryData>, replication: &LeaderReplic
 #[allow(clippy::approx_constant)] // 3.14 等は PI の近似ではなくリテラルのテストデータ
 mod tests {
     use super::*;
+    use tokio::net::TcpStream;
 
     use crate::auth::Role;
 
@@ -2120,9 +2209,10 @@ mod tests {
     // ── Integration tests (actual TCP socket communication) ──────────────────
 
     /// Send a request and receive a response over a raw TCP stream.
-    async fn send_recv(stream: &mut TcpStream, req: &Request) -> Response {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+    async fn send_recv<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut S,
+        req: &Request,
+    ) -> Response {
         let json = serde_json::to_vec(req).unwrap();
         let len = json.len() as u32;
         stream.write_all(&len.to_be_bytes()).await.unwrap();
@@ -3625,5 +3715,157 @@ mod tests {
             "DROP FULLTEXT INDEX failed (index not persisted): {:?}",
             resp
         );
+    }
+
+    // ── TLS ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn loopback_bind_detection() {
+        assert!(is_loopback_bind("127.0.0.1:7687"));
+        assert!(is_loopback_bind("localhost:7687"));
+        assert!(is_loopback_bind("[::1]:7687"));
+        assert!(!is_loopback_bind("0.0.0.0:7687"));
+        assert!(!is_loopback_bind("[::]:7687"));
+        assert!(!is_loopback_bind("192.168.1.10:7687"));
+    }
+
+    /// Start a TLS server whose certificate and key are read from the given
+    /// files.
+    async fn start_tls_server(
+        cert: &str,
+        key: &str,
+    ) -> (std::net::SocketAddr, ReloadableTlsAcceptor) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tls = ReloadableTlsAcceptor::new(crate::tls::TlsConfig::new(cert, key)).unwrap();
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            read_timeout: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(5),
+            ..Default::default()
+        })
+        .with_tls(tls.clone());
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        (addr, tls)
+    }
+
+    /// Open a TLS connection that trusts only the CA certificate in `ca`.
+    async fn tls_connect(
+        addr: std::net::SocketAddr,
+        ca: &str,
+    ) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+        let config = crate::tls::build_client_config(Some(ca), false).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(config);
+        let tcp = TcpStream::connect(addr).await?;
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        connector.connect(name, tcp).await
+    }
+
+    #[tokio::test]
+    async fn tls_server_serves_queries_and_rejects_plaintext() {
+        use crate::tls::test_support::*;
+        let cert = TempPem::new("srv_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("srv_key", TEST_SERVER_KEY_PEM);
+        let (addr, _) = start_tls_server(cert.path(), key.path()).await;
+
+        let mut stream = tls_connect(addr, cert.path()).await.unwrap();
+        assert!(matches!(
+            send_recv(&mut stream, &Request::Ping).await,
+            Response::Pong
+        ));
+        let create = Request::Query {
+            query: "CREATE (:T {v: 1})".to_string(),
+            params: HashMap::new(),
+            tx_id: None,
+            session_token: None,
+        };
+        assert!(matches!(
+            send_recv(&mut stream, &create).await,
+            Response::Result { .. }
+        ));
+
+        // A plaintext client gets no protocol response: the server treats its
+        // length prefix as a broken TLS record and closes the connection.
+        let mut plain = TcpStream::connect(addr).await.unwrap();
+        let json = serde_json::to_vec(&Request::Ping).unwrap();
+        plain
+            .write_all(&(json.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        plain.write_all(&json).await.unwrap();
+        let mut buf = Vec::new();
+        let read = timeout(Duration::from_secs(5), plain.read_to_end(&mut buf)).await;
+        let got_pong = matches!(read, Ok(Ok(_)))
+            && buf.len() > 4
+            && serde_json::from_slice::<Response>(&buf[4..])
+                .is_ok_and(|r| matches!(r, Response::Pong));
+        assert!(!got_pong, "plaintext request was answered over a TLS port");
+
+        // A client that does not trust the certificate cannot connect.
+        let other_ca = TempPem::new("other_ca", TEST_SERVER_CERT2_PEM);
+        assert!(tls_connect(addr, other_ca.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn tls_server_works_with_rust_client() {
+        use crate::tls::test_support::*;
+        use maharit_client::{Client, TlsClientConfig};
+        let cert = TempPem::new("cli_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("cli_key", TEST_SERVER_KEY_PEM);
+        let (addr, _) = start_tls_server(cert.path(), key.path()).await;
+
+        let tls = TlsClientConfig::new("localhost").with_ca_cert(cert.path());
+        let mut client = Client::connect_tls(&addr.to_string(), tls).await.unwrap();
+        client.execute("CREATE (:P {name: 'tls'})").await.unwrap();
+        let result = client.query("MATCH (p:P) RETURN p.name").await.unwrap();
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn tls_certificate_reload_applies_to_new_connections() {
+        use crate::tls::test_support::*;
+        let cert = TempPem::new("reload_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("reload_key", TEST_SERVER_KEY_PEM);
+        let ca1 = TempPem::new("reload_ca1", TEST_SERVER_CERT_PEM);
+        let ca2 = TempPem::new("reload_ca2", TEST_SERVER_CERT2_PEM);
+        let (addr, tls) = start_tls_server(cert.path(), key.path()).await;
+
+        let mut old_conn = tls_connect(addr, ca1.path()).await.unwrap();
+        assert!(tls_connect(addr, ca2.path()).await.is_err());
+
+        // A broken certificate file keeps the previous certificate in use.
+        std::fs::write(cert.path(), "not a certificate").unwrap();
+        assert!(tls.reload().is_err());
+        assert!(tls_connect(addr, ca1.path()).await.is_ok());
+
+        // Watch the files and swap in the second certificate.
+        let stop = Arc::new(AtomicBool::new(false));
+        std::fs::write(cert.path(), TEST_SERVER_CERT_PEM).unwrap();
+        let watcher = tls.spawn_watcher(Duration::from_millis(50), Arc::clone(&stop));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        std::fs::write(cert.path(), TEST_SERVER_CERT2_PEM).unwrap();
+        std::fs::write(key.path(), TEST_SERVER_KEY2_PEM).unwrap();
+
+        let mut switched = false;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if tls_connect(addr, ca2.path()).await.is_ok() {
+                switched = true;
+                break;
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        watcher.await.unwrap();
+        assert!(switched, "the reloaded certificate was not served");
+        assert!(tls_connect(addr, ca1.path()).await.is_err());
+
+        // A connection made before the reload keeps working.
+        assert!(matches!(
+            send_recv(&mut old_conn, &Request::Ping).await,
+            Response::Pong
+        ));
     }
 }

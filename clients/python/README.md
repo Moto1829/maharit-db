@@ -53,6 +53,18 @@ async def main():
 asyncio.run(main())
 ```
 
+### TLS
+
+When the server runs with `--tls-cert` / `--tls-key`, pass the CA certificate
+to trust (for a self-signed certificate, the certificate itself), or
+`ssl=True` to verify against the system CA store. `AsyncClient` and both pools
+take the same arguments.
+
+```python
+with Client.connect("db.example.com:7687", ca_file="ca.crt") as client:
+    client.query("MATCH (n) RETURN count(n)")
+```
+
 ### Transactions
 
 ```python
@@ -83,7 +95,7 @@ with Client.connect("localhost:7687") as client:
 
 | Method | Description |
 |--------|-------------|
-| `Client.connect(address, timeout=30.0)` | Connect to the server |
+| `Client.connect(address, timeout=30.0, ssl=None, ca_file=None)` | Connect to the server (TLS with `ssl=True` or `ca_file=...`) |
 | `client.execute(query)` | Execute a Cypher query |
 | `client.query(query)` | Alias for `execute` |
 | `client.stream(query, chunk_size=100)` | Stream results row by row |

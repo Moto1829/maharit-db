@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncGenerator, Generator, Optional
 
+from ._tls import SslOption
 from .async_client import AsyncClient
 from .client import Client
 from .exceptions import ConnectionError
@@ -34,17 +35,23 @@ class ConnectionPool:
         address: str,
         max_size: int = 10,
         timeout: float = 30.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
     ) -> None:
         self._address = address
         self._max_size = max_size
         self._timeout = timeout
+        self._ssl = ssl
+        self._ca_file = ca_file
         # idle connections
         self._idle: queue.Queue[Client] = queue.Queue(maxsize=max_size)
         self._lock = threading.Lock()
         self._total = 0  # total open connections (idle + checked-out)
 
     def _new_connection(self) -> Client:
-        return Client.connect(self._address, timeout=self._timeout)
+        return Client.connect(
+            self._address, timeout=self._timeout, ssl=self._ssl, ca_file=self._ca_file
+        )
 
     def _is_alive(self, client: Client) -> bool:
         try:
@@ -196,16 +203,22 @@ class AsyncConnectionPool:
         address: str,
         max_size: int = 10,
         timeout: float = 30.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
     ) -> None:
         self._address = address
         self._max_size = max_size
         self._timeout = timeout
+        self._ssl = ssl
+        self._ca_file = ca_file
         self._idle: asyncio.Queue[AsyncClient] = asyncio.Queue(maxsize=max_size)
         self._lock = asyncio.Lock()
         self._total = 0
 
     async def _new_connection(self) -> AsyncClient:
-        return await AsyncClient.connect(self._address, timeout=self._timeout)
+        return await AsyncClient.connect(
+            self._address, timeout=self._timeout, ssl=self._ssl, ca_file=self._ca_file
+        )
 
     async def _is_alive(self, client: AsyncClient) -> bool:
         try:

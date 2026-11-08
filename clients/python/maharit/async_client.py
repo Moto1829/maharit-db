@@ -6,6 +6,7 @@ import struct
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
+from ._tls import SslOption, make_ssl_context
 from .exceptions import ConnectionError, MaharitError, QueryError, TransactionError
 
 
@@ -128,20 +129,39 @@ class AsyncClient:
                 print(row)
     """
 
-    def __init__(self, host: str, port: int, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float = 30.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
+    ) -> None:
         self._host = host
         self._port = port
         self._timeout = timeout
+        self._ssl_context = make_ssl_context(ssl, ca_file)
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
 
     @classmethod
-    async def connect(cls, address: str, timeout: float = 30.0) -> "AsyncClient":
+    async def connect(
+        cls,
+        address: str,
+        timeout: float = 30.0,
+        ssl: SslOption = None,
+        ca_file: Optional[str] = None,
+    ) -> "AsyncClient":
         """Connect to a MaharitDB server asynchronously.
 
         Args:
             address: Server address in the form ``host:port``.
             timeout: Connection timeout in seconds.
+            ssl: Connect over TLS. ``True`` verifies the server certificate
+                against the system CA store; an :class:`ssl.SSLContext` is
+                used as is. Default: plain TCP.
+            ca_file: PEM file with the CA (or self-signed server) certificate
+                to trust. Setting it enables TLS.
 
         Returns:
             A connected :class:`AsyncClient` instance.
@@ -150,14 +170,19 @@ class AsyncClient:
         if not host:
             host = "localhost"
         port = int(port_str) if port_str else 7687
-        client = cls(host, port, timeout)
+        client = cls(host, port, timeout, ssl, ca_file)
         await client._connect()
         return client
 
     async def _connect(self) -> None:
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self._host, self._port),
+                asyncio.open_connection(
+                    self._host,
+                    self._port,
+                    ssl=self._ssl_context,
+                    server_hostname=self._host if self._ssl_context else None,
+                ),
                 timeout=self._timeout,
             )
         except (OSError, asyncio.TimeoutError) as e:

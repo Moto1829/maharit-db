@@ -686,6 +686,189 @@ impl CertificateReloader {
     }
 }
 
+// ============================================================================
+// Server acceptor with certificate hot reload
+// ============================================================================
+
+/// How often the server checks the certificate and key files for changes.
+pub const DEFAULT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
+
+/// TLS acceptor for the TCP server whose certificate can be replaced while
+/// the server runs. Connections already established keep the certificate
+/// they were accepted with; new connections use the latest one.
+#[derive(Clone)]
+pub struct ReloadableTlsAcceptor {
+    config: TlsConfig,
+    current: Arc<std::sync::RwLock<tokio_rustls::TlsAcceptor>>,
+}
+
+impl ReloadableTlsAcceptor {
+    /// Load the certificate and key named by `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the files cannot be read or do not form a valid
+    /// certificate/key pair, so a misconfigured server fails at startup
+    /// instead of silently serving plaintext.
+    pub fn new(config: TlsConfig) -> Result<Self, TlsError> {
+        let acceptor = tokio_rustls::TlsAcceptor::from(config.load_server_config()?);
+        Ok(Self {
+            config,
+            current: Arc::new(std::sync::RwLock::new(acceptor)),
+        })
+    }
+
+    /// The configuration this acceptor was created from.
+    pub fn config(&self) -> &TlsConfig {
+        &self.config
+    }
+
+    /// The acceptor to use for a new connection.
+    pub fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Re-read the certificate and key files. On error the previous
+    /// certificate stays in use.
+    pub fn reload(&self) -> Result<(), TlsError> {
+        let acceptor = tokio_rustls::TlsAcceptor::from(self.config.load_server_config()?);
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = acceptor;
+        Ok(())
+    }
+
+    /// Check the certificate and key files every `interval` and reload them
+    /// when their modification time changes, until `stop` becomes true.
+    pub fn spawn_watcher(
+        &self,
+        interval: Duration,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let this = self.clone();
+        let watcher =
+            CertificateReloader::new(&self.config.cert_path, &self.config.key_path, interval);
+        // Record the current modification times as the baseline.
+        watcher.check_reload();
+        tokio::spawn(async move {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(interval).await;
+                if watcher.check_reload().is_none() {
+                    continue;
+                }
+                match this.reload() {
+                    Ok(()) => {
+                        tracing::info!(cert = %this.config.cert_path, "TLS certificate reloaded");
+                        println!("TLS certificate reloaded from {}", this.config.cert_path);
+                    }
+                    Err(e) => {
+                        // A certificate and key replaced one after the other can
+                        // briefly mismatch; the next change triggers a retry.
+                        tracing::error!(error = %e, "TLS certificate reload failed; keeping the previous certificate");
+                        eprintln!(
+                            "ERROR: TLS certificate reload failed ({e}); keeping the previous certificate"
+                        );
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::time::SystemTime;
+
+    // Self-signed P-256 certificate for CN=localhost (valid until 2125) and its
+    // private key in PKCS#8 and SEC1 form. Test-only; never use them elsewhere.
+    pub(crate) const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBdDCCARqgAwIBAgIUCIxdyfIbxa3Q7WCjY1I7mAWNzXAwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwMzExNDE1MVoYDzIxMjYxMDEw
+MTE0MTUxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64vpyekfl7sk0uJ70BNg20CWJo
+oQnq/9zCxx2o/gREFiZgN5df+2PlYN0Fo0gwRjAdBgNVHQ4EFgQUBAjZ4wm0xn8f
+EbArurwWeJc9o34wDwYDVR0TAQH/BAUwAwEB/zAUBgNVHREEDTALgglsb2NhbGhv
+c3QwCgYIKoZIzj0EAwIDSAAwRQIgLSVa4z6PJlwUqvXW1eUxR/TDt2kSHXlIAETc
+5kdoKPcCIQDHpmRp2FYYtV/xlg99sCLC3XHdKgqj4YRsBc5EYD6yzA==
+-----END CERTIFICATE-----\n";
+    pub(crate) const TEST_KEY_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXz2OSuuCHKmc/zoM
+9aVq6ItF41uTAWMGHYDrj4zE17KhRANCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64
+vpyekfl7sk0uJ70BNg20CWJooQnq/9zCxx2o/gREFiZgN5df+2PlYN0F
+-----END PRIVATE KEY-----\n";
+    pub(crate) const TEST_KEY_SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIF89jkrrghypnP86DPWlauiLReNbkwFjBh2A64+MxNeyoAoGCCqGSM49
+AwEHoUQDQgAEiDBS00Q9Fv1mK6WwW1/7zg4ERZ5OuL6cnpH5e7JNLie9ATYNtAli
+aKEJ6v/cwscdqP4ERBYmYDeXX/tj5WDdBQ==
+-----END EC PRIVATE KEY-----\n";
+
+    /// A uniquely named temp file holding `contents`, removed on drop.
+    pub(crate) struct TempPem(std::path::PathBuf);
+
+    impl TempPem {
+        pub(crate) fn new(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "maharit_tls_test_{}_{}_{name}.pem",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+
+        pub(crate) fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for TempPem {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    // Self-signed P-256 server certificates for localhost / 127.0.0.1 with
+    // `CA:FALSE` (valid until 2126), each trusted by putting the certificate
+    // itself in the client's CA file. Two pairs, to check that a reloaded
+    // certificate is served. Test-only; never use them elsewhere.
+    pub(crate) const TEST_SERVER_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBnTCCAUKgAwIBAgIUXXEhiCg2MwZdxb98xI/sk4z6brkwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwODA2NTUzNVoYDzIxMjYxMDE1
+MDY1NTM1WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAQ6KAGccJ6o19bEYuTiQezlId4WwvPadTDfFRxovD+o5crxMWRucKs6
+V7jwIDRi7E7ZIxruXu6xUgb2CbtdHL9io3AwbjAdBgNVHQ4EFgQU0Md3l3TjgPsA
+h9l4bJ5b2bhnU0owGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAwGA1UdEwEB
+/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqG
+SM49BAMCA0kAMEYCIQCOsHwnFBMw/oFqPl7b2MtGaUie6EmuXl+N1Hsa6+cVTAIh
+AIdP59WPI/OZmtCqv227rPLgBcNaCPOVOCrQJp5f9OFj
+-----END CERTIFICATE-----\n";
+    pub(crate) const TEST_SERVER_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXJqJYhDThOPkj21M
+0rpmRViE0nt7UqJEppt0FVSHpZShRANCAAQ6KAGccJ6o19bEYuTiQezlId4WwvPa
+dTDfFRxovD+o5crxMWRucKs6V7jwIDRi7E7ZIxruXu6xUgb2CbtdHL9i
+-----END PRIVATE KEY-----\n";
+    pub(crate) const TEST_SERVER_CERT2_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBnTCCAUKgAwIBAgIUcSdl4wkvUyOhfMAcnKPQIuRgMtMwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwODA2NTUzNVoYDzIxMjYxMDE1
+MDY1NTM1WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAARzEQ1ZnnFbvJkqZxWp5dglTNYs+DB1dZI33tM0BiBC2s+yRQyn9Hre
+6Ui4h6REXWw5I3uoxmD1IXyvWSUzp74Ko3AwbjAdBgNVHQ4EFgQUnIMW/sBaWDtD
+Qvr0QAlw0GgwiGswGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAwGA1UdEwEB
+/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqG
+SM49BAMCA0kAMEYCIQC8leLTq9J3630XdowArpM+Pit+hvmWa99XHdLvtTZFrgIh
+AII7veRaJRklamLKl+IeNanqD3gXoTUCi/ZS364lpmIw
+-----END CERTIFICATE-----\n";
+    pub(crate) const TEST_SERVER_KEY2_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgtV0D6rSvFuUWxwQT
+u3TYiiB6b9J3v/QqTsI5mZDc5CChRANCAARzEQ1ZnnFbvJkqZxWp5dglTNYs+DB1
+dZI33tM0BiBC2s+yRQyn9Hre6Ui4h6REXWw5I3uoxmD1IXyvWSUzp74K
+-----END PRIVATE KEY-----\n";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,56 +924,7 @@ mod tests {
         }
     }
 
-    // Self-signed P-256 certificate for CN=localhost (valid until 2125) and its
-    // private key in PKCS#8 and SEC1 form. Test-only; never use them elsewhere.
-    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
-MIIBdDCCARqgAwIBAgIUCIxdyfIbxa3Q7WCjY1I7mAWNzXAwCgYIKoZIzj0EAwIw
-FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwMzExNDE1MVoYDzIxMjYxMDEw
-MTE0MTUxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
-PQMBBwNCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64vpyekfl7sk0uJ70BNg20CWJo
-oQnq/9zCxx2o/gREFiZgN5df+2PlYN0Fo0gwRjAdBgNVHQ4EFgQUBAjZ4wm0xn8f
-EbArurwWeJc9o34wDwYDVR0TAQH/BAUwAwEB/zAUBgNVHREEDTALgglsb2NhbGhv
-c3QwCgYIKoZIzj0EAwIDSAAwRQIgLSVa4z6PJlwUqvXW1eUxR/TDt2kSHXlIAETc
-5kdoKPcCIQDHpmRp2FYYtV/xlg99sCLC3XHdKgqj4YRsBc5EYD6yzA==
------END CERTIFICATE-----\n";
-    const TEST_KEY_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXz2OSuuCHKmc/zoM
-9aVq6ItF41uTAWMGHYDrj4zE17KhRANCAASIMFLTRD0W/WYrpbBbX/vODgRFnk64
-vpyekfl7sk0uJ70BNg20CWJooQnq/9zCxx2o/gREFiZgN5df+2PlYN0F
------END PRIVATE KEY-----\n";
-    const TEST_KEY_SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----
-MHcCAQEEIF89jkrrghypnP86DPWlauiLReNbkwFjBh2A64+MxNeyoAoGCCqGSM49
-AwEHoUQDQgAEiDBS00Q9Fv1mK6WwW1/7zg4ERZ5OuL6cnpH5e7JNLie9ATYNtAli
-aKEJ6v/cwscdqP4ERBYmYDeXX/tj5WDdBQ==
------END EC PRIVATE KEY-----\n";
-
-    /// A uniquely named temp file holding `contents`, removed on drop.
-    struct TempPem(std::path::PathBuf);
-
-    impl TempPem {
-        fn new(name: &str, contents: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "maharit_tls_test_{}_{}_{name}.pem",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            std::fs::write(&path, contents).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &str {
-            self.0.to_str().unwrap()
-        }
-    }
-
-    impl Drop for TempPem {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
+    use super::test_support::*;
 
     #[test]
     fn test_load_certs_and_keys_from_pem() {
