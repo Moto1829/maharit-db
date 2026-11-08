@@ -23,7 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
+use tracing::Instrument;
 
+use crate::durable_wal::{DurableWal, snapshot_digest};
 use crate::mutation_log::RecordingGraph;
 use crate::replication::{
     FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
@@ -538,6 +540,107 @@ pub struct TcpServer {
     /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
     /// hot request path. Keyed by normalized query text.
     ast_cache: Arc<Mutex<AstCache>>,
+    /// On-disk WAL + checkpoint settings. `None` keeps the old behaviour of
+    /// saving only at shutdown.
+    durability: Option<Arc<Durability>>,
+}
+
+/// On-disk durability for a server: the WAL and the snapshot it applies to.
+pub struct Durability {
+    wal: Arc<DurableWal>,
+    data_path: std::path::PathBuf,
+    /// Take a checkpoint (save the snapshot, empty the WAL) once the WAL grows
+    /// past this many bytes. 0 disables size-triggered checkpoints.
+    checkpoint_bytes: u64,
+}
+
+impl Durability {
+    pub fn new(
+        wal: DurableWal,
+        data_path: impl Into<std::path::PathBuf>,
+        checkpoint_bytes: u64,
+    ) -> Self {
+        Self {
+            wal: Arc::new(wal),
+            data_path: data_path.into(),
+            checkpoint_bytes,
+        }
+    }
+}
+
+/// Saves a snapshot and empties the WAL, with writers paused.
+#[derive(Clone)]
+pub struct Checkpointer {
+    graph: Arc<ConcurrentGraph>,
+    managers: Arc<SharedManagers>,
+    durability: Arc<Durability>,
+}
+
+impl Checkpointer {
+    /// Write the snapshot atomically, then start an empty WAL for it. Holds the
+    /// write gate throughout so no write lands between the two steps.
+    pub async fn checkpoint(&self) -> std::io::Result<()> {
+        let _gate = self.managers.write_gate.lock().await;
+        let graph = Arc::clone(&self.graph);
+        let durability = Arc::clone(&self.durability);
+        tokio::task::spawn_blocking(move || {
+            let path = &durability.data_path;
+            maharit_storage::PersistentStorage::save_concurrent(&graph, path)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            durability.wal.reset(snapshot_digest(path)?)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+}
+
+/// Where a write statement's mutations go: the on-disk WAL and/or followers.
+#[derive(Clone, Copy)]
+struct WriteSinks<'a> {
+    replication: Option<&'a LeaderReplicationManager>,
+    wal: Option<&'a Arc<DurableWal>>,
+}
+
+impl WriteSinks<'_> {
+    /// Whether executors must record mutations at all.
+    fn record(&self) -> bool {
+        self.replication.is_some() || self.wal.is_some()
+    }
+
+    /// Append the statement's mutations to the WAL and send them to followers.
+    /// Call while holding the write gate. Returns the WAL offset to pass to
+    /// [`wait_durable`](Self::wait_durable) once the gate is released.
+    async fn publish(&self, entries: Vec<WalEntryData>) -> Result<Option<u64>, String> {
+        let mut ticket = Ok(None);
+        if let Some(wal) = self.wal
+            && !entries.is_empty()
+        {
+            ticket = wal.append(&entries).map(Some).map_err(|e| {
+                tracing::error!(error = %e, "failed to append to WAL");
+                format!("write was applied but could not be written to the WAL: {e}")
+            });
+        }
+        if let Some(repl) = self.replication {
+            emit_wal_entries(entries, repl).await;
+        }
+        ticket
+    }
+
+    /// Wait until the WAL is on disk up to `ticket` (group commit).
+    async fn wait_durable(&self, ticket: Option<u64>) -> Result<(), String> {
+        let (Some(wal), Some(offset)) = (self.wal, ticket) else {
+            return Ok(());
+        };
+        let wal = Arc::clone(wal);
+        tokio::task::spawn_blocking(move || wal.sync_to(offset))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to sync WAL");
+                format!("write was applied but the WAL could not be synced: {e}")
+            })
+    }
 }
 
 /// Schema/index state shared by every query on the server.
@@ -725,6 +828,7 @@ impl TcpServer {
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            durability: None,
         }
     }
 
@@ -741,6 +845,7 @@ impl TcpServer {
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            durability: None,
         }
     }
 
@@ -757,6 +862,7 @@ impl TcpServer {
             follower: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
+            durability: None,
         }
     }
 
@@ -778,6 +884,24 @@ impl TcpServer {
     pub fn with_replication(mut self, manager: Arc<LeaderReplicationManager>) -> Self {
         self.replication = Some(manager);
         self
+    }
+
+    /// Log every write to an on-disk WAL before replying, and checkpoint it
+    /// into the snapshot. Do not use on a follower: replicated changes bypass
+    /// the WAL.
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = Some(Arc::new(durability));
+        self
+    }
+
+    /// A handle that checkpoints this server's snapshot + WAL (e.g. on
+    /// shutdown). `None` when no WAL is configured.
+    pub fn checkpointer(&self) -> Option<Checkpointer> {
+        self.durability.as_ref().map(|d| Checkpointer {
+            graph: Arc::clone(&self.graph),
+            managers: Arc::clone(&self.managers),
+            durability: Arc::clone(d),
+        })
     }
 
     /// Attach a follower replication manager so the `stats` response can report
@@ -817,6 +941,27 @@ impl TcpServer {
         // Create shutdown broadcast channel
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
+        // Checkpoint whenever the WAL grows past the configured size.
+        if let Some(checkpointer) = self.checkpointer()
+            && checkpointer.durability.checkpoint_bytes > 0
+        {
+            let shutdown = Arc::clone(&self.shutdown);
+            tokio::spawn(async move {
+                let limit = checkpointer.durability.checkpoint_bytes;
+                let mut ticker = tokio::time::interval(Duration::from_secs(1));
+                while !shutdown.load(Ordering::SeqCst) {
+                    ticker.tick().await;
+                    if checkpointer.durability.wal.len() < limit {
+                        continue;
+                    }
+                    match checkpointer.checkpoint().await {
+                        Ok(()) => tracing::info!("checkpoint completed"),
+                        Err(e) => tracing::error!(error = %e, "checkpoint failed"),
+                    }
+                }
+            });
+        }
+
         loop {
             if self.shutdown.load(Ordering::SeqCst) {
                 println!("Server shutting down...");
@@ -852,6 +997,7 @@ impl TcpServer {
                     let follower = self.follower.clone();
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
+                    let durability = self.durability.clone();
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
                     tokio::spawn(async move {
@@ -867,6 +1013,7 @@ impl TcpServer {
                             follower,
                             auth,
                             ast_cache,
+                            durability,
                             &mut shutdown_rx,
                         )
                         .await;
@@ -918,9 +1065,14 @@ async fn handle_connection(
     follower: Option<Arc<FollowerReplicationManager>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
+    durability: Option<Arc<Durability>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(4096);
+    let sinks = WriteSinks {
+        replication: replication.as_deref(),
+        wal: durability.as_ref().map(|d| &d.wal),
+    };
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -1007,41 +1159,42 @@ async fn handle_connection(
                         resp
                     } else {
                         stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                        // `.instrument` (not `span.enter()`): the guard of
+                        // `enter` must not be held across `.await`, or the
+                        // span can be closed on another worker thread.
                         let span = tracing::info_span!("query", query = %query);
-                        let _enter = span.enter();
-                        let start = std::time::Instant::now();
                         let params = params_from_json(&params);
-                        let resp = match tx_id {
-                            Some(id) => {
-                                execute_query_with_tx(
-                                    &graph,
-                                    &query,
-                                    params,
-                                    id,
-                                    &tx_manager,
-                                    &managers,
-                                    replication.as_deref(),
-                                    &ast_cache,
-                                )
-                                .await
-                            }
-                            None => {
-                                execute_query(
-                                    &graph,
-                                    &query,
-                                    params,
-                                    &managers,
-                                    replication.as_deref(),
-                                    &ast_cache,
-                                )
-                                .await
-                            }
-                        };
-                        tracing::info!(
-                            duration_us = start.elapsed().as_micros() as u64,
-                            "query completed"
-                        );
-                        resp
+                        async {
+                            let start = std::time::Instant::now();
+                            let resp = match tx_id {
+                                Some(id) => {
+                                    execute_query_with_tx(
+                                        &graph,
+                                        &query,
+                                        params,
+                                        id,
+                                        &tx_manager,
+                                        &managers,
+                                        sinks,
+                                        &ast_cache,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    execute_query(
+                                        &graph, &query, params, &managers, sinks, &ast_cache,
+                                    )
+                                    .await
+                                }
+                            };
+                            tracing::info!(
+                                duration_us = start.elapsed().as_micros() as u64,
+                                "query completed"
+                            );
+                            resp
+                        }
+                        .instrument(span)
+                        .await
                     }
                 }
             },
@@ -1069,7 +1222,7 @@ async fn handle_connection(
                         chunk_size,
                         config.write_timeout,
                         &managers,
-                        replication.as_deref(),
+                        sinks,
                         &ast_cache,
                     )
                     .await
@@ -1154,13 +1307,19 @@ async fn handle_connection(
                 Ok(_) => {
                     // Serialize with writers so the compensating WAL entries
                     // are ordered after the statements they undo.
-                    let _write_guard = managers.write_gate.lock().await;
-                    match managers.rollback(&graph, &tx_manager, tx_id, replication.is_some()) {
+                    let write_guard = managers.write_gate.lock().await;
+                    match managers.rollback(&graph, &tx_manager, tx_id, sinks.record()) {
                         Ok(wal) => {
-                            if let Some(repl) = replication.as_deref() {
-                                emit_wal_entries(wal, repl).await;
+                            let ticket = sinks.publish(wal).await;
+                            drop(write_guard);
+                            let durable = match ticket {
+                                Ok(t) => sinks.wait_durable(t).await,
+                                Err(e) => Err(e),
+                            };
+                            match durable {
+                                Ok(()) => Response::RolledBack { tx_id },
+                                Err(message) => Response::Error { message },
                             }
-                            Response::RolledBack { tx_id }
                         }
                         Err(e) => Response::Error {
                             message: format!("Rollback failed: {}", e),
@@ -1262,7 +1421,7 @@ async fn execute_streaming_query(
     chunk_size: usize,
     write_timeout: Duration,
     managers: &SharedManagers,
-    replication: Option<&LeaderReplicationManager>,
+    sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
 ) -> std::io::Result<()> {
     // Parse the query (reusing a cached AST when available). Bind the result to
@@ -1288,11 +1447,16 @@ async fn execute_streaming_query(
     };
 
     let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, replication.is_some());
-    if let Some(repl) = replication {
-        emit_wal_entries(wal, repl).await;
-    }
+        managers.execute_with_params(graph, stmt, params, is_write, sinks.record());
+    let ticket = sinks.publish(wal).await;
     drop(write_guard);
+    let durable = match ticket {
+        Ok(t) => sinks.wait_durable(t).await,
+        Err(e) => Err(e),
+    };
+    if let Err(message) = durable {
+        return send_response(socket, &Response::Error { message }, write_timeout).await;
+    }
 
     let result = match exec_result {
         Ok(r) => r,
@@ -1373,7 +1537,7 @@ async fn execute_query_with_tx(
     tx_id: u64,
     tx_manager: &TransactionManager,
     managers: &SharedManagers,
-    replication: Option<&LeaderReplicationManager>,
+    sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
 ) -> Response {
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
@@ -1388,11 +1552,11 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, params, managers, replication, ast_cache).await;
+        return execute_query(graph, query, params, managers, sinks, ast_cache).await;
     }
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
-    let _write_guard = managers.write_gate.lock().await;
+    let write_guard = managers.write_gate.lock().await;
 
     // Refuse to write under a transaction that is unknown or already
     // finished: its changes could never be rolled back.
@@ -1402,15 +1566,20 @@ async fn execute_query_with_tx(
         };
     }
 
-    let (exec_result, wal, undo) =
-        managers.execute_in_tx(graph, stmt, params, replication.is_some());
+    let (exec_result, wal, undo) = managers.execute_in_tx(graph, stmt, params, sinks.record());
     // Record undo even when the statement failed midway: its partial changes
     // were applied and must be reverted by ROLLBACK.
     if let Err(e) = tx_manager.record_undo(tx_id, undo) {
         tracing::error!(tx_id, error = %e, "failed to record undo log");
     }
-    if let Some(repl) = replication {
-        emit_wal_entries(wal, repl).await;
+    let ticket = sinks.publish(wal).await;
+    drop(write_guard);
+    let durable = match ticket {
+        Ok(t) => sinks.wait_durable(t).await,
+        Err(e) => Err(e),
+    };
+    if let Err(message) = durable {
+        return Response::Error { message };
     }
 
     match exec_result {
@@ -1444,7 +1613,7 @@ async fn execute_query(
     query: &str,
     params: HashMap<String, Value>,
     managers: &SharedManagers,
-    replication: Option<&LeaderReplicationManager>,
+    sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
 ) -> Response {
     // Reuse a previously parsed AST for identical query text.
@@ -1467,11 +1636,16 @@ async fn execute_query(
     };
 
     let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, replication.is_some());
-    if let Some(repl) = replication {
-        emit_wal_entries(wal, repl).await;
-    }
+        managers.execute_with_params(graph, stmt, params, is_write, sinks.record());
+    let ticket = sinks.publish(wal).await;
     drop(write_guard);
+    let durable = match ticket {
+        Ok(t) => sinks.wait_durable(t).await,
+        Err(e) => Err(e),
+    };
+    if let Err(message) = durable {
+        return Response::Error { message };
+    }
 
     match exec_result {
         Ok(result) => {
@@ -3076,6 +3250,162 @@ mod tests {
             }
             other => panic!("expected Result, got {:?}", other),
         }
+    }
+
+    /// Start a server with an on-disk WAL in `dir`; returns its address and
+    /// the server handle (for checkpoints and the live graph).
+    async fn start_durable_server(dir: &std::path::Path) -> (std::net::SocketAddr, Arc<TcpServer>) {
+        use crate::durable_wal::{DurableWal, WalMode, wal_path};
+        let data = dir.join("db");
+        let (wal, recovery) = DurableWal::open(
+            &wal_path(&data),
+            snapshot_digest(&data).unwrap(),
+            WalMode::Fsync,
+        )
+        .unwrap();
+        assert!(recovery.batches.is_empty());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Arc::new(
+            TcpServer::new(ServerConfig {
+                bind_address: addr.to_string(),
+                ..Default::default()
+            })
+            .with_durability(Durability::new(wal, &data, 0)),
+        );
+        let s = Arc::clone(&server);
+        tokio::spawn(async move { s.start_with_listener(listener).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        (addr, server)
+    }
+
+    /// What a restart would see: the snapshot plus the replayed WAL.
+    fn recover_from_disk(dir: &std::path::Path) -> ConcurrentGraph {
+        use crate::durable_wal::{DurableWal, WalMode, wal_path};
+        let data = dir.join("db");
+        let graph = if data.exists() {
+            maharit_storage::PersistentStorage::load_concurrent(&data).unwrap()
+        } else {
+            ConcurrentGraph::new()
+        };
+        let (_, recovery) = DurableWal::open(
+            &wal_path(&data),
+            snapshot_digest(&data).unwrap(),
+            WalMode::Os,
+        )
+        .unwrap();
+        for entry in recovery.batches.iter().flatten() {
+            crate::replication::apply_wal_entry(&graph, entry);
+        }
+        graph
+    }
+
+    /// Nodes and edges by ID, for comparing two graphs.
+    fn graph_fingerprint(g: &ConcurrentGraph) -> (Vec<String>, Vec<String>) {
+        let mut nodes: Vec<String> = g
+            .nodes()
+            .map(|n| {
+                let n = n.value();
+                let mut props: Vec<_> = n
+                    .properties
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v:?}"))
+                    .collect();
+                props.sort();
+                let mut labels = n.labels.clone();
+                labels.sort();
+                format!("{} {:?} {:?}", n.id, labels, props)
+            })
+            .collect();
+        nodes.sort();
+        let mut edges: Vec<String> = g
+            .edges()
+            .map(|e| {
+                let e = e.value();
+                let mut props: Vec<_> = e
+                    .properties
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v:?}"))
+                    .collect();
+                props.sort();
+                format!("{} {}->{} {} {:?}", e.id, e.from, e.to, e.label, props)
+            })
+            .collect();
+        edges.sort();
+        (nodes, edges)
+    }
+
+    #[tokio::test]
+    async fn test_durable_wal_survives_crash_across_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("maharit_durable_srv_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, server) = start_durable_server(&dir).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let run = |q: &str| Request::Query {
+            query: q.to_string(),
+            params: HashMap::new(),
+            tx_id: None,
+            session_token: None,
+        };
+        for q in [
+            "UNWIND range(1, 6) AS i CREATE (:N {i: i})",
+            "MATCH (n:N) WHERE n.i IN [2, 3] DETACH DELETE n",
+            "CREATE (:D {d: date('2024-02-29'), t: datetime('2026-01-01T00:00:00Z')})",
+        ] {
+            let resp = send_recv(&mut stream, &run(q)).await;
+            assert!(matches!(resp, Response::Result { .. }), "{q}: {resp:?}");
+        }
+        // Checkpoint mid-run: the live graph has sparse IDs now.
+        server.checkpointer().unwrap().checkpoint().await.unwrap();
+        for q in [
+            "MATCH (a:N {i: 6}), (b:N {i: 1}) CREATE (a)-[:R {w: 1.5}]->(b)",
+            "MATCH (n:N {i: 4}) SET n:Extra, n.name = 'four' REMOVE n.i",
+            "CREATE (:N {i: 7})",
+        ] {
+            let resp = send_recv(&mut stream, &run(q)).await;
+            assert!(matches!(resp, Response::Result { .. }), "{q}: {resp:?}");
+        }
+        // Rolled-back changes must not come back either.
+        let Response::TransactionBegun { tx_id } = send_recv(
+            &mut stream,
+            &Request::BeginTransaction {
+                read_only: false,
+                session_token: None,
+            },
+        )
+        .await
+        else {
+            panic!("begin failed")
+        };
+        let mut req = run("MATCH (n:N {i: 1}) SET n.i = 100");
+        if let Request::Query { tx_id: t, .. } = &mut req {
+            *t = Some(tx_id);
+        }
+        assert!(matches!(
+            send_recv(&mut stream, &req).await,
+            Response::Result { .. }
+        ));
+        assert!(matches!(
+            send_recv(
+                &mut stream,
+                &Request::Rollback {
+                    tx_id,
+                    session_token: None
+                }
+            )
+            .await,
+            Response::RolledBack { .. }
+        ));
+
+        // "Crash": rebuild from disk without a final save and compare.
+        let recovered = recover_from_disk(&dir);
+        assert_eq!(
+            graph_fingerprint(&recovered),
+            graph_fingerprint(&server.graph_arc())
+        );
+        assert_eq!(recovered.edge_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

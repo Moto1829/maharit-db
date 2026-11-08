@@ -20,7 +20,9 @@ use crate::replication::WalEntryData;
 /// Encode a property value for `WalEntryData::SetProperty` (JSON text).
 ///
 /// Floats always carry a fractional part or exponent so the follower decodes
-/// them as `Float` rather than `Int` (`1.0` must not become `1`).
+/// them as `Float` rather than `Int` (`1.0` must not become `1`). Temporal
+/// values are tagged objects so they round-trip with their type
+/// (see [`property_value_from_wal_string`]).
 pub fn property_value_to_wal_string(val: &PropertyValue) -> String {
     match val {
         PropertyValue::Null => "null".to_string(),
@@ -28,7 +30,56 @@ pub fn property_value_to_wal_string(val: &PropertyValue) -> String {
         PropertyValue::Int(n) => n.to_string(),
         PropertyValue::Float(n) if n.is_finite() => format!("{n:?}"),
         PropertyValue::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        PropertyValue::Date(d) => format!("{{\"$date\":{d}}}"),
+        PropertyValue::DateTime(ms) => format!("{{\"$datetime\":{ms}}}"),
+        PropertyValue::Duration {
+            months,
+            days,
+            millis,
+        } => format!("{{\"$duration\":[{months},{days},{millis}]}}"),
         other => serde_json::to_string(&other.to_string()).unwrap_or_default(),
+    }
+}
+
+/// Decode a value written by [`property_value_to_wal_string`].
+///
+/// Text that is not valid JSON (or an unknown shape) is kept as a string.
+pub fn property_value_from_wal_string(value: &str) -> PropertyValue {
+    let as_string = || PropertyValue::String(value.to_string());
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(value) else {
+        return as_string();
+    };
+    match json {
+        serde_json::Value::Null => PropertyValue::Null,
+        serde_json::Value::Bool(b) => PropertyValue::Bool(b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => PropertyValue::Int(i),
+            None => PropertyValue::Float(n.as_f64().unwrap_or(0.0)),
+        },
+        serde_json::Value::String(s) => PropertyValue::String(s),
+        serde_json::Value::Object(obj) if obj.len() == 1 => {
+            let (tag, v) = obj.iter().next().unwrap();
+            let int = |v: &serde_json::Value| v.as_i64();
+            match (tag.as_str(), v) {
+                ("$date", v) => int(v)
+                    .and_then(|d| i32::try_from(d).ok())
+                    .map(PropertyValue::Date),
+                ("$datetime", v) => int(v).map(PropertyValue::DateTime),
+                ("$duration", serde_json::Value::Array(a)) if a.len() == 3 => {
+                    match (int(&a[0]), int(&a[1]), int(&a[2])) {
+                        (Some(m), Some(d), Some(ms)) => Some(PropertyValue::Duration {
+                            months: m as _,
+                            days: d as _,
+                            millis: ms as _,
+                        }),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+            .unwrap_or_else(as_string)
+        }
+        _ => as_string(),
     }
 }
 
@@ -497,5 +548,23 @@ mod tests {
             "2.5"
         );
         assert_eq!(property_value_to_wal_string(&PropertyValue::Int(1)), "1");
+        for v in [
+            PropertyValue::Null,
+            PropertyValue::Bool(true),
+            PropertyValue::Int(-3),
+            PropertyValue::Float(1.0),
+            PropertyValue::String("x\"y".to_string()),
+            PropertyValue::String("{\"$date\":1}".to_string()),
+            PropertyValue::Date(-42),
+            PropertyValue::DateTime(1_700_000_000_123),
+            PropertyValue::Duration {
+                months: 14,
+                days: 3,
+                millis: 4_000,
+            },
+        ] {
+            let text = property_value_to_wal_string(&v);
+            assert_eq!(property_value_from_wal_string(&text), v, "{text}");
+        }
     }
 }

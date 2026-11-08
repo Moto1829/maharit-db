@@ -127,7 +127,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 ### maharit-storage: 永続化
 
 - `wal.rs` / `wal_group_commit.rs`: Write-Ahead Log。グループコミットでスループット向上。
-- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を保存・復元。現行は v4 形式（bincode 1 互換のバイト列を `snapshot_codec.rs` が自前で読み書き。bincode 依存は削除済み）。形式を変えるときは `VERSION` を上げ、旧版の読み込みを残す。`tests/fixtures/v4_*.mgdb` は bincode 時代に書いた互換性確認用ファイル
+- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を保存・復元（保存は tmp + fsync + rename で原子的）。現行は v4 形式（bincode 1 互換のバイト列を `snapshot_codec.rs` が自前で読み書き。bincode 依存は削除済み）。形式を変えるときは `VERSION` を上げ、旧版の読み込みを残す。`tests/fixtures/v4_*.mgdb` は bincode 時代に書いた互換性確認用ファイル
 - `mvcc.rs`: MVCC トランザクション。
 - `backup.rs`: `Backup::create` / `restore` / `verify` / `metadata`。`CompressionType::None | Gzip | Zstd`。
 
@@ -139,6 +139,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 - `auth.rs`: ユーザー・セッション管理、RBAC（admin / writer / reader）、`CREATE USER` / `DROP USER` / `ALTER USER` を SQL ライクに処理。
 - `tls.rs`: rustls 0.23（証明書ホットリロード対応）。`builder_with_protocol_versions` を使う（`versions` フィールドは private）。
 - `replication.rs`: `NodeRole` / `ReplicationConfig` / `LeaderReplicationManager` / `FollowerReplicationManager`。tokio `broadcast::channel` で WAL ストリーミング、ハートビートで生存検知。
+- `durable_wal.rs`: サーバーのディスク WAL（`<data>.wal`）。書き込みクエリの `WalEntryData`（レプリケーションと同じ変更ログ、`mutation_log.rs` の `RecordingGraph` が記録）を書き込みゲート内で追記し、ゲート外で fsync（グループコミット）してから応答。起動時はスナップショット読み込み → WAL 再生（`replication::apply_wal_entry`）。チェックポイント（停止時・`--checkpoint-mb` 超過時、`tcp_server::Checkpointer`）はゲートを取ってスナップショット保存 → WAL を空にする。WAL ヘッダーのスナップショット SHA-256 が一致しない WAL は捨てる。WAL は ID で対象を指すので、`load_concurrent` はノード・エッジ ID を保存時のまま復元する（振り直さないこと）。`--wal fsync|os|off`、フォロワーは WAL なし
 - `coordinator.rs`: シャーディングコーディネーター（`maharit-cluster` の Strategy / Router を利用）。
 - `tracing_setup.rs` / `metrics.rs` / `audit.rs` / `logging.rs`: OpenTelemetry トレーシング + Prometheus + 監査ログ + JSON 構造化ログ。
 

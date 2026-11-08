@@ -76,7 +76,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 
 データの永続化とトランザクション管理を担います。
 
-- **WAL（Write-Ahead Log）**: 変更操作をディスクに先行書き込み（Rust API。サーバーはまだディスク上の WAL を使っていない）
+- **WAL（Write-Ahead Log）**: 変更操作をディスクに先行書き込み（Rust API。サーバーの WAL は `maharit-server` の `durable_wal.rs`）
 - **スナップショット**: グラフ全体のシリアライズ/デシリアライズ
 - **トランザクション**: MVCC によるスナップショット分離レベル
 - **バックアップ**: gzip 圧縮付きフルバックアップ・増分バックアップ
@@ -91,6 +91,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 - **細粒度 ACL**: ラベル・プロパティ単位のアクセス制御
 - **HTTP サーバー**: `/metrics`、`/health`、`/health/live`、`/health/ready`
 - **OpenTelemetry**: 分散トレーシング
+- **WAL**: 書き込みクエリの変更（`WalEntryData`）を `<data>.wal` に追記し、起動時に再適用。グループコミット、チェックポイント
 - **レプリケーション**: WAL ストリーミング、リーダー/フォロワー構成
 
 ### maharit-cluster
@@ -140,7 +141,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
               ↓
          Executor
           ├── maharit-core（Graph 操作）
-          └── RecordingGraph（変更を WAL エントリとして記録し、フォロワーへ配信）
+          └── RecordingGraph（変更を WAL エントリとして記録し、WAL ファイルに追記・フォロワーへ配信）
               ↓
          結果を返却
               ↑
@@ -182,7 +183,7 @@ maharit-client（独立。maharit-core にも依存しない）
 - `label_index: HashMap<String, HashSet<NodeId>>`: ラベルによる逆引きインデックス
 
 ノードとエッジのプロパティは `Arc<HashMap<..>>` で共有し、結果を返すときのコピーを減らしています。
-サーバーは停止時（SIGINT / SIGTERM）にグラフ全体をデータファイルへ保存します。変更はリーダーからフォロワーへ WAL エントリとして送られますが、ディスク上の WAL にはまだ書き込まれません。
+サーバーは書き込みクエリごとの変更を WAL エントリとして `<data>.wal` に追記し、リーダーからフォロワーへも送ります。停止時（SIGINT / SIGTERM）と WAL が一定サイズを超えたとき（チェックポイント）に、グラフ全体をデータファイルへ保存して WAL を空にします。ノードとエッジの ID は保存・読み込みで変わりません（WAL が ID で対象を指すため）。
 
 ## 永続化モード
 
@@ -215,4 +216,4 @@ maharit server --data /var/lib/maharit/maharit.db
 MAHARIT_DATA=/var/lib/maharit/maharit.db maharit server
 ```
 
-サーバーは SIGINT / SIGTERM 受信時に自動でデータを保存します。
+書き込みは WAL に記録されるので、強制終了しても応答済みの変更は失われません。SIGINT / SIGTERM 受信時はデータファイルを保存して WAL を空にします。詳しくは [サーバー設定](operations/server-config.md) を参照してください。

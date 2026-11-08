@@ -77,7 +77,7 @@ AST → Planner → QueryPlan → Executor (with measured values)
 
 Handles data persistence and transaction management.
 
-- **WAL (write-ahead log)**: writes changes to disk ahead of applying them (Rust API; the server does not use an on-disk WAL yet)
+- **WAL (write-ahead log)**: writes changes to disk ahead of applying them (Rust API; the server's WAL is `durable_wal.rs` in `maharit-server`)
 - **Snapshots**: serialize/deserialize the whole graph
 - **Transactions**: snapshot isolation with MVCC
 - **Backups**: full and incremental backups with gzip compression
@@ -92,6 +92,7 @@ Handles the network layer and server management.
 - **Fine-grained ACL**: access control per label and property
 - **HTTP server**: `/metrics`, `/health`, `/health/live`, `/health/ready`
 - **OpenTelemetry**: distributed tracing
+- **WAL**: appends each write query's changes (`WalEntryData`) to `<data>.wal` and replays them at startup; group commit, checkpoints
 - **Replication**: WAL streaming, leader/follower setup
 
 ### maharit-cluster
@@ -141,7 +142,7 @@ Client (TCP/TLS)
               ↓
          Executor
           ├── maharit-core (graph operations)
-          └── RecordingGraph (records changes as WAL entries and sends them to followers)
+          └── RecordingGraph (records changes as WAL entries, appends them to the WAL file, and sends them to followers)
               ↓
          Return results
               ↑
@@ -183,7 +184,7 @@ Graph data is kept in memory. The `Graph` struct stores nodes and edges in array
 - `label_index: HashMap<String, HashSet<NodeId>>`: reverse index by label
 
 Node and edge properties are shared as `Arc<HashMap<..>>` to reduce copying when returning results.
-The server saves the whole graph to the data file when it stops (SIGINT / SIGTERM). Changes are sent from the leader to followers as WAL entries, but they are not yet written to an on-disk WAL.
+The server appends each write query's changes to `<data>.wal` as WAL entries and also sends them from the leader to followers. When it stops (SIGINT / SIGTERM) and when the WAL grows past a set size (a checkpoint), it saves the whole graph to the data file and empties the WAL. Node and edge IDs do not change across save and load (the WAL refers to them by ID).
 
 ## Persistence modes
 
@@ -216,4 +217,4 @@ maharit server --data /var/lib/maharit/maharit.db
 MAHARIT_DATA=/var/lib/maharit/maharit.db maharit server
 ```
 
-The server saves the data automatically when it receives SIGINT / SIGTERM.
+Writes are recorded in the WAL, so acknowledged changes survive a forced kill. On SIGINT / SIGTERM the server saves the data file and empties the WAL. See [server configuration](operations/server-config.md) for details.

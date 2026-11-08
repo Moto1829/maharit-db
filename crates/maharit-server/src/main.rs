@@ -3,6 +3,7 @@ pub mod auth;
 #[cfg(test)]
 mod concurrency_stress_test;
 pub mod coordinator;
+pub mod durable_wal;
 pub mod http_server;
 pub mod logging;
 pub mod metrics;
@@ -15,8 +16,9 @@ pub mod tcp_server;
 pub mod tls;
 pub mod tracing_setup;
 
+use durable_wal::{DurableWal, WalMode};
 use repl::Repl;
-use tcp_server::{ServerConfig, TcpServer};
+use tcp_server::{Durability, ServerConfig, TcpServer};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -99,6 +101,8 @@ fn run_server(args: &[String]) {
 
     // Persistence option
     let mut data_path: Option<String> = None;
+    let mut wal_mode_arg: Option<String> = None;
+    let mut checkpoint_mb: u64 = 64;
 
     // Authentication options
     let mut admin_password: Option<String> = None;
@@ -145,6 +149,24 @@ fn run_server(args: &[String]) {
             "--data" | "-d" => {
                 if i + 1 < args.len() {
                     data_path = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--wal" => {
+                if i + 1 < args.len() {
+                    wal_mode_arg = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--checkpoint-mb" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse() {
+                        Ok(n) => checkpoint_mb = n,
+                        Err(_) => {
+                            eprintln!("Error: --checkpoint-mb expects a number of megabytes");
+                            std::process::exit(1);
+                        }
+                    }
                     i += 1;
                 }
             }
@@ -324,6 +346,33 @@ fn run_server(args: &[String]) {
         maharit_core::ConcurrentGraph::new()
     };
 
+    // On-disk WAL (--wal / MAHARIT_WAL). Followers receive changes through
+    // replication, which bypasses the WAL, so they keep saving at shutdown only.
+    let wal_mode_arg = wal_mode_arg.or_else(|| std::env::var("MAHARIT_WAL").ok());
+    let wal_mode = match wal_mode_arg.as_deref().map(WalMode::parse) {
+        None => WalMode::Fsync,
+        Some(Some(m)) => m,
+        Some(None) => {
+            eprintln!("Error: --wal must be one of: fsync, os, off");
+            std::process::exit(1);
+        }
+    };
+    let durability = if wal_mode == WalMode::Off {
+        None
+    } else if replication_role.as_deref() == Some("follower") {
+        println!(
+            "WAL disabled on a follower (data is saved at shutdown and resynced from the leader)"
+        );
+        None
+    } else {
+        Some(open_wal_and_recover(
+            &graph,
+            std::path::Path::new(&data_path),
+            wal_mode,
+            checkpoint_mb.saturating_mul(1024 * 1024),
+        ))
+    };
+
     // 認証を有効化する場合は管理者パスワードを解決する。
     // デフォルトの admin/admin をネットワークに公開しないよう、
     // パスワード未指定なら起動を拒否する。
@@ -364,10 +413,14 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(d) = durability {
+                server = server.with_durability(d);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
+            let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
@@ -412,7 +465,7 @@ fn run_server(args: &[String]) {
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_shutdown_handler(graph_for_signal, path_for_signal, None);
                 spawn_http_server(metrics_bind.clone());
                 tokio::spawn(async move {
                     if let Err(e) = follower_clone.start().await {
@@ -437,10 +490,14 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(d) = durability {
+                server = server.with_durability(d);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
+            let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal);
+                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
@@ -477,16 +534,75 @@ fn spawn_http_server(bind_address: Option<String>) {
 }
 
 /// Spawn a background task that waits for SIGINT/SIGTERM, saves the database, then exits.
-fn spawn_shutdown_handler(graph: std::sync::Arc<maharit_core::ConcurrentGraph>, data_path: String) {
+///
+/// With a WAL, the save is a checkpoint (writers paused, snapshot written,
+/// WAL emptied). If it fails the WAL is kept, so nothing is lost.
+fn spawn_shutdown_handler(
+    graph: std::sync::Arc<maharit_core::ConcurrentGraph>,
+    data_path: String,
+    checkpointer: Option<tcp_server::Checkpointer>,
+) {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         println!("\nShutting down, saving database to {}...", data_path);
-        match maharit_storage::PersistentStorage::save_concurrent(&graph, &data_path) {
+        let result = match checkpointer {
+            Some(c) => c.checkpoint().await.map_err(|e| e.to_string()),
+            None => maharit_storage::PersistentStorage::save_concurrent(&graph, &data_path)
+                .map_err(|e| e.to_string()),
+        };
+        match result {
             Ok(()) => println!("Database saved successfully."),
             Err(e) => eprintln!("Warning: Failed to save database: {}", e),
         }
         std::process::exit(0);
     });
+}
+
+/// Open `<data>.wal` and replay it on top of the loaded snapshot.
+fn open_wal_and_recover(
+    graph: &maharit_core::ConcurrentGraph,
+    data_path: &std::path::Path,
+    mode: WalMode,
+    checkpoint_bytes: u64,
+) -> Durability {
+    let wal_file = durable_wal::wal_path(data_path);
+    let base = match durable_wal::snapshot_digest(data_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to read {}: {}", data_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let (wal, recovery) = match DurableWal::open(&wal_file, base, mode) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to open WAL {}: {}", wal_file.display(), e);
+            std::process::exit(1);
+        }
+    };
+    if recovery.discarded_stale {
+        println!(
+            "Discarded WAL {} written before the last snapshot",
+            wal_file.display()
+        );
+    }
+    if recovery.truncated_bytes > 0 {
+        eprintln!(
+            "WARN: WAL {} had an incomplete last record ({} bytes); it was cut off",
+            wal_file.display(),
+            recovery.truncated_bytes
+        );
+    }
+    if !recovery.batches.is_empty() {
+        let n = recovery.batches.len();
+        for entries in &recovery.batches {
+            for entry in entries {
+                replication::apply_wal_entry(graph, entry);
+            }
+        }
+        println!("Recovered {} write(s) from WAL {}", n, wal_file.display());
+    }
+    Durability::new(wal, data_path, checkpoint_bytes)
 }
 
 /// Wait for Ctrl-C (SIGINT) or SIGTERM.
@@ -889,7 +1005,22 @@ fn print_server_help() {
         "    -d, --data <PATH>                Database file path (default: maharit.db, env: MAHARIT_DATA)"
     );
     println!(
-        "                                     Loaded on startup if exists; saved on shutdown."
+        "                                     Loaded on startup if exists; saved on shutdown and at checkpoints."
+    );
+    println!(
+        "    --wal <MODE>                     Write-ahead log <data>.wal (env: MAHARIT_WAL, default: fsync)"
+    );
+    println!(
+        "                                     fsync: fsync before replying (survives power loss)"
+    );
+    println!(
+        "                                     os:    no fsync (survives a process crash only)"
+    );
+    println!(
+        "                                     off:   no WAL; changes since the last save are lost on a crash"
+    );
+    println!(
+        "    --checkpoint-mb <N>              Save the snapshot and empty the WAL when it exceeds N MB (default: 64, 0: only at shutdown)"
     );
     println!("    -h, --host <HOST>                Host to bind to (default: 127.0.0.1)");
     println!("    -p, --port <PORT>                Port to listen on (default: 7687)");

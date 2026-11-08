@@ -170,7 +170,7 @@ def test_sigterm_roundtrip(binary: str, port: int, data_path: str):
 
 
 def test_sigkill_roundtrip(binary: str, port: int, data_path: str):
-    """強制終了（SIGKILL）後の再起動でサーバーがクラッシュしないこと。"""
+    """強制終了（SIGKILL）後も、応答済みの書き込みが WAL から復元されること。"""
     section("SIGKILL 後の再起動")
 
     # SIGKILL 前に一度 SIGTERM で保存済みデータを用意しておく
@@ -196,9 +196,10 @@ def test_sigkill_roundtrip(binary: str, port: int, data_path: str):
         proc2.kill(); proc2.wait()
         return
 
-    # 少し書き込んでから SIGKILL（この書き込みは消えてよい）
+    # 書き込んでから SIGKILL。応答を受け取った書き込みは WAL（既定 --wal fsync）から復元される
     client2 = MaharitClient("127.0.0.1", port)
-    client2.query("CREATE (n:Volatile {name: 'may_be_lost'})")
+    client2.query("CREATE (n:Volatile {name: 'after_save', d: date('2024-02-29')})")
+    client2.query("MATCH (n:Survivor) SET n.touched = true")
     client2.close()
 
     stop_server(proc2, signal.SIGKILL, wait_secs=3.0)
@@ -214,6 +215,20 @@ def test_sigkill_roundtrip(binary: str, port: int, data_path: str):
         check(
             "SIGTERM 保存データは SIGKILL 後も復元",
             len(resp.get("rows", [])) >= 1,
+            str(resp),
+        )
+        resp = client3.query(
+            "MATCH (n:Volatile) WHERE n.d = date('2024-02-29') RETURN n.name AS name"
+        )
+        check(
+            "SIGKILL 直前の書き込みが WAL から復元（date 型も保持）",
+            resp.get("rows") == [{"name": "after_save"}],
+            str(resp),
+        )
+        resp = client3.query("MATCH (n:Survivor) RETURN n.touched AS t")
+        check(
+            "SIGKILL 直前の SET が WAL から復元",
+            resp.get("rows") == [{"t": True}],
             str(resp),
         )
         client3.close()
@@ -249,9 +264,10 @@ def main():
     try:
         test_sigterm_roundtrip(binary, args.port, data_path)
 
-        # SIGKILL テスト用にデータファイルをリセット
-        if os.path.isfile(data_path):
-            os.remove(data_path)
+        # SIGKILL テスト用にデータファイルと WAL をリセット
+        for path in (data_path, data_path + ".wal"):
+            if os.path.isfile(path):
+                os.remove(path)
 
         test_sigkill_roundtrip(binary, args.port, data_path)
     finally:

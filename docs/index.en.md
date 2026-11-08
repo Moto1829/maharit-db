@@ -60,12 +60,7 @@ The major algorithms from graph theory are built in.
 
 ### Persistence and the WAL
 
-The server stores the whole graph in a single data file and loads it at startup. The data is saved when the server is stopped with `Ctrl+C` (SIGINT) or SIGTERM.
-
-The `maharit-storage` crate provides a write-ahead log (WAL, with group commit) and MVCC transactions as a Rust API. The server uses WAL entries to stream replication.
-
-!!! warning
-    The server does not currently write an on-disk WAL. If the process is killed (`kill -9`, power loss, and so on), changes made since the last save are lost. Combine it with [backups](operations/backup.md) and replication for important data.
+The server stores the whole graph in a single data file and appends each write query's changes to a write-ahead log (WAL) before replying. If the process is killed (`kill -9`, power loss, and so on), it replays the WAL at startup and restores every acknowledged write. Group commit combines the fsyncs of concurrent writes into one. The WAL is also used to stream replication. See [server configuration](operations/server-config.md) for details.
 
 ### TCP server with TLS/SSL
 

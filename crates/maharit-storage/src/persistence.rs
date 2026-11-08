@@ -97,19 +97,45 @@ impl PersistentStorage {
 
         let encoded = snapshot_codec::encode(&snapshot);
 
-        let file = File::create(path)?;
-        let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
+        Self::write_snapshot_file(path.as_ref(), &encoded)
+    }
 
-        // Header: magic + version
-        writer.write_all(MAGIC)?;
-        writer.write_all(&VERSION.to_le_bytes())?;
+    /// ヘッダー + 長さ付きペイロードを `path` に原子的に書き込む。
+    ///
+    /// 一時ファイル（`<path>.tmp`）に書いて fsync してから rename で置き換え、
+    /// ディレクトリも fsync する。保存中にプロセスが落ちても、元のファイルか
+    /// 新しいファイルのどちらかが完全な形で残る（途中まで書かれたファイルにならない）。
+    fn write_snapshot_file(path: &Path, encoded: &[u8]) -> Result<()> {
+        let tmp = {
+            let mut s = path.as_os_str().to_owned();
+            s.push(".tmp");
+            std::path::PathBuf::from(s)
+        };
+        {
+            let file = File::create(&tmp)?;
+            let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
 
-        // Length-prefixed payload
-        let payload_len = encoded.len() as u64;
-        writer.write_all(&payload_len.to_le_bytes())?;
-        writer.write_all(&encoded)?;
+            // Header: magic + version
+            writer.write_all(MAGIC)?;
+            writer.write_all(&VERSION.to_le_bytes())?;
 
-        writer.flush()?;
+            // Length-prefixed payload
+            let payload_len = encoded.len() as u64;
+            writer.write_all(&payload_len.to_le_bytes())?;
+            writer.write_all(encoded)?;
+
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        {
+            let dir = match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            File::open(dir)?.sync_all()?;
+        }
         Ok(())
     }
 
@@ -149,18 +175,7 @@ impl PersistentStorage {
 
         let encoded = snapshot_codec::encode(&snapshot);
 
-        let file = File::create(path)?;
-        let mut writer = BufWriter::with_capacity(BUF_CAPACITY, file);
-
-        writer.write_all(MAGIC)?;
-        writer.write_all(&VERSION.to_le_bytes())?;
-
-        let payload_len = encoded.len() as u64;
-        writer.write_all(&payload_len.to_le_bytes())?;
-        writer.write_all(&encoded)?;
-
-        writer.flush()?;
-        Ok(())
+        Self::write_snapshot_file(path.as_ref(), &encoded)
     }
 
     /// ファイルから ConcurrentGraph を読み込み
@@ -183,23 +198,33 @@ impl PersistentStorage {
 
         let graph = ConcurrentGraph::new();
 
-        let mut id_map: HashMap<u64, u64> = HashMap::new();
+        // Keep the saved IDs. The server's WAL addresses nodes and edges by ID,
+        // so a snapshot taken while running must reload with the same IDs for
+        // the WAL written after it to replay correctly.
         for snode in snapshot.nodes {
-            let new_id = graph.create_node_with_labels(snode.labels);
-            id_map.insert(snode.id, new_id);
+            if graph.contains_node(snode.id) {
+                return Err(PersistenceError::CorruptedData(format!(
+                    "duplicate node id: {}",
+                    snode.id
+                )));
+            }
+            let id = graph.create_node_with_id_and_labels(snode.id, snode.labels);
             for (k, v) in snode.properties {
-                graph.set_node_property(new_id, &k, v);
+                graph.set_node_property(id, &k, v);
             }
         }
 
         for sedge in snapshot.edges {
-            let from = *id_map.get(&sedge.from).ok_or_else(|| {
-                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.from))
-            })?;
-            let to = *id_map.get(&sedge.to).ok_or_else(|| {
-                PersistenceError::CorruptedData(format!("unknown node id: {}", sedge.to))
-            })?;
-            let edge_id = graph.create_edge(from, to, &sedge.label)?;
+            for end in [sedge.from, sedge.to] {
+                if !graph.contains_node(end) {
+                    return Err(PersistenceError::CorruptedData(format!(
+                        "unknown node id: {}",
+                        end
+                    )));
+                }
+            }
+            let edge_id =
+                graph.create_edge_with_id(sedge.id, sedge.from, sedge.to, &sedge.label)?;
             for (k, v) in sedge.properties {
                 graph.set_edge_property(edge_id, &k, v);
             }
@@ -942,8 +967,6 @@ mod tests {
         assert_eq!(loaded.node_count(), 2);
         assert_eq!(loaded.edge_count(), 1);
 
-        // load_concurrent は DashMap の非決定的な順序でノードIDをリマップするため
-        // 元のIDではなく、ラベルとエッジラベルで検証する
         let edge = loaded.edges().next().unwrap();
         let edge = edge.value();
         assert_eq!(edge.label, "LINK");
@@ -955,6 +978,47 @@ mod tests {
         );
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_concurrent_roundtrip_preserves_ids() {
+        use maharit_core::ConcurrentGraph;
+
+        // Sparse IDs (deleted nodes/edges leave gaps) must survive a reload:
+        // the server WAL written after a checkpoint addresses them by ID.
+        let graph = ConcurrentGraph::new();
+        let ids: Vec<u64> = (0..6)
+            .map(|i| graph.create_node_with_labels(vec![format!("L{i}")]))
+            .collect();
+        let e0 = graph.create_edge(ids[0], ids[5], "A").unwrap();
+        let e1 = graph.create_edge(ids[3], ids[5], "B").unwrap();
+        graph.delete_edge(e0);
+        graph.delete_node(ids[1]);
+        graph.delete_node(ids[2]);
+
+        let path = std::env::temp_dir().join(format!(
+            "maharit_test_concurrent_ids_{}.db",
+            std::process::id()
+        ));
+        PersistentStorage::save_concurrent(&graph, &path).unwrap();
+        let loaded = PersistentStorage::load_concurrent(&path).unwrap();
+
+        for &id in &[ids[0], ids[3], ids[4], ids[5]] {
+            assert_eq!(
+                loaded.with_node(id, |n| n.labels.clone()),
+                graph.with_node(id, |n| n.labels.clone()),
+                "node {id}"
+            );
+        }
+        assert!(!loaded.contains_node(ids[1]));
+        let edge = loaded.edges().next().unwrap();
+        assert_eq!(*edge.key(), e1);
+        assert_eq!((edge.value().from, edge.value().to), (ids[3], ids[5]));
+        // New IDs never collide with loaded ones.
+        let fresh = loaded.create_node_with_labels(vec![]);
+        assert!(fresh > ids[5]);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

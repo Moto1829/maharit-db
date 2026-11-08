@@ -12,13 +12,47 @@ MaharitDB サーバーは **常にファイルベースの永続化** で動作�
 
 - ファイルが存在する場合: 既存データをロードして起動
 - ファイルが存在しない場合: 新規作成して起動
-- SIGINT / SIGTERM 受信時: 自動でデータを保存してシャットダウン
+- 書き込みクエリ: 変更を WAL（`<データファイル>.wal`）に追記してから応答する
+- SIGINT / SIGTERM 受信時: データファイルを保存し、WAL を空にしてシャットダウン
 
 > **注意**: サーバーはオンメモリ専用モードを持ちません。オンメモリで使いたい場合は `maharit-core` の `Graph::new()` を直接利用してください。
 
+### WAL とクラッシュからの復旧
+
+データファイル（スナップショット）はグラフ全体を保存したもので、停止時とチェックポイント時に書き換えます。その間の変更は、書き込みクエリごとに WAL へ追記されます。
+
+起動時はデータファイルを読み込んだあと WAL を先頭から再適用するので、プロセスが強制終了（`kill -9`、OOM、電源断など）しても、**応答を返した書き込みは失われません**。最後のレコードが書きかけで終わっていた場合（応答前に落ちた書き込み）は、そのレコードを切り捨てて起動します。
+
+`--wal` で、WAL の書き方を選べます。
+
+| モード | 動作 | 守れる障害 |
+|--------|------|-----------|
+| `fsync`（デフォルト） | 追記して fsync してから応答する | プロセスの強制終了、OS のクラッシュ、電源断 |
+| `os` | 追記するが fsync しない（OS のキャッシュに任せる） | プロセスの強制終了のみ |
+| `off` | WAL を使わない（停止時とチェックポイント時にしか保存しない） | なし（前回の保存以降の変更が失われる） |
+
+`fsync` モードでは、同時に届いた書き込みの fsync を 1 回にまとめます（グループコミット）。それでも書き込みの速さはディスクの fsync 性能で決まります。macOS（APFS）では、1 接続あたり毎秒数百件程度が目安です。大量に投入するときは、`UNWIND` で 1 クエリにまとめるか（1 クエリ = 1 回の fsync）、一時的に `--wal os` を使ってください。
+
+**チェックポイント**: WAL が `--checkpoint-mb`（デフォルト 64MB）を超えると、書き込みを一時停止してデータファイルを保存し、WAL を空にします。データファイルの保存は一時ファイルに書いてから置き換えるので、保存中に落ちても壊れたファイルは残りません。
+
+### バックアップを取るとき
+
+`maharit backup --source <データファイル>` はデータファイルだけを読みます。稼働中のサーバーでは、前回のチェックポイント以降の変更は WAL にしかありません。漏れのないバックアップが必要なときは、サーバーを SIGTERM で停止して（データファイルが保存され、WAL が空になる）からバックアップを取ってください。
+
+```bash
+systemctl stop maharit          # または kill -TERM <pid>
+maharit backup --source /var/lib/maharit/maharit.db --output /backup/maharit_$(date +%Y%m%d).db --compress
+systemctl start maharit
+```
+
+!!! note "制限"
+    - フォロワー（`--replication-role follower`）は WAL を書きません。フォロワーの変更はリーダーから届くため、停止時の保存とリーダーからの再同期に任せます。
+    - トランザクション（`begin`）中に書いた変更は、実行した時点で WAL に書かれます。コミットもロールバックもしないうちにサーバーが落ちると、そのトランザクションの変更は再起動後に残ります（ロールバック済みのものは残りません）。
+    - インデックス・制約・全文検索インデックスの定義は、データファイルにも WAL にも保存されません。再起動後に作り直してください。
+
 ## コマンドラインオプション
 
-MaharitDB サーバーは以下のコマンドラインオプションで設定できます。
+MaharitDB サーバーは以下のコマンドラインオプションで設定できます。一覧は `maharit server --help` でも確認できます。
 
 ```bash
 maharit server [OPTIONS]
@@ -28,19 +62,24 @@ maharit server [OPTIONS]
 
 ### 利用可能なオプション
 
-| オプション | 短縮形 | 型 | デフォルト | 説明 |
-|-----------|--------|-----|-----------|------|
-| `--host` | `-H` | String | `127.0.0.1` | バインドするホストアドレス |
-| `--port` | `-p` | u16 | `7687` | リッスンするポート番号 |
-| `--max-connections` | `-c` | usize | `100` | 最大同時接続数 |
-| `--data` | | Path | `maharit.db` | データファイルのパス（環境変数: `MAHARIT_DATA`） |
-| `--log-level` | `-l` | String | `info` | ログレベル（trace/debug/info/warn/error） |
-| `--tls-cert` | | Path | なし | TLS 証明書ファイルのパス |
-| `--tls-key` | | Path | なし | TLS 秘密鍵ファイルのパス |
-| `--metrics-port` | | u16 | `9090` | Prometheus メトリクスのポート |
-| `--enable-replication` | | bool | `false` | レプリケーションを有効化 |
-| `--replication-role` | | String | `leader` | レプリケーションのロール（leader/follower） |
-| `--leader-addr` | | String | なし | フォロワー時のリーダーアドレス |
+| オプション | 短縮形 | デフォルト | 説明 |
+|-----------|--------|-----------|------|
+| `--host` | `-h` | `127.0.0.1` | バインドするホストアドレス |
+| `--port` | `-p` | `7687` | リッスンするポート番号 |
+| `--max-connections` | `-c` | `100` | 最大同時接続数 |
+| `--data` | `-d` | `maharit.db` | データファイルのパス（環境変数: `MAHARIT_DATA`）。WAL は同じ場所の `<data>.wal` |
+| `--wal` | | `fsync` | WAL のモード: `fsync` / `os` / `off`（環境変数: `MAHARIT_WAL`） |
+| `--checkpoint-mb` | | `64` | WAL がこのサイズ（MB）を超えたらチェックポイントを取る。`0` で停止時のみ |
+| `--require-auth` | | オフ | すべてのリクエストに有効なセッショントークンを要求する（[認証](auth.md)） |
+| `--admin-password` | | なし | 初期管理者パスワード（環境変数: `MAHARIT_ADMIN_PASSWORD`）。`--require-auth` では必須 |
+| `--metrics-bind` | | `127.0.0.1:9090` | メトリクス・ヘルスチェック用 HTTP のアドレス（[メトリクス](metrics.md)） |
+| `--replication-role` | | なし | `leader` / `follower`（[レプリケーション](../advanced/replication.md)） |
+| `--replication-bind` | | `127.0.0.1:7688` | レプリケーションの待ち受けアドレス（リーダー） |
+| `--replication-secret` | | なし | レプリケーション接続の共有シークレット（環境変数: `MAHARIT_REPLICATION_SECRET`） |
+| `--leader-addr` | | なし | リーダーのレプリケーションアドレス（フォロワーで必須） |
+| `--node-id` | | `node-1` | クラスター内で一意なノード ID（環境変数: `MAHARIT_NODE_ID`） |
+| `--shard` / `--shard-id` | | なし | シャードノードとして起動（[シャーディング](../advanced/sharding.md)） |
+| `--coordinator` / `--coordinator-port` / `--shards` / `--strategy` | | なし | コーディネーターとして起動 |
 
 ## 使用例
 
@@ -60,68 +99,68 @@ maharit server --host 0.0.0.0 --max-connections 500
 ### データファイルの指定
 
 ```bash
+# /var/lib/maharit/maharit.db と /var/lib/maharit/maharit.db.wal を使う
 maharit server --data /var/lib/maharit/maharit.db
+```
+
+### WAL の設定
+
+```bash
+# 大量投入の間だけ fsync を省く（プロセスの強制終了には耐える）
+maharit server --wal os
+
+# チェックポイントを 256MB ごとにする
+maharit server --checkpoint-mb 256
 ```
 
 ### ログレベルの設定
 
+ログの出力レベルは環境変数 `RUST_LOG` で指定します。
+
 ```bash
 # デバッグログを有効化
-maharit server --log-level debug
+RUST_LOG=debug maharit server
 
-# エラーのみ
-maharit server --log-level error
+# 警告以上のみ
+RUST_LOG=warn maharit server
 ```
 
-### TLS 付きで起動
+### メトリクスの公開アドレス
 
 ```bash
-maharit server \
-  --host 0.0.0.0 \
-  --port 7687 \
-  --tls-cert /etc/maharit/server.crt \
-  --tls-key /etc/maharit/server.key
-```
-
-### メトリクスポートの設定
-
-```bash
-maharit server --metrics-port 9090
+maharit server --metrics-bind 0.0.0.0:9090
 ```
 
 起動後、`http://localhost:9090/metrics` で Prometheus メトリクスが取得できます。
 
+!!! warning "TLS"
+    TLS の実装（`maharit-server` の `tls` モジュール）はありますが、現在の TCP サーバーには組み込まれていません。ネットワーク越しに使う場合は、TLS 終端のプロキシ（stunnel、HAProxy など）を前段に置くか、信頼できるネットワーク内で使ってください。
+
 ## 環境変数
 
-コマンドラインオプションの代わりに環境変数でも設定できます。
+コマンドラインオプションの代わりに環境変数でも設定できます。両方を指定した場合はオプションが優先されます。
 
 | 環境変数 | 対応するオプション |
 |---------|----------------|
-| `MAHARIT_HOST` | `--host` |
-| `MAHARIT_PORT` | `--port` |
-| `MAHARIT_MAX_CONNECTIONS` | `--max-connections` |
 | `MAHARIT_DATA` | `--data` |
-| `MAHARIT_LOG_LEVEL` | `--log-level` |
-| `MAHARIT_TLS_CERT` | `--tls-cert` |
-| `MAHARIT_TLS_KEY` | `--tls-key` |
-| `MAHARIT_METRICS_PORT` | `--metrics-port` |
+| `MAHARIT_WAL` | `--wal` |
+| `MAHARIT_ADMIN_PASSWORD` | `--admin-password` |
+| `MAHARIT_REPLICATION_SECRET` | `--replication-secret` |
+| `MAHARIT_NODE_ID` | `--node-id` |
+| `RUST_LOG` | ログレベル |
 
 ```bash
-export MAHARIT_HOST=0.0.0.0
-export MAHARIT_PORT=7687
 export MAHARIT_DATA=/var/lib/maharit/maharit.db
-maharit server
+export MAHARIT_WAL=fsync
+maharit server --host 0.0.0.0
 ```
 
 ## ログ出力
 
-サーバーは JSON 形式の構造化ログを標準出力に出力します。
+サーバーは JSON 形式の構造化ログを出力します。起動メッセージなど一部は平文でも出力されます。
 
 ```json
-{"level":"INFO","message":"MaharitDB server starting","host":"0.0.0.0","port":7687,"timestamp":"2024-01-01T00:00:00Z"}
-{"level":"INFO","message":"Server ready","connections":0,"timestamp":"2024-01-01T00:00:01Z"}
-{"level":"INFO","message":"Client connected","peer":"192.168.1.100:54321","timestamp":"2024-01-01T00:01:00Z"}
-{"level":"INFO","message":"Query executed","query":"MATCH (n:Person) RETURN n","duration_ms":2,"timestamp":"2024-01-01T00:01:00Z"}
+{"timestamp":"2026-11-08T05:14:29.548490Z","level":"INFO","fields":{"message":"Server listening","address":"0.0.0.0:7687"},"target":"maharit::tcp_server"}
 ```
 
 ログをファイルにリダイレクトする場合：
@@ -143,11 +182,14 @@ After=network.target
 Type=simple
 User=maharit
 Group=maharit
+Environment=RUST_LOG=info
 ExecStart=/usr/local/bin/maharit server \
   --host 0.0.0.0 \
   --port 7687 \
-  --data /var/lib/maharit/maharit.db \
-  --log-level info
+  --data /var/lib/maharit/maharit.db
+# 停止時にデータファイルを保存する時間を確保する
+KillSignal=SIGTERM
+TimeoutStopSec=60s
 Restart=always
 RestartSec=5s
 

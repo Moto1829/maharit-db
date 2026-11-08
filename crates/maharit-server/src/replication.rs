@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use maharit_core::{ConcurrentGraph, Graph, PropertyValue};
+use maharit_core::{ConcurrentGraph, Graph};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,7 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 use tokio::time::{interval, timeout};
 
-use crate::mutation_log::property_value_to_wal_string;
+use crate::mutation_log::{property_value_from_wal_string, property_value_to_wal_string};
 
 /// Error types for replication operations
 #[derive(Debug, thiserror::Error)]
@@ -823,7 +823,7 @@ impl FollowerReplicationManager {
 /// Apply a single WAL entry to the local graph (best-effort; errors are logged).
 ///
 /// Uses `ConcurrentGraph` directly — no async lock needed.
-fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
+pub(crate) fn apply_wal_entry(graph: &ConcurrentGraph, entry: &WalEntryData) {
     match entry {
         WalEntryData::CreateNode { node_id, labels } => {
             graph.create_node_with_id_and_labels(*node_id, labels.clone());
@@ -852,22 +852,7 @@ fn apply_wal_entry(graph: &Arc<ConcurrentGraph>, entry: &WalEntryData) {
             key,
             value,
         } => {
-            // Property values are serialised as JSON strings for portability.
-            let prop_val = serde_json::from_str::<serde_json::Value>(value)
-                .map(|v| match v {
-                    serde_json::Value::Null => PropertyValue::Null,
-                    serde_json::Value::Bool(b) => PropertyValue::Bool(b),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            PropertyValue::Int(i)
-                        } else {
-                            PropertyValue::Float(n.as_f64().unwrap_or(0.0))
-                        }
-                    }
-                    serde_json::Value::String(s) => PropertyValue::String(s),
-                    _ => PropertyValue::String(value.clone()),
-                })
-                .unwrap_or_else(|_| PropertyValue::String(value.clone()));
+            let prop_val = property_value_from_wal_string(value);
 
             if *is_node {
                 graph.set_node_property(*target_id, key, prop_val);
@@ -1045,6 +1030,7 @@ pub async fn send_promote_to_leader(addr: &str) -> Result<(), ReplicationError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maharit_core::PropertyValue;
 
     // 1. Verify default config values
     #[test]
