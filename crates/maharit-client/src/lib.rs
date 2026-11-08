@@ -235,6 +235,9 @@ impl Default for ClientConfig {
 /// Transaction ID
 pub type TxId = u64;
 
+/// Query parameters, referenced as `$name` in the query text.
+pub type Params = HashMap<String, serde_json::Value>;
+
 /// Default chunk size for streaming
 pub const DEFAULT_CHUNK_SIZE: usize = 100;
 
@@ -248,6 +251,8 @@ enum Request {
     #[serde(rename = "query")]
     Query {
         query: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty")]
+        params: Params,
         #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
         tx_id: Option<TxId>,
         #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
@@ -257,6 +262,8 @@ enum Request {
     #[serde(rename = "streamQuery")]
     StreamQuery {
         query: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty")]
+        params: Params,
         #[serde(rename = "txId", skip_serializing_if = "Option::is_none")]
         tx_id: Option<TxId>,
         #[serde(rename = "chunkSize")]
@@ -739,7 +746,37 @@ impl Client {
 
     /// Execute a query within a transaction
     pub async fn query_in_tx(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
-        let result = self.query_internal(query, tx_id).await;
+        self.query_with_params_in_tx(query, Params::new(), tx_id)
+            .await
+    }
+
+    /// Execute a query with `$name` parameters and return the result.
+    ///
+    /// Parameter values are sent separately from the query text, so they are
+    /// never parsed as Cypher. Use this instead of formatting user input into
+    /// the query string.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let params = maharit_client::Params::from([
+    ///     ("name".to_string(), serde_json::json!("Alice")),
+    /// ]);
+    /// let result = client
+    ///     .query_with_params("MATCH (n:Person {name: $name}) RETURN n.age", params)
+    ///     .await?;
+    /// ```
+    pub async fn query_with_params(&mut self, query: &str, params: Params) -> Result<QueryResult> {
+        self.query_with_params_in_tx(query, params, None).await
+    }
+
+    /// Execute a query with `$name` parameters, optionally within a transaction.
+    pub async fn query_with_params_in_tx(
+        &mut self,
+        query: &str,
+        params: Params,
+        tx_id: Option<TxId>,
+    ) -> Result<QueryResult> {
+        let result = self.query_internal(query, &params, tx_id).await;
 
         // Only auto-reconnect if not in a transaction
         if let Err(ref e) = result
@@ -748,15 +785,21 @@ impl Client {
             && Self::should_reconnect(e)
             && self.try_reconnect().await
         {
-            return self.query_internal(query, tx_id).await;
+            return self.query_internal(query, &params, tx_id).await;
         }
 
         result
     }
 
-    async fn query_internal(&mut self, query: &str, tx_id: Option<TxId>) -> Result<QueryResult> {
+    async fn query_internal(
+        &mut self,
+        query: &str,
+        params: &Params,
+        tx_id: Option<TxId>,
+    ) -> Result<QueryResult> {
         let request = Request::Query {
             query: query.to_string(),
+            params: params.clone(),
             tx_id,
             session_token: self.session_token.clone(),
         };
@@ -775,6 +818,12 @@ impl Client {
     /// Execute a query without returning results (for CREATE, DELETE, etc.)
     pub async fn execute(&mut self, query: &str) -> Result<()> {
         self.query(query).await?;
+        Ok(())
+    }
+
+    /// Execute a query with `$name` parameters without returning results.
+    pub async fn execute_with_params(&mut self, query: &str, params: Params) -> Result<()> {
+        self.query_with_params(query, params).await?;
         Ok(())
     }
 
@@ -809,6 +858,7 @@ impl Client {
     ) -> Result<StreamingResult<'_>> {
         let request = Request::StreamQuery {
             query: query.to_string(),
+            params: Params::new(),
             tx_id,
             chunk_size: if chunk_size == 0 {
                 DEFAULT_CHUNK_SIZE
@@ -1091,6 +1141,28 @@ pub mod pool {
             self.client.as_mut().unwrap().execute(query).await
         }
 
+        /// Execute a query with `$name` parameters and return the result
+        pub async fn query_with_params(
+            &mut self,
+            query: &str,
+            params: Params,
+        ) -> Result<QueryResult> {
+            self.client
+                .as_mut()
+                .unwrap()
+                .query_with_params(query, params)
+                .await
+        }
+
+        /// Execute a query with `$name` parameters without returning results
+        pub async fn execute_with_params(&mut self, query: &str, params: Params) -> Result<()> {
+            self.client
+                .as_mut()
+                .unwrap()
+                .execute_with_params(query, params)
+                .await
+        }
+
         /// Ping the server
         pub async fn ping(&mut self) -> Result<()> {
             self.client.as_mut().unwrap().ping().await
@@ -1259,6 +1331,18 @@ pub mod sync {
             self.runtime.block_on(self.client.execute(query))
         }
 
+        /// Execute a query with `$name` parameters and return the result
+        pub fn query_with_params(&mut self, query: &str, params: Params) -> Result<QueryResult> {
+            self.runtime
+                .block_on(self.client.query_with_params(query, params))
+        }
+
+        /// Execute a query with `$name` parameters without returning results
+        pub fn execute_with_params(&mut self, query: &str, params: Params) -> Result<()> {
+            self.runtime
+                .block_on(self.client.execute_with_params(query, params))
+        }
+
         /// Execute a query within a transaction without returning results
         pub fn execute_in_tx(&mut self, query: &str, tx_id: TxId) -> Result<()> {
             self.runtime
@@ -1374,6 +1458,7 @@ mod tests {
     fn test_request_serialization() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
+            params: Params::new(),
             tx_id: None,
             session_token: None,
         };
@@ -1385,9 +1470,32 @@ mod tests {
     }
 
     #[test]
+    fn test_request_serialization_with_params() {
+        let request = Request::Query {
+            query: "MATCH (n {name: $name}) RETURN n".to_string(),
+            params: Params::from([("name".to_string(), serde_json::json!("a\"b"))]),
+            tx_id: None,
+            session_token: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["params"], serde_json::json!({"name": "a\"b"}));
+        assert_eq!(json["query"], "MATCH (n {name: $name}) RETURN n");
+
+        // Empty params are omitted, so older servers see the same request.
+        let request = Request::Query {
+            query: "RETURN 1".to_string(),
+            params: Params::new(),
+            tx_id: None,
+            session_token: None,
+        };
+        assert!(!serde_json::to_string(&request).unwrap().contains("params"));
+    }
+
+    #[test]
     fn test_request_serialization_with_tx_id() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
+            params: Params::new(),
             tx_id: Some(42),
             session_token: None,
         };
@@ -1605,6 +1713,7 @@ mod tests {
     fn test_stream_query_request_serialization() {
         let request = Request::StreamQuery {
             query: "MATCH (n) RETURN n".to_string(),
+            params: Params::new(),
             tx_id: None,
             chunk_size: 100,
             session_token: None,
@@ -1683,6 +1792,7 @@ mod tests {
     fn test_query_with_session_token_serialization() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
+            params: Params::new(),
             tx_id: None,
             session_token: Some("abc-xyz".to_string()),
         };
@@ -1694,6 +1804,7 @@ mod tests {
     fn test_query_without_session_token_omits_field() {
         let request = Request::Query {
             query: "MATCH (n) RETURN n".to_string(),
+            params: Params::new(),
             tx_id: None,
             session_token: None,
         };

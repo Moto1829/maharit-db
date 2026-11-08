@@ -1688,6 +1688,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Test {name: 'Alice'}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1703,6 +1704,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Test) RETURN n.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1740,6 +1742,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Prop {s: 'hello', i: 99, b: true}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1755,6 +1758,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Prop) RETURN n.s".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1773,6 +1777,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Prop) RETURN n.i".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1808,6 +1813,7 @@ mod tests {
                 &mut lconn,
                 &Request::Query {
                     query: q.to_string(),
+                    params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
                 },
@@ -1823,6 +1829,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (a:Src)-[:LINK]->(b:Dst) RETURN b.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1854,6 +1861,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "CREATE (n:Del {name: 'gone'}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1865,6 +1873,7 @@ mod tests {
             &mut lconn,
             &Request::Query {
                 query: "MATCH (n:Del {name: 'gone'}) DETACH DELETE n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -1879,6 +1888,7 @@ mod tests {
             &mut fconn,
             &Request::Query {
                 query: "MATCH (n:Del) RETURN n.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },

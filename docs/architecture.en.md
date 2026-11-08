@@ -109,7 +109,7 @@ Provides clients for connecting to the server.
 - **Async client**: `Client` (tokio-based)
 - **Sync client**: `SyncClient` (wraps the async runtime)
 - **Connection pool**: reuses and manages connections
-- **Query execution**: `query` (receive results) / `execute` (discard results). The TCP protocol cannot send query parameters yet
+- **Query execution**: `query` (receive results) / `execute` (discard results), and `query_with_params` / `execute_with_params` with parameters
 
 ### maharit-io
 

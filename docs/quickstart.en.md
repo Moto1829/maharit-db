@@ -188,8 +188,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-!!! warning "Query parameters"
-    The Cypher `$param` syntax works in the embedded executor (`maharit-query`), but the current TCP protocol and clients cannot send parameters. When you include user input in a query, escape `"` and `\` in string literals before building the query.
+### Parameterized queries
+
+Pass values such as user input as parameters (`$name`) instead of embedding them in the query string. The values are sent separately from the query and are never parsed as Cypher, which prevents injection.
+
+```rust
+use maharit_client::Params;
+use serde_json::json;
+
+let params = Params::from([
+    ("name".to_string(), json!("Alice")),
+    ("min_age".to_string(), json!(25)),
+]);
+let result = client
+    .query_with_params(
+        "MATCH (n:Person {name: $name}) WHERE n.age >= $min_age RETURN n.name, n.age",
+        params,
+    )
+    .await?;
+```
+
+See [Parameters ($param syntax)](./cypher/parameters.md) for details.
 
 ## 6. Visualize with the web UI (`maharit-viz`)
 

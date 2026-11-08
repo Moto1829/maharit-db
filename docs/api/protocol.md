@@ -6,195 +6,197 @@ nav_order: 3
 
 # TCP プロトコル仕様
 
-MaharitDB クライアントとサーバー間の通信プロトコルを説明します。このドキュメントは独自クライアントを実装する場合や、低レベルの通信を理解したい場合に参照してください。
+MaharitDB クライアントとサーバー間の通信プロトコルを説明します。独自のクライアントを実装する場合や、低レベルの通信を理解したい場合に参照してください。
+定義の正本は `crates/maharit-server/src/tcp_server.rs` の `Request` / `Response` です。
 
 ## 概要
 
-MaharitDB は TCP ソケット上で独自のバイナリプロトコルを使用します。オプションで TLS による暗号化に対応しています。
+TCP ソケット（オプションで TLS）の上で、長さプレフィックス付きの JSON メッセージをやり取りします。ハンドシェイクはなく、接続直後からリクエストを送れます。
 
-```
-[TCP Connection]
-  ↓
-[TLS Layer（オプション）]
-  ↓
-[MaharitDB Protocol]
-  ├── ハンドシェイク
-  ├── 認証
-  └── クエリ/応答
-```
+- クライアントがリクエストを 1 つ送り、サーバーがレスポンスを返す（ストリーミングクエリだけは複数のレスポンスが続く）
+- 1 つの接続でリクエストを順番に何度でも送れる。応答は送った順に返る
 
 ## メッセージフォーマット
 
-すべてのメッセージは以下の形式です：
+すべてのメッセージ（両方向）は次の形式です。
 
+```text
++---------------------+---------------------+
+| Length (4 bytes)    | Payload (N bytes)   |
++---------------------+---------------------+
+  uint32 big-endian     UTF-8 JSON
 ```
-+------------------+------------------+------------------+
-| Message Type (1) | Payload Len (4)  | Payload (N)      |
-+------------------+------------------+------------------+
-  uint8              uint32 big-endian  JSON or binary
-```
 
-- **Message Type**: メッセージの種類を示す 1 バイトの識別子
-- **Payload Length**: ペイロードのバイト長（ビッグエンディアン 32 ビット整数）
-- **Payload**: メッセージの本体（JSON エンコードまたはバイナリ）
+- **Length**: ペイロードのバイト長（ビッグエンディアン 32 ビット符号なし整数）。上限は 64 MiB（`MAX_MESSAGE_SIZE`）で、超えるとエラーを返す
+- **Payload**: JSON オブジェクト。`type` フィールドでメッセージの種類を表す
 
-## メッセージタイプ
+フィールド名は大文字小文字を区別します。省略可能なフィールドは省略してかまいません。
 
-| 値 | 名前 | 方向 | 説明 |
-|----|------|------|------|
-| `0x01` | `Hello` | Client→Server | ハンドシェイク開始 |
-| `0x02` | `Welcome` | Server→Client | ハンドシェイク応答 |
-| `0x10` | `Auth` | Client→Server | 認証情報送信 |
-| `0x11` | `AuthOk` | Server→Client | 認証成功 |
-| `0x12` | `AuthError` | Server→Client | 認証失敗 |
-| `0x20` | `Query` | Client→Server | クエリ送信 |
-| `0x21` | `QueryResult` | Server→Client | クエリ結果 |
-| `0x22` | `QueryError` | Server→Client | クエリエラー |
-| `0x30` | `Goodbye` | 両方 | 接続終了 |
-| `0xFF` | `Error` | Server→Client | プロトコルエラー |
+## リクエスト（Client→Server）
 
-## ハンドシェイク
+| `type` | 説明 | フィールド |
+|--------|------|-----------|
+| `query` | クエリを実行し、結果をまとめて返す | `query`、`params`?、`txId`?、`sessionToken`? |
+| `streamQuery` | クエリを実行し、結果を分割して返す | `query`、`params`?、`chunkSize`?（既定 100）、`txId`?、`sessionToken`? |
+| `login` | ログインしてセッショントークンを得る | `username`、`password` |
+| `begin` | トランザクションを開始する | `readOnly`?（既定 `false`）、`sessionToken`? |
+| `commit` | トランザクションをコミットする | `txId`、`sessionToken`? |
+| `rollback` | トランザクションをロールバックする | `txId`、`sessionToken`? |
+| `ping` | 死活確認 | なし |
+| `stats` | サーバーの統計を取得する | なし |
+| `disconnect` | 接続を終了する | なし |
 
-### Hello メッセージ（Client→Server）
+`sessionToken` は、サーバーを `--require-auth` で起動したときに必要です（[認証](../operations/auth.md)）。
+
+## レスポンス（Server→Client）
+
+| `type` | 対応するリクエスト | フィールド |
+|--------|-------------------|-----------|
+| `result` | `query` | `rows` |
+| `streamStart` / `streamChunk` / `streamEnd` | `streamQuery` | 下記 |
+| `loggedIn` | `login` | `sessionToken`、`role`、`expiresAt` |
+| `transactionBegun` | `begin` | `txId` |
+| `committed` | `commit` | `txId` |
+| `rolledBack` | `rollback` | `txId` |
+| `pong` | `ping` | なし |
+| `stats` | `stats` | `connections`、`total_queries`、`nodes`、`edges`、`replication`? |
+| `goodbye` | `disconnect`、またはサーバー停止時 | なし |
+| `error` | どれでも | `message` |
+| `authError` | どれでも | `message`（トークンがない・無効・期限切れ、権限不足、ログイン失敗） |
+
+## クエリ
+
+### query
 
 ```json
 {
-  "protocol_version": 1,
-  "client_name": "maharit-client-rust",
-  "client_version": "0.1.0"
+  "type": "query",
+  "query": "MATCH (n:Person {name: $name}) WHERE n.age >= $min_age RETURN n.name AS name, n.age AS age",
+  "params": {"name": "Alice", "min_age": 25}
 }
 ```
-
-### Welcome メッセージ（Server→Client）
 
 ```json
 {
-  "protocol_version": 1,
-  "server_version": "0.1.0",
-  "server_id": "maharit-prod-01",
-  "auth_required": true
+  "type": "result",
+  "rows": [
+    {"name": "Alice", "age": 30}
+  ]
 }
 ```
+
+- `rows` は行の配列で、各行は「列名 → 値」のオブジェクト
+- 値は JSON の型を保つ（文字列・数値・真偽値・`null`・配列・オブジェクト）。ノード、パス、日付・日時・期間は文字列で返る
+- 書き込みクエリは件数を返す（例: `{"created_nodes": 1, "created_edges": 0}`、`{"properties_set": 1}`）
+
+### クエリパラメータ（`params`）
+
+`params` は、クエリ中の `$name` に渡す値のオブジェクトです。値はクエリ文字列とは別に送られ、Cypher として解釈されることはありません。**利用者の入力は、クエリ文字列に埋め込まずに `params` で渡してください。**
+
+| JSON | Cypher の型 |
+|------|------------|
+| `null` | null |
+| `true` / `false` | Boolean |
+| 整数（i64 に収まる数） | Integer |
+| それ以外の数 | Float |
+| 文字列 | String |
+| 配列 | List |
+| オブジェクト | Map |
+
+クエリが参照しているパラメータが `params` にないと `error` になります（`null` 扱いにはなりません）。`params` を省略した場合や空オブジェクトの場合は、パラメータなしで実行します。
+使い方の詳細は [パラメータ（$param 構文）](../cypher/parameters.md) を参照してください。
+
+### streamQuery
+
+```json
+{"type": "streamQuery", "query": "MATCH (n:Person) RETURN n.name AS name", "chunkSize": 2}
+```
+
+サーバーは次の順にレスポンスを送ります。
+
+```json
+{"type": "streamStart", "streamId": 0, "totalRows": 3}
+{"type": "streamChunk", "streamId": 0, "chunkIndex": 0, "rows": [{"name": "Alice"}, {"name": "Bob"}]}
+{"type": "streamChunk", "streamId": 0, "chunkIndex": 1, "rows": [{"name": "Charlie"}]}
+{"type": "streamEnd", "streamId": 0, "totalRows": 3}
+```
+
+クエリが失敗した場合は、`streamStart` の代わりに `error` が 1 つ返ります。
 
 ## 認証
 
-### Auth メッセージ（Client→Server）
-
 ```json
-{
-  "username": "alice",
-  "password": "password_hash_or_token"
-}
+{"type": "login", "username": "alice", "password": "secret"}
 ```
 
-### AuthOk メッセージ（Server→Client）
-
 ```json
-{
-  "session_token": "abc123...",
-  "expires_at": "2024-01-02T00:00:00Z",
-  "role": "reader"
-}
+{"type": "loggedIn", "sessionToken": "3f9c…", "role": "read_write", "expiresAt": 1767225600}
 ```
 
-## クエリの送受信
+- `role` は `admin` / `read_write` / `read_only`
+- `expiresAt` はセッションの有効期限（Unix エポック秒）
+- 以降のリクエストに `"sessionToken": "3f9c…"` を付ける
 
-### Query メッセージ（Client→Server）
-
-```json
-{
-  "query_id": "q-12345",
-  "statement": "MATCH (n:Person {name: $name}) RETURN n",
-  "params": {
-    "name": "Alice"
-  }
-}
-```
-
-- `query_id`: クライアントが生成する一意な識別子（応答の対応付けに使用）
-
-### QueryResult メッセージ（Server→Client）
+## トランザクション
 
 ```json
-{
-  "query_id": "q-12345",
-  "columns": ["n"],
-  "rows": [
-    [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice", "age": 30}}]
-  ],
-  "stats": {
-    "nodes_created": 0,
-    "nodes_deleted": 0,
-    "edges_created": 0,
-    "properties_set": 0,
-    "execution_time_ms": 2
-  }
-}
+{"type": "begin"}
+{"type": "query", "query": "CREATE (:Item {id: $id})", "params": {"id": 1}, "txId": 7}
+{"type": "commit", "txId": 7}
 ```
 
-### QueryError メッセージ（Server→Client）
+`begin` への応答 `{"type": "transactionBegun", "txId": 7}` の `txId` を、`query` と `commit` / `rollback` に付けます。
+
+## エラー
 
 ```json
-{
-  "query_id": "q-12345",
-  "error_code": "PARSE_ERROR",
-  "message": "Unexpected token 'FORM' at line 1, column 7",
-  "details": {
-    "line": 1,
-    "column": 7,
-    "token": "FORM"
-  }
-}
+{"type": "error", "message": "Parse error: …"}
 ```
 
-## エラーコード
+`message` は人が読むための文字列で、次のような接頭辞が付きます。
 
-| コード | 説明 |
+| 接頭辞 | 意味 |
 |--------|------|
-| `PARSE_ERROR` | クエリの構文エラー |
-| `EXECUTION_ERROR` | クエリ実行エラー |
-| `CONSTRAINT_VIOLATION` | 制約違反 |
-| `AUTH_REQUIRED` | 認証が必要 |
-| `PERMISSION_DENIED` | 権限なし |
-| `TIMEOUT` | クエリタイムアウト |
-| `INTERNAL_ERROR` | サーバー内部エラー |
+| `Invalid request:` | JSON として読めない、`type` が不明、必須フィールドがない |
+| `Parse error:` | クエリの構文エラー |
+| `Execution error:` | 実行時エラー（制約違反、型エラー、未定義のパラメータなど） |
+
+エラーを返したあとも接続はそのまま使えます。
 
 ## 接続の終了
 
-```json
-// Goodbye メッセージ（どちらからでも送信可能）
-{
-  "reason": "client_disconnect"
-}
-```
+クライアントは `{"type": "disconnect"}` を送ります。サーバーは `{"type": "goodbye"}` を返して接続を閉じます。サーバーの停止時にも、サーバーから `goodbye` が送られます。
 
 ## 実装例
 
-```rust
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+Python（標準ライブラリのみ）:
 
-async fn send_message(
-    stream: &mut TcpStream,
-    msg_type: u8,
-    payload: &[u8],
-) -> Result<(), std::io::Error> {
-    // メッセージタイプ
-    stream.write_u8(msg_type).await?;
-    // ペイロード長（ビッグエンディアン）
-    stream.write_u32(payload.len() as u32).await?;
-    // ペイロード
-    stream.write_all(payload).await?;
-    Ok(())
-}
+```python
+import json
+import socket
+import struct
 
-async fn recv_message(
-    stream: &mut TcpStream,
-) -> Result<(u8, Vec<u8>), std::io::Error> {
-    let msg_type = stream.read_u8().await?;
-    let len = stream.read_u32().await? as usize;
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).await?;
-    Ok((msg_type, payload))
-}
+def send(sock, msg):
+    body = json.dumps(msg).encode("utf-8")
+    sock.sendall(struct.pack(">I", len(body)) + body)
+
+def recv(sock):
+    def read_exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("connection closed")
+            buf += chunk
+        return buf
+    (length,) = struct.unpack(">I", read_exact(4))
+    return json.loads(read_exact(length))
+
+with socket.create_connection(("127.0.0.1", 7687)) as sock:
+    send(sock, {
+        "type": "query",
+        "query": "MATCH (n:Person {name: $name}) RETURN n.age AS age",
+        "params": {"name": "Alice"},
+    })
+    print(recv(sock))  # {'type': 'result', 'rows': [{'age': 30}]}
 ```

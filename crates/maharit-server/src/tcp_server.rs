@@ -16,7 +16,7 @@ use bytes::{Buf, BytesMut};
 use maharit_core::{
     ConcurrentGraph, ConstraintManager, FulltextManager, GraphBackend, PropertyIndex,
 };
-use maharit_query::{AstCache, Executor, Parser, is_read_only};
+use maharit_query::{AstCache, Executor, Parser, Value, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -285,6 +285,9 @@ pub enum Request {
     #[serde(rename = "query")]
     Query {
         query: String,
+        /// Optional query parameters, referenced as `$name` in the query.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        params: HashMap<String, serde_json::Value>,
         /// Optional transaction ID for executing within a transaction
         #[serde(rename = "txId")]
         tx_id: Option<u64>,
@@ -297,6 +300,9 @@ pub enum Request {
     #[serde(rename = "streamQuery")]
     StreamQuery {
         query: String,
+        /// Optional query parameters, referenced as `$name` in the query.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        params: HashMap<String, serde_json::Value>,
         /// Optional transaction ID for executing within a transaction
         #[serde(rename = "txId")]
         tx_id: Option<u64>,
@@ -567,6 +573,7 @@ impl SharedManagers {
     /// with `record_wal`, the returned log holds every graph mutation in
     /// execution order (also when the statement fails midway, since the graph
     /// is not rolled back and followers must see the same state).
+    #[cfg(test)]
     fn execute(
         &self,
         graph: &ConcurrentGraph,
@@ -577,7 +584,22 @@ impl SharedManagers {
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
-        let (result, wal, _) = self.run(graph, stmt, is_write, record_wal, false);
+        self.execute_with_params(graph, stmt, HashMap::new(), is_write, record_wal)
+    }
+
+    /// [`execute`](Self::execute) with `$name` query parameters.
+    fn execute_with_params(
+        &self,
+        graph: &ConcurrentGraph,
+        stmt: maharit_query::ast::Statement,
+        params: HashMap<String, Value>,
+        is_write: bool,
+        record_wal: bool,
+    ) -> (
+        Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
+        Vec<WalEntryData>,
+    ) {
+        let (result, wal, _) = self.run(graph, stmt, params, is_write, record_wal, false);
         (result, wal)
     }
 
@@ -589,19 +611,21 @@ impl SharedManagers {
         &self,
         graph: &ConcurrentGraph,
         stmt: maharit_query::ast::Statement,
+        params: HashMap<String, Value>,
         record_wal: bool,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
         Vec<UndoRecord>,
     ) {
-        self.run(graph, stmt, true, record_wal, true)
+        self.run(graph, stmt, params, true, record_wal, true)
     }
 
     fn run(
         &self,
         graph: &ConcurrentGraph,
         stmt: maharit_query::ast::Statement,
+        params: HashMap<String, Value>,
         is_write: bool,
         record_wal: bool,
         capture_undo: bool,
@@ -626,7 +650,7 @@ impl SharedManagers {
             }
             let result =
                 Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
-                    .execute(stmt);
+                    .execute_with_params(stmt, params);
             let (wal, undo) = recorder.into_parts();
             (result, wal, undo)
         } else {
@@ -639,7 +663,11 @@ impl SharedManagers {
             // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
             // executor uses the raw pointer only during this synchronous call.
             let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) };
-            (executor.execute(stmt), Vec::new(), Vec::new())
+            (
+                executor.execute_with_params(stmt, params),
+                Vec::new(),
+                Vec::new(),
+            )
         }
     }
 
@@ -961,6 +989,7 @@ async fn handle_connection(
             }
             Request::Query {
                 query,
+                params,
                 tx_id,
                 session_token,
             } => match check_session(config.require_auth, &auth, &session_token) {
@@ -981,11 +1010,13 @@ async fn handle_connection(
                         let span = tracing::info_span!("query", query = %query);
                         let _enter = span.enter();
                         let start = std::time::Instant::now();
+                        let params = params_from_json(&params);
                         let resp = match tx_id {
                             Some(id) => {
                                 execute_query_with_tx(
                                     &graph,
                                     &query,
+                                    params,
                                     id,
                                     &tx_manager,
                                     &managers,
@@ -998,6 +1029,7 @@ async fn handle_connection(
                                 execute_query(
                                     &graph,
                                     &query,
+                                    params,
                                     &managers,
                                     replication.as_deref(),
                                     &ast_cache,
@@ -1015,6 +1047,7 @@ async fn handle_connection(
             },
             Request::StreamQuery {
                 query,
+                params,
                 tx_id: _,
                 chunk_size,
                 session_token,
@@ -1032,6 +1065,7 @@ async fn handle_connection(
                         &graph,
                         &stats,
                         &query,
+                        params_from_json(&params),
                         chunk_size,
                         config.write_timeout,
                         &managers,
@@ -1224,6 +1258,7 @@ async fn execute_streaming_query(
     graph: &Arc<ConcurrentGraph>,
     stats: &Arc<ServerStats>,
     query: &str,
+    params: HashMap<String, Value>,
     chunk_size: usize,
     write_timeout: Duration,
     managers: &SharedManagers,
@@ -1252,7 +1287,8 @@ async fn execute_streaming_query(
         None
     };
 
-    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    let (exec_result, wal) =
+        managers.execute_with_params(graph, stmt, params, is_write, replication.is_some());
     if let Some(repl) = replication {
         emit_wal_entries(wal, repl).await;
     }
@@ -1318,6 +1354,14 @@ async fn execute_streaming_query(
     Ok(())
 }
 
+/// Convert the JSON `params` of a request to executor values.
+fn params_from_json(params: &HashMap<String, serde_json::Value>) -> HashMap<String, Value> {
+    params
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::from_json(v)))
+        .collect()
+}
+
 // ── Transaction-aware query execution ────────────────────────────────────────
 
 /// Execute a write query within a transaction: execute → record undo log → replicate.
@@ -1325,6 +1369,7 @@ async fn execute_streaming_query(
 async fn execute_query_with_tx(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
+    params: HashMap<String, Value>,
     tx_id: u64,
     tx_manager: &TransactionManager,
     managers: &SharedManagers,
@@ -1343,7 +1388,7 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, managers, replication, ast_cache).await;
+        return execute_query(graph, query, params, managers, replication, ast_cache).await;
     }
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
@@ -1357,7 +1402,8 @@ async fn execute_query_with_tx(
         };
     }
 
-    let (exec_result, wal, undo) = managers.execute_in_tx(graph, stmt, replication.is_some());
+    let (exec_result, wal, undo) =
+        managers.execute_in_tx(graph, stmt, params, replication.is_some());
     // Record undo even when the statement failed midway: its partial changes
     // were applied and must be reverted by ROLLBACK.
     if let Err(e) = tx_manager.record_undo(tx_id, undo) {
@@ -1396,6 +1442,7 @@ async fn execute_query_with_tx(
 async fn execute_query(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
+    params: HashMap<String, Value>,
     managers: &SharedManagers,
     replication: Option<&LeaderReplicationManager>,
     ast_cache: &Arc<Mutex<AstCache>>,
@@ -1419,7 +1466,8 @@ async fn execute_query(
         None
     };
 
-    let (exec_result, wal) = managers.execute(graph, stmt, is_write, replication.is_some());
+    let (exec_result, wal) =
+        managers.execute_with_params(graph, stmt, params, is_write, replication.is_some());
     if let Some(repl) = replication {
         emit_wal_entries(wal, repl).await;
     }
@@ -1605,6 +1653,7 @@ mod tests {
                 query,
                 tx_id,
                 session_token,
+                ..
             } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert!(tx_id.is_none());
@@ -1751,6 +1800,7 @@ mod tests {
                 tx_id,
                 chunk_size,
                 session_token: None,
+                ..
             } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert!(tx_id.is_none());
@@ -1954,6 +2004,7 @@ mod tests {
 
         let q = |s: &str| Request::Query {
             query: s.to_string(),
+            params: HashMap::new(),
             tx_id: None,
             session_token: None,
         };
@@ -2011,6 +2062,7 @@ mod tests {
             stream,
             &Request::Query {
                 query: q.to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2101,6 +2153,7 @@ mod tests {
             stream,
             &Request::Query {
                 query: q.to_string(),
+                params: HashMap::new(),
                 tx_id: Some(tx_id),
                 session_token: None,
             },
@@ -2305,6 +2358,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (:Widget {id: 1})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2314,6 +2368,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE INDEX ON :Widget(id)".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2327,6 +2382,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "SHOW INDEXES".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2349,6 +2405,7 @@ mod tests {
 
         let read = Request::Query {
             query: "MATCH (n:Widget) RETURN n.id".to_string(),
+            params: HashMap::new(),
             tx_id: None,
             session_token: None,
         };
@@ -2366,6 +2423,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Widget {id: 1})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2393,6 +2451,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2409,6 +2468,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Person {name: 'Alice'}) RETURN n.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2437,6 +2497,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:Item {s: 'hello', i: 42, f: 3.14, b: true}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2459,6 +2520,7 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("MATCH (n:Item) RETURN {}", col),
+                    params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
                 },
@@ -2478,6 +2540,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Item) RETURN n.f".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2507,6 +2570,7 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: q.to_string(),
+                    params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
                 },
@@ -2525,6 +2589,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (a:A)-[:LINK]->(b:B) RETURN b.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2548,6 +2613,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "THIS IS NOT VALID CYPHER !!!".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2587,6 +2653,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (n:TmpNode {name: 'delete_me'})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2598,6 +2665,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) DETACH DELETE n".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2614,6 +2682,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:TmpNode {name: 'delete_me'}) RETURN n.name".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2661,6 +2730,7 @@ mod tests {
                         &mut stream,
                         &Request::Query {
                             query: format!("CREATE (n:ConcWrite {{id: {i}}}) RETURN n"),
+                            params: HashMap::new(),
                             tx_id: None,
                             session_token: None,
                         },
@@ -2684,6 +2754,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:ConcWrite) RETURN n.id".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2713,6 +2784,7 @@ mod tests {
             &mut setup,
             &Request::Query {
                 query: "CREATE (n:ReadTarget {val: 1})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2729,6 +2801,7 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: format!("CREATE (n:RWWrite {{id: {i}}}) RETURN n"),
+                        params: HashMap::new(),
                         tx_id: None,
                         session_token: None,
                     },
@@ -2749,6 +2822,7 @@ mod tests {
                     &mut stream,
                     &Request::Query {
                         query: "MATCH (n:ReadTarget) RETURN n.val".to_string(),
+                        params: HashMap::new(),
                         tx_id: None,
                         session_token: None,
                     },
@@ -2850,6 +2924,7 @@ mod tests {
             &mut client_a,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'A'}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: Some(tx_a),
                 session_token: None,
             },
@@ -2865,6 +2940,7 @@ mod tests {
             &mut client_b,
             &Request::Query {
                 query: "CREATE (n:TxIsolate {owner: 'B'}) RETURN n".to_string(),
+                params: HashMap::new(),
                 tx_id: Some(tx_b),
                 session_token: None,
             },
@@ -2909,6 +2985,7 @@ mod tests {
             &mut checker,
             &Request::Query {
                 query: "MATCH (n:TxIsolate) RETURN n.owner".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2945,6 +3022,7 @@ mod tests {
                 &mut stream,
                 &Request::Query {
                     query: format!("CREATE (n:Pipeline {{idx: {}}}) RETURN n", i),
+                    params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
                 },
@@ -2963,6 +3041,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline) RETURN n.idx".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2984,6 +3063,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "MATCH (n:Pipeline {idx: 5}) RETURN n.idx".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -2998,6 +3078,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_request_params_deserialization() {
+        let json = r#"{"type": "query", "query": "RETURN $x", "params": {"x": 1, "s": "a\"b", "l": [1.5, null], "m": {"k": true}}}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Request::Query { params, .. } = request else {
+            panic!("expected Query");
+        };
+        let params = params_from_json(&params);
+        assert_eq!(params["x"], Value::Int(1));
+        assert_eq!(params["s"], Value::String("a\"b".to_string()));
+        assert_eq!(
+            params["l"],
+            Value::List(vec![Value::Float(1.5), Value::Null])
+        );
+        assert_eq!(
+            params["m"],
+            Value::Map(HashMap::from([("k".to_string(), Value::Bool(true))]))
+        );
+
+        // Omitted params default to empty and are not serialized.
+        let request: Request =
+            serde_json::from_str(r#"{"type": "query", "query": "RETURN 1"}"#).unwrap();
+        let out = serde_json::to_string(&request).unwrap();
+        assert!(!out.contains("params"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn test_query_params_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let q = |query: &str, params: serde_json::Value, tx_id: Option<u64>| Request::Query {
+            query: query.to_string(),
+            params: serde_json::from_value(params).unwrap(),
+            tx_id,
+            session_token: None,
+        };
+
+        // A value containing quotes is data, not query text.
+        let evil = "x\"}) DETACH DELETE n //";
+        let resp = send_recv(
+            &mut stream,
+            &q(
+                "CREATE (:P {name: $name, age: $age})",
+                serde_json::json!({"name": evil, "age": 30}),
+                None,
+            ),
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "{resp:?}");
+
+        let resp = send_recv(
+            &mut stream,
+            &q(
+                "MATCH (n:P) WHERE n.name = $name AND n.age >= $min RETURN n.name AS name, n.age AS age",
+                serde_json::json!({"name": evil, "min": 18}),
+                None,
+            ),
+        )
+        .await;
+        let Response::Result { rows } = resp else {
+            panic!("expected Result, got {resp:?}");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], serde_json::json!(evil));
+        assert_eq!(rows[0]["age"], serde_json::json!(30));
+
+        // Inside a transaction.
+        let Response::TransactionBegun { tx_id } = send_recv(
+            &mut stream,
+            &Request::BeginTransaction {
+                read_only: false,
+                session_token: None,
+            },
+        )
+        .await
+        else {
+            panic!("begin failed");
+        };
+        let resp = send_recv(
+            &mut stream,
+            &q(
+                "MATCH (n:P) SET n.age = $age",
+                serde_json::json!({"age": 31}),
+                Some(tx_id),
+            ),
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "{resp:?}");
+
+        // A missing parameter is an error, not null.
+        let resp = send_recv(
+            &mut stream,
+            &q("RETURN $missing AS v", serde_json::json!({}), None),
+        )
+        .await;
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+    }
+
     #[tokio::test]
     async fn test_constraint_persists_across_queries() {
         // 制約が複数クエリをまたいで永続化されることを確認する
@@ -3010,6 +3188,7 @@ mod tests {
             &Request::Query {
                 query: "CREATE CONSTRAINT unique_test_id FOR (n:TestItem) REQUIRE n.id IS UNIQUE"
                     .to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -3026,6 +3205,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -3042,6 +3222,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE (:TestItem {id: 'item-1'})".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -3058,6 +3239,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "SHOW CONSTRAINTS".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -3085,6 +3267,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "CREATE FULLTEXT INDEX ft_test_body FOR (a:Article) ON (a.body)".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },
@@ -3101,6 +3284,7 @@ mod tests {
             &mut stream,
             &Request::Query {
                 query: "DROP FULLTEXT INDEX ft_test_body".to_string(),
+                params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
             },

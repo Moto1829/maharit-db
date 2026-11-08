@@ -38,6 +38,30 @@ with Client.connect("localhost:7687") as client:
     print(df)
 ```
 
+### パラメータ付きクエリ
+
+利用者の入力などの値は、クエリ文字列に埋め込まず（f-string や `%` で組み立てず）、`$name` で参照して `params` に渡してください。値はクエリとは別に送られ、Cypher として解釈されません。
+
+```python
+with Client.connect("localhost:7687") as client:
+    client.execute(
+        "CREATE (n:Person {name: $name, age: $age})",
+        {"name": user_input, "age": 30},
+    )
+    result = client.query(
+        "MATCH (n:Person) WHERE n.name IN $names RETURN n.name, n.age",
+        {"names": ["Alice", "Bob"]},
+    )
+
+    # query_with_params(query, params) も同じ動作
+    result = client.query_with_params(
+        "MATCH (n:Person {name: $name}) RETURN n.age", {"name": "Alice"}
+    )
+```
+
+!!! warning "0.2 以前の `query_with_params`"
+    以前の `query_with_params` はサーバーにパラメータを送らず、値をエスケープせずにクエリ文字列へ埋め込んでいました（引用符を含む値でクエリを書き換えられる）。サーバーとクライアントの両方を更新してください。
+
 ## 非同期 API
 
 `AsyncClient` クラスは asyncio ベースの非同期クライアントです。
@@ -128,9 +152,10 @@ with Client.connect("localhost:7687") as client:
 | メソッド | 説明 |
 |--------|------|
 | `Client.connect(address, timeout=30.0)` | サーバーに接続 |
-| `client.execute(query)` | Cypher クエリを実行 |
-| `client.query(query)` | `execute` のエイリアス |
-| `client.stream(query, chunk_size=100)` | 結果を 1 行ずつストリーム |
+| `client.execute(query, params=None)` | Cypher クエリを実行（`params` は `$name` に渡す値の dict） |
+| `client.query(query, params=None)` | `execute` のエイリアス |
+| `client.query_with_params(query, params)` | `execute(query, params)` と同じ |
+| `client.stream(query, chunk_size=100, params=None)` | 結果を 1 行ずつストリーム |
 | `client.begin_transaction(read_only=False)` | トランザクション開始 |
 | `client.transaction()` | トランザクション用コンテキストマネージャー |
 | `client.ping()` | サーバーの疎通確認 |
@@ -155,7 +180,7 @@ with Client.connect("localhost:7687") as client:
 
 | メソッド | 説明 |
 |--------|------|
-| `tx.execute(query)` | トランザクション内でクエリ実行 |
+| `tx.execute(query, params=None)` | トランザクション内でクエリ実行 |
 | `tx.commit()` | コミット |
 | `tx.rollback()` | ロールバック |
 

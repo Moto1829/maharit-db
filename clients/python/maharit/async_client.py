@@ -69,11 +69,15 @@ class AsyncTransaction:
     def tx_id(self) -> int:
         return self._tx_id
 
-    async def execute(self, query: str) -> AsyncQueryResult:
+    async def execute(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> AsyncQueryResult:
         """Execute a query within this transaction."""
         if self._closed:
             raise TransactionError("Transaction is already closed")
-        return await self._client._execute_query(query, tx_id=self._tx_id)
+        return await self._client._execute_query(
+            query, params=params, tx_id=self._tx_id
+        )
 
     async def commit(self) -> None:
         """Commit the transaction."""
@@ -186,9 +190,14 @@ class AsyncClient:
         return response.get("type") == "pong"
 
     async def _execute_query(
-        self, query: str, tx_id: Optional[int] = None
+        self,
+        query: str,
+        params: Optional[Dict[str, Any]] = None,
+        tx_id: Optional[int] = None,
     ) -> AsyncQueryResult:
         payload: dict = {"type": "query", "query": query}
+        if params:
+            payload["params"] = params
         if tx_id is not None:
             payload["txId"] = tx_id
         await self._send(payload)
@@ -199,16 +208,33 @@ class AsyncClient:
             raise QueryError(f"Unexpected response type: {response.get('type')}")
         return AsyncQueryResult(response.get("rows", []))
 
-    async def execute(self, query: str) -> AsyncQueryResult:
-        """Execute a Cypher query."""
-        return await self._execute_query(query)
+    async def execute(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> AsyncQueryResult:
+        """Execute a Cypher query.
 
-    async def query(self, query: str) -> AsyncQueryResult:
+        ``params`` supplies values for ``$name`` placeholders. They are sent
+        separately from the query text and never parsed as Cypher.
+        """
+        return await self._execute_query(query, params=params)
+
+    async def query(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> AsyncQueryResult:
         """Alias for :meth:`execute`."""
-        return await self.execute(query)
+        return await self.execute(query, params)
+
+    async def query_with_params(
+        self, query: str, params: Dict[str, Any]
+    ) -> AsyncQueryResult:
+        """Execute a query with named parameters (same as ``execute(query, params)``)."""
+        return await self._execute_query(query, params=params)
 
     async def stream(
-        self, query: str, chunk_size: int = 100
+        self,
+        query: str,
+        chunk_size: int = 100,
+        params: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, str]]:
         """Stream query results asynchronously.
 
@@ -217,7 +243,10 @@ class AsyncClient:
             async for row in client.stream("MATCH (n) RETURN n"):
                 print(row)
         """
-        await self._send({"type": "streamQuery", "query": query, "chunkSize": chunk_size})
+        payload: dict = {"type": "streamQuery", "query": query, "chunkSize": chunk_size}
+        if params:
+            payload["params"] = params
+        await self._send(payload)
 
         start = await self._recv()
         if start.get("type") == "error":

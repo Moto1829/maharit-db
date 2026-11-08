@@ -187,8 +187,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-!!! warning "クエリパラメータ"
-    Cypher の `$param` 構文は組み込みの実行器（`maharit-query`）では使えますが、現在の TCP プロトコルとクライアントはパラメータを送れません。利用者の入力をクエリに含めるときは、文字列リテラルの `"` と `\` をエスケープしてから組み立ててください。
+### パラメータ付きクエリ
+
+利用者の入力などの値は、クエリ文字列に埋め込まずにパラメータ（`$name`）で渡してください。値はクエリとは別に送られ、Cypher として解釈されないので、インジェクションを防げます。
+
+```rust
+use maharit_client::Params;
+use serde_json::json;
+
+let params = Params::from([
+    ("name".to_string(), json!("Alice")),
+    ("min_age".to_string(), json!(25)),
+]);
+let result = client
+    .query_with_params(
+        "MATCH (n:Person {name: $name}) WHERE n.age >= $min_age RETURN n.name, n.age",
+        params,
+    )
+    .await?;
+```
+
+詳細は [パラメータ（$param 構文）](./cypher/parameters.md) を参照してください。
 
 ## 6. Web UI (`maharit-viz`) で可視化する
 

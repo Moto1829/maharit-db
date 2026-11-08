@@ -57,11 +57,18 @@ class Transaction:
     def tx_id(self) -> int:
         return self._tx_id
 
-    def execute(self, query: str) -> QueryResult:
-        """Execute a query within this transaction."""
+    def execute(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> QueryResult:
+        """Execute a query within this transaction.
+
+        Args:
+            query: Cypher query string, optionally with ``$name`` placeholders.
+            params: Values for the placeholders (sent separately from the query).
+        """
         if self._closed:
             raise TransactionError("Transaction is already closed")
-        return self._client._execute_query(query, tx_id=self._tx_id)
+        return self._client._execute_query(query, params=params, tx_id=self._tx_id)
 
     def commit(self) -> None:
         """Commit the transaction."""
@@ -208,8 +215,15 @@ class Client:
         response = self._recv()
         return response.get("type") == "pong"
 
-    def _execute_query(self, query: str, tx_id: Optional[int] = None) -> QueryResult:
+    def _execute_query(
+        self,
+        query: str,
+        params: Optional[Dict[str, Any]] = None,
+        tx_id: Optional[int] = None,
+    ) -> QueryResult:
         payload: dict = {"type": "query", "query": query}
+        if params:
+            payload["params"] = params
         if tx_id is not None:
             payload["txId"] = tx_id
         self._send(payload)
@@ -220,27 +234,34 @@ class Client:
             raise QueryError(f"Unexpected response type: {response.get('type')}")
         return QueryResult(response.get("rows", []))
 
-    def execute(self, query: str) -> QueryResult:
+    def execute(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> QueryResult:
         """Execute a Cypher query and return all results.
 
         Args:
-            query: Cypher query string.
+            query: Cypher query string, optionally with ``$name`` placeholders.
+            params: Values for the placeholders. They are sent separately from
+                the query text and never parsed as Cypher, so pass user input
+                here instead of formatting it into the query.
 
         Returns:
             :class:`QueryResult` containing all result rows.
         """
-        return self._execute_query(query)
+        return self._execute_query(query, params=params)
 
-    def query(self, query: str) -> QueryResult:
+    def query(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> QueryResult:
         """Alias for :meth:`execute`."""
-        return self.execute(query)
+        return self.execute(query, params)
 
     def query_with_params(self, query: str, params: Dict[str, Any]) -> QueryResult:
         """Execute a query with named parameters.
 
-        Parameters are sent as part of the query string using ``$name`` syntax.
-        This method substitutes them on the client side for server versions that
-        support the ``$param`` syntax.
+        Equivalent to ``execute(query, params)``. Values are sent in the
+        request's ``params`` field and bound to ``$name`` placeholders by the
+        server; they are never inserted into the query text.
 
         Args:
             query: Cypher query string with ``$name`` placeholders.
@@ -249,26 +270,14 @@ class Client:
         Returns:
             :class:`QueryResult` containing all result rows.
         """
-        # Build parameter fragment and prepend to query
-        # e.g. WITH $name AS name, $age AS age
-        if params:
-            param_parts = []
-            for key, value in params.items():
-                if isinstance(value, str):
-                    param_parts.append(f'"{value}" AS {key}')
-                elif isinstance(value, bool):
-                    param_parts.append(f'{"true" if value else "false"} AS {key}')
-                elif value is None:
-                    param_parts.append(f'null AS {key}')
-                else:
-                    param_parts.append(f'{value} AS {key}')
-            prefix = "WITH " + ", ".join(param_parts) + " "
-            full_query = prefix + query
-        else:
-            full_query = query
-        return self._execute_query(full_query)
+        return self._execute_query(query, params=params)
 
-    def stream(self, query: str, chunk_size: int = 100) -> Iterator[Dict[str, str]]:
+    def stream(
+        self,
+        query: str,
+        chunk_size: int = 100,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[Dict[str, str]]:
         """Stream query results row by row.
 
         Useful for large result sets that don't fit in memory.
@@ -276,11 +285,15 @@ class Client:
         Args:
             query: Cypher query string.
             chunk_size: Number of rows per server chunk.
+            params: Values for ``$name`` placeholders in the query.
 
         Yields:
             Each result row as a dict.
         """
-        self._send({"type": "streamQuery", "query": query, "chunkSize": chunk_size})
+        payload: dict = {"type": "streamQuery", "query": query, "chunkSize": chunk_size}
+        if params:
+            payload["params"] = params
+        self._send(payload)
 
         # Receive streamStart
         start = self._recv()

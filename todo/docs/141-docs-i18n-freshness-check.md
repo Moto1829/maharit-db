@@ -9,7 +9,7 @@
 ## 作業内容
 - [ ] `scripts/check_docs_i18n.py` を作成する
   - `docs/**/*.en.md` ごとに、front matter の `source_commit` と、対応する日本語ファイルの最新コミット（`git log -1 --format=%H -- <ja>`）を比べる
-  - 日本語側に `source_commit` より新しいコミットがあれば「古い」と判定し、`git diff <source_commit>..HEAD -- <ja>` の変更行数を表示する
+  - 日本語側に `source_commit` より新しいコミットがあれば「古い」と判定し（ただし同じコミットで `.en.md` も変更しているものは反映済みとして除く。日英を同時に直したコミットは自分のハッシュを `source_commit` に書けないため）、`git diff <source_commit>..HEAD -- <ja>` の変更行数を表示する
   - `source_commit` が無い・不正な場合はエラーにする
   - 英語版がない日本語ページの一覧（翻訳率）も出す
 - [ ] `.github/workflows/docs.yml`（PR でも動くようにする）または `test.yml` にジョブを追加する

@@ -142,6 +142,41 @@ class TestClientMethods:
         result = client.query("MATCH (n) RETURN n")
         assert list(result) == rows
 
+    def _capture_request(self, call):
+        """Run ``call(client)`` against a fake server and return the request it sent."""
+        server_sock, client_sock = socket.socketpair()
+        seen = []
+
+        def _serve():
+            seen.append(recv_message(server_sock))
+            send_message(server_sock, {"type": "result", "rows": []})
+            server_sock.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        call(_client_with_sock(client_sock))
+        t.join(timeout=5)
+        return seen[0]
+
+    def test_query_with_params_sends_params_field(self):
+        evil = 'x"}) DETACH DELETE n //'
+        req = self._capture_request(
+            lambda c: c.query_with_params(
+                "MATCH (n {name: $name}) RETURN n", {"name": evil, "age": 30}
+            )
+        )
+        # The query text is sent unchanged; values travel separately.
+        assert req["query"] == "MATCH (n {name: $name}) RETURN n"
+        assert req["params"] == {"name": evil, "age": 30}
+
+    def test_execute_with_params(self):
+        req = self._capture_request(lambda c: c.execute("RETURN $x", {"x": [1, 2]}))
+        assert req == {"type": "query", "query": "RETURN $x", "params": {"x": [1, 2]}}
+
+    def test_execute_without_params_omits_field(self):
+        req = self._capture_request(lambda c: c.execute("RETURN 1"))
+        assert "params" not in req
+
     def test_stream(self):
         responses = [
             {"type": "streamStart"},

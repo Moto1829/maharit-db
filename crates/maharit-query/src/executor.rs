@@ -243,6 +243,30 @@ impl Value {
         }
     }
 
+    /// `serde_json::Value` を Cypher 値に変換する（クエリパラメータの受け取り用）。
+    ///
+    /// 整数に収まる数値は `Int`、それ以外の数値は `Float`。配列は `List`、
+    /// オブジェクトは `Map` に再帰的に変換する。
+    pub fn from_json(json: &serde_json::Value) -> Value {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => n.as_f64().map(Value::Float).unwrap_or(Value::Null),
+            },
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Array(items) => {
+                Value::List(items.iter().map(Value::from_json).collect())
+            }
+            serde_json::Value::Object(obj) => Value::Map(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), Value::from_json(v)))
+                    .collect(),
+            ),
+        }
+    }
+
     /// Display と違って文字列値の外側ダブルクォートを付けない文字列化。
     /// JSON 化用途以外でも、ログ・診断メッセージで素のままを欲しい場面で使う。
     pub fn to_string_unquoted(&self) -> String {

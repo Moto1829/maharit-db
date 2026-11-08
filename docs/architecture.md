@@ -108,7 +108,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 - **非同期クライアント**: `Client`（tokio ベース）
 - **同期クライアント**: `SyncClient`（非同期ランタイムをラップ）
 - **コネクションプール**: 接続の再利用と管理
-- **クエリ実行**: `query`（結果を受け取る）/ `execute`（結果を捨てる）。TCP プロトコルはまだクエリパラメータを送れない
+- **クエリ実行**: `query`（結果を受け取る）/ `execute`（結果を捨てる）、パラメータ付きの `query_with_params` / `execute_with_params`
 
 ### maharit-io
 

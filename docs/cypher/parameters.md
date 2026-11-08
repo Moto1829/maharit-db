@@ -65,7 +65,10 @@ RETURN n.name
 
 ## マッププロパティの展開
 
-パラメータとしてマップを渡し、プロパティとして展開できます。
+!!! warning "未対応"
+    `CREATE (n:Person $props)` の形（マップをプロパティとして展開）は、現在パースできません。代わりにプロパティを 1 つずつパラメータで渡すか、`UNWIND [$props] AS p CREATE (n:Person {name: p.name, age: p.age})` のように `UNWIND`（次節）で展開してください（`$props.name` のようにパラメータのキーを直接参照する書き方もまだパースできません）。
+
+パラメータとしてマップを渡し、プロパティとして展開する構文です。
 
 ```cypher
 // マップパラメータでノードを作成
@@ -138,6 +141,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Python クライアントでの使用
+
+```python
+from maharit import Client
+
+with Client.connect("localhost:7687") as client:
+    result = client.query(
+        "MATCH (n:Person {name: $name}) WHERE n.age >= $min_age RETURN n.name, n.age",
+        {"name": "Alice", "min_age": 25},
+    )
+```
+
+TCP で直接送る場合は、`query` リクエストの `params` フィールドに入れます（[TCP プロトコル仕様](../api/protocol.md)）。
+
 ## パラメータの型
 
 パラメータとして渡せる型は次の通りです。
@@ -157,3 +174,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - パラメータ名には英数字とアンダースコアを使用してください
 - プロパティキー（`n.$key` のような形式）はパラメータ化できません
 - ラベル名やリレーションシップ型もパラメータ化できません（クエリの構造はコンパイル時に決定される必要があります）
+- クエリが参照しているパラメータを渡さないとエラーになります（`null` にはなりません）
+- リストやマップの値は `IN $names` や `UNWIND $rows` などで使えますが、現在はプロパティの値として保存できません
