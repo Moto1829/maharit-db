@@ -115,6 +115,7 @@ fn run_server(args: &[String]) {
     let mut tls_cert: Option<String> = None;
     let mut tls_key: Option<String> = None;
     let mut tls_min_version: Option<String> = None;
+    let mut leader_ca: Option<String> = None;
 
     // Sharding options
     let mut shard_mode = false;
@@ -205,6 +206,12 @@ fn run_server(args: &[String]) {
             "--tls-min-version" => {
                 if i + 1 < args.len() {
                     tls_min_version = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--leader-ca" => {
+                if i + 1 < args.len() {
+                    leader_ca = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -435,7 +442,13 @@ fn run_server(args: &[String]) {
                 shared_secret: replication_secret.clone(),
                 ..Default::default()
             };
-            let leader = Arc::new(LeaderReplicationManager::new(repl_config));
+            warn_plaintext_replication(&repl_config.replication_bind_address, tls.is_some());
+            let mut leader = LeaderReplicationManager::new(repl_config);
+            if let Some(t) = tls.clone() {
+                println!("Replication connections use TLS");
+                leader = leader.with_tls(t);
+            }
+            let leader = Arc::new(leader);
             let leader_clone = Arc::clone(&leader);
             let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
                 .with_replication(Arc::clone(&leader));
@@ -484,10 +497,23 @@ fn run_server(args: &[String]) {
             };
             // graph_arc を follower と TcpServer で共有することで、
             // WAL エントリがレプリケートされたデータをクエリから見えるようにする。
-            let follower = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            let leader_tls = resolve_leader_tls(
+                leader_ca.or_else(|| {
+                    std::env::var("MAHARIT_LEADER_CA")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                }),
+                repl_config.leader_address.as_deref().unwrap_or_default(),
+            );
+            let mut follower = FollowerReplicationManager::with_concurrent_graph(
                 repl_config,
                 Arc::clone(&graph_arc),
-            ));
+            );
+            if let Some(t) = leader_tls {
+                println!("Connecting to the leader over TLS");
+                follower = follower.with_leader_tls(t);
+            }
+            let follower = Arc::new(follower);
             let follower_clone = Arc::clone(&follower);
             let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
                 .with_follower(Arc::clone(&follower));
@@ -593,6 +619,53 @@ fn resolve_tls(
         }
         Err(e) => {
             eprintln!("Error: failed to load the TLS certificate/key: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Warn when the leader streams data (and the shared secret) in plaintext to
+/// a network other followers could be eavesdropping on.
+fn warn_plaintext_replication(bind: &str, tls: bool) {
+    if tls || crate::tcp_server::is_loopback_bind(bind) {
+        return;
+    }
+    tracing::warn!(
+        "replication connections are NOT encrypted; use --tls-cert/--tls-key on the leader and --leader-ca on followers"
+    );
+    eprintln!(
+        "WARN: replication on {bind} is NOT encrypted (no --tls-cert/--tls-key): data and the replication secret are sent in plaintext."
+    );
+}
+
+/// Build the TLS settings a follower uses to verify the leader at
+/// `leader_addr`, trusting the CA certificate in `ca_path`. The leader's
+/// certificate must be valid for the host part of `leader_addr`.
+/// Exits when the CA file cannot be loaded.
+fn resolve_leader_tls(
+    ca_path: Option<String>,
+    leader_addr: &str,
+) -> Option<crate::replication::LeaderTls> {
+    let ca_path = ca_path?;
+    let host = leader_addr
+        .rsplit_once(':')
+        .map_or(leader_addr, |(h, _)| h)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let server_name = match rustls::pki_types::ServerName::try_from(host.to_string()) {
+        Ok(name) => name,
+        Err(_) => {
+            eprintln!("Error: cannot verify the leader's certificate for host '{host}'");
+            std::process::exit(1);
+        }
+    };
+    match crate::tls::build_client_config(Some(&ca_path), false) {
+        Ok(client_config) => Some(crate::replication::LeaderTls {
+            client_config,
+            server_name,
+        }),
+        Err(e) => {
+            eprintln!("Error: failed to load --leader-ca {ca_path}: {e}");
             std::process::exit(1);
         }
     }
@@ -1131,6 +1204,9 @@ fn print_server_help() {
         "                                     Both files are re-read within 30 s after they change."
     );
     println!(
+        "                                     On a leader, replication connections use TLS as well."
+    );
+    println!(
         "    --tls-min-version <1.2|1.3>      Minimum TLS version (env: MAHARIT_TLS_MIN_VERSION, default: 1.2)"
     );
     println!(
@@ -1144,6 +1220,9 @@ fn print_server_help() {
         "    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)"
     );
     println!("    --leader-addr <ADDR>             Leader replication address (follower only)");
+    println!(
+        "    --leader-ca <PATH>               CA certificate to verify the leader with; connects over TLS (follower, env: MAHARIT_LEADER_CA)"
+    );
     println!(
         "    --node-id <ID>                   Unique node identifier in the replication cluster (env: MAHARIT_NODE_ID, default: node-1)"
     );

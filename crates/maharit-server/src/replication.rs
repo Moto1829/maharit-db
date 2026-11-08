@@ -4,7 +4,7 @@
 //! - WAL-based replication between leader and follower nodes
 //! - Heartbeat mechanism for detecting leader failure
 //! - Length-prefixed JSON message framing (same as tcp_server.rs)
-//! - Async TCP communication using tokio
+//! - Async TCP communication using tokio, optionally over TLS
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,12 +14,25 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use maharit_core::{ConcurrentGraph, Graph};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 use tokio::time::{interval, timeout};
 
 use crate::mutation_log::{property_value_from_wal_string, property_value_to_wal_string};
+use crate::tls::ReloadableTlsAcceptor;
+
+/// How long a TLS handshake on the replication channel may take.
+const REPLICATION_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// TLS settings a follower uses to connect to (and verify) the leader.
+#[derive(Clone)]
+pub struct LeaderTls {
+    /// Client configuration holding the CA certificates to trust.
+    pub client_config: Arc<rustls::ClientConfig>,
+    /// Name the leader's certificate must be valid for (DNS name or IP).
+    pub server_name: rustls::pki_types::ServerName<'static>,
+}
 
 /// Error types for replication operations
 #[derive(Debug, thiserror::Error)]
@@ -263,6 +276,8 @@ pub struct LeaderReplicationManager {
     wal_subscribers: WalSubscribers,
     /// Optional graph reference for sending full snapshots to new followers.
     graph: Option<Arc<RwLock<Graph>>>,
+    /// When set, followers must connect over TLS.
+    tls: Option<ReloadableTlsAcceptor>,
 }
 
 impl LeaderReplicationManager {
@@ -278,6 +293,7 @@ impl LeaderReplicationManager {
             shutdown: Arc::new(AtomicBool::new(false)),
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: None,
+            tls: None,
         }
     }
 
@@ -290,7 +306,15 @@ impl LeaderReplicationManager {
             shutdown: Arc::new(AtomicBool::new(false)),
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: Some(graph),
+            tls: None,
         }
+    }
+
+    /// Accept follower connections over TLS only. This also keeps the shared
+    /// secret from crossing the network in plaintext.
+    pub fn with_tls(mut self, tls: ReloadableTlsAcceptor) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     /// Append a WAL entry and stream it to every connected follower.
@@ -375,6 +399,7 @@ impl LeaderReplicationManager {
         let shutdown = Arc::clone(&self.shutdown);
         let wal_subscribers = Arc::clone(&self.wal_subscribers);
         let graph = self.graph.clone();
+        let tls = self.tls.clone();
 
         tokio::spawn(async move {
             loop {
@@ -392,19 +417,35 @@ impl LeaderReplicationManager {
                         let shutdown2 = Arc::clone(&shutdown);
                         let wal_subscribers2 = Arc::clone(&wal_subscribers);
                         let graph2 = graph.clone();
+                        let acceptor = tls.as_ref().map(ReloadableTlsAcceptor::acceptor);
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_follower_connection(
-                                socket,
-                                config2,
-                                lsn2,
-                                followers2,
-                                shutdown2,
-                                wal_subscribers2,
-                                graph2,
-                            )
-                            .await
-                            {
+                            let ctx = LeaderConnection {
+                                config: config2,
+                                lsn: lsn2,
+                                followers: followers2,
+                                shutdown: shutdown2,
+                                wal_subscribers: wal_subscribers2,
+                                graph: graph2,
+                            };
+                            let result = match acceptor {
+                                None => handle_follower_connection(socket, ctx).await,
+                                Some(acceptor) => match timeout(
+                                    REPLICATION_TLS_HANDSHAKE_TIMEOUT,
+                                    acceptor.accept(socket),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(stream)) => handle_follower_connection(stream, ctx).await,
+                                    Ok(Err(e)) => Err(ReplicationError::ConnectionFailed(format!(
+                                        "TLS handshake failed: {e}"
+                                    ))),
+                                    Err(_) => Err(ReplicationError::ConnectionFailed(
+                                        "TLS handshake timed out".to_string(),
+                                    )),
+                                },
+                            };
+                            if let Err(e) = result {
                                 eprintln!("Follower connection error: {}", e);
                             }
                         });
@@ -479,17 +520,33 @@ async fn graph_to_snapshot_entries(graph: &Arc<RwLock<Graph>>) -> Vec<WalEntryDa
     entries
 }
 
-/// Handle a single follower connection on the leader side.
-async fn handle_follower_connection(
-    socket: TcpStream,
+/// Leader state shared with one follower connection task.
+struct LeaderConnection {
     config: ReplicationConfig,
     lsn: Arc<AtomicU64>,
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
     shutdown: Arc<AtomicBool>,
     wal_subscribers: WalSubscribers,
     graph: Option<Arc<RwLock<Graph>>>,
-) -> Result<(), ReplicationError> {
-    let (mut reader, mut writer) = socket.into_split();
+}
+
+/// Handle a single follower connection (plain TCP or TLS) on the leader side.
+async fn handle_follower_connection<S>(
+    socket: S,
+    ctx: LeaderConnection,
+) -> Result<(), ReplicationError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let LeaderConnection {
+        config,
+        lsn,
+        followers,
+        shutdown,
+        wal_subscribers,
+        graph,
+    } = ctx;
+    let (mut reader, mut writer) = tokio::io::split(socket);
 
     // ── Handshake ────────────────────────────────────────────────────────────
     let msg = recv_message(&mut reader).await?;
@@ -695,6 +752,8 @@ pub struct FollowerReplicationManager {
     graph: Arc<ConcurrentGraph>,
     /// Set to `true` when a `PromoteToLeader` message is received.
     is_promoted: Arc<AtomicBool>,
+    /// When set, connect to the leader over TLS.
+    leader_tls: Option<LeaderTls>,
 }
 
 impl FollowerReplicationManager {
@@ -711,6 +770,7 @@ impl FollowerReplicationManager {
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             graph: Arc::new(ConcurrentGraph::new()),
             is_promoted: Arc::new(AtomicBool::new(false)),
+            leader_tls: None,
         }
     }
 
@@ -723,7 +783,14 @@ impl FollowerReplicationManager {
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             graph,
             is_promoted: Arc::new(AtomicBool::new(false)),
+            leader_tls: None,
         }
+    }
+
+    /// Connect to the leader over TLS, verifying its certificate.
+    pub fn with_leader_tls(mut self, tls: LeaderTls) -> Self {
+        self.leader_tls = Some(tls);
+        self
     }
 
     /// Return `true` if this follower has been instructed to promote to leader.
@@ -772,9 +839,27 @@ impl FollowerReplicationManager {
             .clone()
             .ok_or(ReplicationError::LeaderNotConfigured)?;
 
-        let stream = TcpStream::connect(&leader_address)
+        let tcp = TcpStream::connect(&leader_address)
             .await
             .map_err(|e| ReplicationError::ConnectionFailed(e.to_string()))?;
+        let stream: Box<dyn ReplicationStream> = match &self.leader_tls {
+            None => Box::new(tcp),
+            Some(tls) => {
+                let connector = tokio_rustls::TlsConnector::from(Arc::clone(&tls.client_config));
+                let handshake = connector.connect(tls.server_name.clone(), tcp);
+                let stream = timeout(REPLICATION_TLS_HANDSHAKE_TIMEOUT, handshake)
+                    .await
+                    .map_err(|_| {
+                        ReplicationError::ConnectionFailed("TLS handshake timed out".to_string())
+                    })?
+                    .map_err(|e| {
+                        ReplicationError::ConnectionFailed(format!(
+                            "TLS handshake with the leader failed: {e}"
+                        ))
+                    })?;
+                Box::new(stream)
+            }
+        };
 
         let config = self.config.clone();
         let current_lsn = Arc::clone(&self.current_lsn);
@@ -880,9 +965,13 @@ pub(crate) fn apply_wal_entry(graph: &ConcurrentGraph, entry: &WalEntryData) {
     }
 }
 
+/// A byte stream to the leader: plain TCP or TLS.
+trait ReplicationStream: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> ReplicationStream for T {}
+
 /// Core receive loop executed in a background task on the follower.
 async fn run_follower_receive_loop(
-    mut stream: TcpStream,
+    stream: Box<dyn ReplicationStream>,
     config: ReplicationConfig,
     current_lsn: Arc<AtomicU64>,
     is_leader_alive: Arc<AtomicBool>,
@@ -890,7 +979,7 @@ async fn run_follower_receive_loop(
     graph: Arc<ConcurrentGraph>,
     is_promoted: Arc<AtomicBool>,
 ) -> Result<(), ReplicationError> {
-    let (mut reader, mut writer) = stream.split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     // ── Handshake ────────────────────────────────────────────────────────────
     let my_lsn = current_lsn.load(Ordering::SeqCst);
@@ -2238,5 +2327,92 @@ mod tests {
             !manager.is_leader_alive(),
             "leader should be marked dead after heartbeat timeout"
         );
+    }
+
+    // ── TLS ──────────────────────────────────────────────────────────────────
+
+    fn tls_config(role: NodeRole, bind: &str, leader: Option<String>) -> ReplicationConfig {
+        ReplicationConfig {
+            role,
+            node_id: "tls-node".to_string(),
+            replication_bind_address: bind.to_string(),
+            leader_address: leader,
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+            shared_secret: Some("tls-secret".to_string()),
+        }
+    }
+
+    fn leader_tls(ca: &str) -> LeaderTls {
+        LeaderTls {
+            client_config: crate::tls::build_client_config(Some(ca), false).unwrap(),
+            server_name: rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_over_tls() {
+        use crate::tls::test_support::*;
+        let cert = TempPem::new("repl_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("repl_key", TEST_SERVER_KEY_PEM);
+        let other_ca = TempPem::new("repl_other_ca", TEST_SERVER_CERT2_PEM);
+        let acceptor =
+            ReloadableTlsAcceptor::new(crate::tls::TlsConfig::new(cert.path(), key.path()))
+                .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let leader = Arc::new(
+            LeaderReplicationManager::new(tls_config(NodeRole::Leader, &addr.to_string(), None))
+                .with_tls(acceptor),
+        );
+        leader.start_with_listener(listener).await.unwrap();
+
+        let new_follower = |tls: Option<LeaderTls>| {
+            let graph = Arc::new(ConcurrentGraph::new());
+            let mut f = FollowerReplicationManager::with_concurrent_graph(
+                tls_config(NodeRole::Follower, "127.0.0.1:0", Some(addr.to_string())),
+                Arc::clone(&graph),
+            );
+            if let Some(t) = tls {
+                f = f.with_leader_tls(t);
+            }
+            (f, graph)
+        };
+
+        // A follower that trusts the leader's certificate replicates.
+        let (follower, graph) = new_follower(Some(leader_tls(cert.path())));
+        follower.start().await.unwrap();
+        // A plaintext follower never completes the handshake.
+        let (plain, _) = new_follower(None);
+        plain.start().await.unwrap();
+        // A follower trusting another certificate cannot connect.
+        let (untrusting, _) = new_follower(Some(leader_tls(other_ca.path())));
+        assert!(untrusting.start().await.is_err());
+
+        for _ in 0..100 {
+            if leader.get_stats().follower_count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        leader
+            .append_wal_entry(WalEntryData::CreateNode {
+                node_id: 0,
+                labels: vec!["Secret".to_string()],
+            })
+            .await;
+        let mut replicated = false;
+        for _ in 0..100 {
+            if graph.node_count() == 1 {
+                replicated = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(replicated, "WAL entry did not reach the TLS follower");
+        assert!(follower.is_leader_alive());
+        assert!(!plain.is_leader_alive());
+        assert_eq!(leader.get_stats().follower_count, 1);
     }
 }

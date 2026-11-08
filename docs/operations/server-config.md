@@ -72,13 +72,14 @@ maharit server [OPTIONS]
 | `--checkpoint-mb` | | `64` | WAL がこのサイズ（MB）を超えたらチェックポイントを取る。`0` で停止時のみ |
 | `--require-auth` | | オフ | すべてのリクエストに有効なセッショントークンを要求する（[認証](auth.md)） |
 | `--admin-password` | | なし | 初期管理者パスワード（環境変数: `MAHARIT_ADMIN_PASSWORD`）。`--require-auth` では必須 |
-| `--tls-cert` / `--tls-key` | | なし | クライアント接続を TLS にする証明書と秘密鍵（PEM）。環境変数: `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY`（[TLS/SSL 設定](tls.md)） |
+| `--tls-cert` / `--tls-key` | | なし | クライアント接続（リーダーではレプリケーション接続も）を TLS にする証明書と秘密鍵（PEM）。環境変数: `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY`（[TLS/SSL 設定](tls.md)） |
 | `--tls-min-version` | | `1.2` | 受け付ける最小の TLS バージョン: `1.2` / `1.3`（環境変数: `MAHARIT_TLS_MIN_VERSION`） |
 | `--metrics-bind` | | `127.0.0.1:9090` | メトリクス・ヘルスチェック用 HTTP のアドレス（[メトリクス](metrics.md)） |
 | `--replication-role` | | なし | `leader` / `follower`（[レプリケーション](../advanced/replication.md)） |
 | `--replication-bind` | | `127.0.0.1:7688` | レプリケーションの待ち受けアドレス（リーダー） |
 | `--replication-secret` | | なし | レプリケーション接続の共有シークレット（環境変数: `MAHARIT_REPLICATION_SECRET`） |
 | `--leader-addr` | | なし | リーダーのレプリケーションアドレス（フォロワーで必須） |
+| `--leader-ca` | | なし | リーダーの証明書を検証する CA 証明書。指定するとリーダーに TLS で接続する（フォロワー、環境変数: `MAHARIT_LEADER_CA`） |
 | `--node-id` | | `node-1` | クラスター内で一意なノード ID（環境変数: `MAHARIT_NODE_ID`） |
 | `--shard` / `--shard-id` | | なし | シャードノードとして起動（[シャーディング](../advanced/sharding.md)） |
 | `--coordinator` / `--coordinator-port` / `--shards` / `--strategy` | | なし | コーディネーターとして起動 |
@@ -143,7 +144,7 @@ maharit server --host 0.0.0.0 \
   --tls-key /etc/maharit/server.key
 ```
 
-ネットワーク越しに使う場合は TLS を有効にしてください。TLS なしでループバック以外のアドレスに待ち受けると、起動時に警告が出ます。レプリケーションとメトリクスの通信は TLS の対象外です（[TLS/SSL 設定](tls.md)）。
+ネットワーク越しに使う場合は TLS を有効にしてください。TLS なしでループバック以外のアドレスに待ち受けると、起動時に警告が出ます。メトリクスの HTTP は TLS の対象外です（[TLS/SSL 設定](tls.md)）。
 
 ## 環境変数
 
@@ -158,6 +159,7 @@ maharit server --host 0.0.0.0 \
 | `MAHARIT_NODE_ID` | `--node-id` |
 | `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` | `--tls-cert` / `--tls-key` |
 | `MAHARIT_TLS_MIN_VERSION` | `--tls-min-version` |
+| `MAHARIT_LEADER_CA` | `--leader-ca` |
 | `RUST_LOG` | ログレベル |
 
 ```bash

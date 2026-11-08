@@ -5,6 +5,7 @@ MaharitDB TLS テスト
 自己署名証明書を作り、`--tls-cert` / `--tls-key` 付きでサーバーを起動して、
 Python クライアント（同期・非同期）が TLS で接続できること、平文や
 信頼していない証明書では接続できないこと、設定の誤りで起動を拒否することを
+検証する。リーダーとフォロワーの間のレプリケーションを TLS で行えることも
 検証する。証明書の作成に openssl コマンドを使う。
 
 使い方:
@@ -63,7 +64,10 @@ def make_cert(directory: str, name: str) -> tuple[str, str]:
 
 def start_server(binary: str, port: int, data: str, extra: list[str]) -> subprocess.Popen:
     return subprocess.Popen(
-        [binary, "server", "--port", str(port), "--data", data, "--wal", "off", *extra],
+        [
+            binary, "server", "--port", str(port), "--data", data, "--wal", "off",
+            "--metrics-bind", f"127.0.0.1:{port + 2000}", *extra,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -170,6 +174,76 @@ def test_misconfiguration(binary: str, port: int, tmp: str) -> None:
         check(f"{label}: 異常終了する", code not in (None, 0), output.strip()[-200:])
 
 
+def wait_rows(port: int, ca_file: str, query: str, expected: list, timeout: float = 10.0) -> list:
+    """クエリ結果が expected になるまで待ち、最後の結果を返す。"""
+    deadline = time.time() + timeout
+    rows: list = []
+    while time.time() < deadline:
+        try:
+            with Client.connect(f"127.0.0.1:{port}", timeout=2.0, max_retries=0, ca_file=ca_file) as c:
+                rows = list(c.query(query))
+                if rows == expected:
+                    return rows
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return rows
+
+
+def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
+    section("レプリケーションを TLS で行う")
+    cert, key = make_cert(tmp, "repl")
+    other_cert, _ = make_cert(tmp, "repl_other")
+    repl_port = port + 1
+    tls_flags = ["--tls-cert", cert, "--tls-key", key]
+    secret = ["--replication-secret", "tls-e2e-secret"]
+    leader = start_server(
+        binary, port, os.path.join(tmp, "leader.db"),
+        [*tls_flags, *secret, "--replication-role", "leader",
+         "--replication-bind", f"127.0.0.1:{repl_port}", "--node-id", "leader"],
+    )
+    followers: list[subprocess.Popen] = []
+    try:
+        check("TLS リーダー起動", wait_tls_ready(port, cert))
+        follower_specs = [
+            # (名前, 追加フラグ, データが届くべきか)
+            ("trusted", ["--leader-ca", cert], True),
+            ("plaintext", [], False),
+            ("untrusted", ["--leader-ca", other_cert], False),
+        ]
+        for i, (name, extra, _) in enumerate(follower_specs):
+            followers.append(start_server(
+                binary, port + 2 + i, os.path.join(tmp, f"{name}.db"),
+                [*tls_flags, *secret, "--replication-role", "follower",
+                 "--leader-addr", f"127.0.0.1:{repl_port}", "--node-id", name, *extra],
+            ))
+        for i, (name, _, _) in enumerate(follower_specs):
+            check(f"フォロワー起動（{name}）", wait_tls_ready(port + 2 + i, cert))
+        time.sleep(1)
+
+        with Client.connect(f"127.0.0.1:{port}", ca_file=cert) as c:
+            c.execute("CREATE (:Replicated {name: 'over-tls'})")
+        query = "MATCH (r:Replicated) RETURN r.name AS name"
+        expected = [{"name": "over-tls"}]
+        for i, (name, _, should_receive) in enumerate(follower_specs):
+            if should_receive:
+                rows = wait_rows(port + 2 + i, cert, query, expected)
+                check("--leader-ca で検証したフォロワーにデータが届く", rows == expected, str(rows))
+            else:
+                rows = wait_rows(port + 2 + i, cert, query, expected, timeout=3.0)
+                label = {
+                    "plaintext": "--leader-ca なしのフォロワーには届かない",
+                    "untrusted": "別の証明書を信頼したフォロワーには届かない",
+                }[name]
+                check(label, rows != expected, str(rows))
+    finally:
+        for proc in followers:
+            stop(proc)
+        output = stop(leader)
+    check("リーダーの起動ログに TLS のレプリケーションが出る",
+          "Replication connections use TLS" in output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MaharitDB TLS テスト")
     parser.add_argument("--binary", default=None)
@@ -186,6 +260,7 @@ def main() -> None:
     try:
         test_tls_connections(binary, args.port, tmp)
         test_misconfiguration(binary, args.port, tmp)
+        test_replication_over_tls(binary, args.port, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(summarize())

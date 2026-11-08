@@ -374,7 +374,9 @@ class Client:
         """Get server statistics.
 
         Returns:
-            Dict with keys: connections, total_queries, nodes, edges.
+            Dict with keys: connections, total_queries, nodes, edges, and
+            replication (role, node_id, current_lsn, follower_count,
+            is_leader_alive; ``None`` when replication is not configured).
         """
         self._send({"type": "stats"})
         response = self._recv()
@@ -385,6 +387,7 @@ class Client:
             "total_queries": response.get("total_queries", 0),
             "nodes": response.get("nodes", 0),
             "edges": response.get("edges", 0),
+            "replication": response.get("replication"),
         }
 
     def close(self) -> None:

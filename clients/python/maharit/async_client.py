@@ -329,6 +329,7 @@ class AsyncClient:
             "total_queries": response.get("total_queries", 0),
             "nodes": response.get("nodes", 0),
             "edges": response.get("edges", 0),
+            "replication": response.get("replication"),
         }
 
     async def close(self) -> None:

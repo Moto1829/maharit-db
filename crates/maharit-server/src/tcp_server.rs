@@ -1107,7 +1107,7 @@ impl TcpServer {
 }
 
 /// Whether `bind_address` only accepts connections from this host.
-fn is_loopback_bind(bind_address: &str) -> bool {
+pub(crate) fn is_loopback_bind(bind_address: &str) -> bool {
     let host = bind_address
         .rsplit_once(':')
         .map_or(bind_address, |(h, _)| h)

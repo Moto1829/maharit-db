@@ -28,33 +28,57 @@ MaharitDB は WAL ストリーミングベースのリーダー/フォロワー�
 
 ```bash
 maharit server \
-  --host 0.0.0.0 \
-  --port 7687 \
-  --enable-replication \
+  --host 0.0.0.0 --port 7687 \
   --replication-role leader \
-  --replication-port 7688
+  --replication-bind 0.0.0.0:7688 \
+  --replication-secret "$MAHARIT_REPLICATION_SECRET" \
+  --node-id leader
 ```
 
 ### フォロワーの設定
 
 ```bash
 maharit server \
-  --host 0.0.0.0 \
-  --port 7687 \
-  --enable-replication \
+  --host 0.0.0.0 --port 7687 \
   --replication-role follower \
-  --leader-addr "leader-host:7688"
+  --leader-addr leader-host:7688 \
+  --replication-secret "$MAHARIT_REPLICATION_SECRET" \
+  --node-id follower-1
 ```
 
-複数フォロワーの場合は、それぞれ別のポートで起動します：
+`--node-id` はクラスター内で一意にします。同じホストで複数のフォロワーを動かす場合は、`--port`・`--node-id`・`--metrics-bind` をそれぞれ変えてください。
+
+| オプション | 対象 | 説明 |
+|-----------|------|------|
+| `--replication-role` | 両方 | `leader` / `follower` |
+| `--replication-bind` | リーダー | レプリケーションの待ち受けアドレス（デフォルト `127.0.0.1:7688`） |
+| `--leader-addr` | フォロワー | リーダーのレプリケーションアドレス（必須） |
+| `--replication-secret` | 両方 | 共有シークレット（環境変数: `MAHARIT_REPLICATION_SECRET`）。設定すると、リーダーは同じシークレットを示さないフォロワーを拒否する |
+| `--leader-ca` | フォロワー | リーダーの証明書を検証する CA 証明書。指定すると TLS で接続する（環境変数: `MAHARIT_LEADER_CA`） |
+| `--node-id` | 両方 | ノード ID（環境変数: `MAHARIT_NODE_ID`、デフォルト `node-1`） |
+
+## 通信の暗号化（TLS）
+
+リーダーを `--tls-cert` / `--tls-key` 付きで起動すると、クライアント接続（7687）に加えてレプリケーション接続（7688）も TLS になり、平文のフォロワーは接続できなくなります。フォロワーには `--leader-ca` で、リーダーの証明書を検証する CA 証明書（自己署名ならリーダーの証明書そのもの）を指定します。
 
 ```bash
-# フォロワー 1
-maharit server --port 7687 --replication-role follower --leader-addr "leader:7688"
+# リーダー
+maharit server --host 0.0.0.0 \
+  --tls-cert /etc/maharit/leader.crt --tls-key /etc/maharit/leader.key \
+  --replication-role leader --replication-bind 0.0.0.0:7688 \
+  --replication-secret "$MAHARIT_REPLICATION_SECRET"
 
-# フォロワー 2
-maharit server --port 7689 --replication-role follower --leader-addr "leader:7688"
+# フォロワー
+maharit server --host 0.0.0.0 \
+  --tls-cert /etc/maharit/follower.crt --tls-key /etc/maharit/follower.key \
+  --replication-role follower --leader-addr leader.example.com:7688 \
+  --leader-ca /etc/maharit/ca.crt \
+  --replication-secret "$MAHARIT_REPLICATION_SECRET"
 ```
+
+- リーダーの証明書は、フォロワーの `--leader-addr` に書いたホスト名（または IP アドレス）に対して有効である必要があります。
+- 共有シークレットは TLS の中で送られます。TLS なしでは、シークレットも複製されるデータも平文でネットワークを流れるので、盗聴されるとフォロワーになりすまされます。TLS なしでリーダーがループバック以外に待ち受けると、起動時に警告が出ます。
+- フォロワー自身の `--tls-cert` / `--tls-key` は、フォロワーへのクライアント接続を暗号化するためのものです（省略可）。
 
 ## WAL ストリーミング
 
@@ -74,47 +98,34 @@ Follower（リアルタイムで受信・適用）:
   LSN 1003: 受信中...
 ```
 
-### レプリケーションラグの確認
+### レプリケーションの状態を確認する
 
-```cypher
-// リーダーで実行（フォロワーの状態を確認）
-CALL db.replication.status()
-YIELD follower_address, lag_bytes, lag_ms, last_lsn
-RETURN follower_address, lag_bytes, lag_ms
+各ノードの `stats` リクエスト（Python の `client.stats()`）の `replication` に、ロール・ノード ID・適用済みの LSN・接続中のフォロワー数（リーダー）・リーダーの生存（フォロワー）が入ります。リーダーとフォロワーの `current_lsn` の差が、未適用の変更の数です。
+
+```python
+from maharit import Client
+
+with Client.connect("follower-1:7687") as client:
+    print(client.stats()["replication"])
+    # {'role': 'follower', 'node_id': 'follower-1', 'current_lsn': 1003,
+    #  'follower_count': 0, 'is_leader_alive': True}
 ```
 
 ## ハートビートと生存監視
 
-リーダーはフォロワーに定期的にハートビートを送信します。
-
-- デフォルトのハートビート間隔: 5 秒
-- フォロワーのタイムアウト閾値: 15 秒
-
-```bash
-maharit server \
-  --replication-role leader \
-  --heartbeat-interval 5s \
-  --follower-timeout 15s
-```
-
-フォロワーがタイムアウトした場合：
-
-```json
-{"level":"WARN","message":"Follower timeout detected","follower":"follower-1:7687","last_heartbeat":"30s ago"}
-{"level":"INFO","message":"Follower marked as disconnected","follower":"follower-1:7687"}
-```
+リーダーは 1 秒ごとにフォロワーへハートビートを送ります。フォロワーは 5 秒間ハートビートが届かないと、リーダーが停止したとみなします（`is_leader_alive` が `false` になる）。間隔は変更できません。
 
 ## フォロワーからの読み取り
 
-フォロワーは読み取りクエリに対応しています。書き込みはリーダーに転送されます。
+フォロワーには読み取りクエリだけを送ってください。書き込みはリーダーに送ります（フォロワーは書き込みを拒否しないので、送るとリーダーとデータがずれます）。
 
 ```rust
 // フォロワーに接続して読み取り
-let follower = Client::connect("follower-1:7687").await?;
+let mut follower = Client::connect("follower-1:7687").await?;
 let result = follower.query("MATCH (n:Person) RETURN n.name").await?;
 
 // 書き込みはリーダーに接続
-let leader = Client::connect("leader:7687").await?;
+let mut leader = Client::connect("leader:7687").await?;
 leader.execute("CREATE (n:Person {name: \"Alice\"})").await?;
 ```
 
@@ -124,40 +135,29 @@ leader.execute("CREATE (n:Person {name: \"Alice\"})").await?;
 
 強い一貫性が必要な場合はリーダーから読み取ってください。
 
-## スナップショット同期
+## 既存データの同期
 
-新しいフォロワーを追加した場合、リーダーのスナップショットをフォロワーに転送して同期します。
-
-```bash
-# 自動スナップショット同期（フォロワー起動時に自動実行）
-maharit server \
-  --replication-role follower \
-  --leader-addr "leader:7688" \
-  --initial-sync snapshot  # デフォルト
-```
+!!! warning "スナップショット同期は未実装"
+    `maharit server` のリーダーは、新しく接続したフォロワーに既存のデータを送りません。フォロワーが受け取るのは、接続した後の変更だけです。データのあるリーダーにフォロワーを追加するときは、リーダーを停止してデータファイル（`--data`）をフォロワーにコピーしてから、両方を起動してください。
 
 ## フェイルオーバー
 
-リーダーが停止した場合の手動フェイルオーバー：
+!!! warning "昇格コマンドは機能しない"
+    `maharit admin promote-to-leader` は終了コード 0 を返しますが、フォロワーの状態は変わりません（昇格の指示がフォロワーに届かず、サーバーも参照していません）。また、フォロワーは書き込みクエリを拒否せずにそのまま受け付けるため、フォロワーに書き込むとリーダーとデータがずれます。
 
-```bash
-# フォロワーをリーダーに昇格
-maharit admin promote-to-leader --addr follower-1:7687
+リーダーが停止したときは、次の手順で切り替えてください。
 
-# 古いリーダーをフォロワーとして再起動
-maharit server \
-  --replication-role follower \
-  --leader-addr "follower-1:7688"  # 新しいリーダーのアドレス
-```
+1. 新しいリーダーにするフォロワーを停止する（データファイルが保存される）
+2. そのデータファイルを使い、`--replication-role leader` で起動し直す
+3. 残りのフォロワーを、データファイルを新しいリーダーのものに置き換えてから、`--leader-addr` を新しいリーダーにして起動し直す
 
-> **注意**: 自動フェイルオーバーは現在のバージョンでは未サポートです。
-> 高可用性が必要な場合は、外部の監視システム（例: Kubernetes Operator、Consul、ZooKeeper）と組み合わせてフェイルオーバー処理を実装してください。
+自動フェイルオーバーには対応していません。
 
 ## レプリケーション設定のまとめ
 
 | 設定項目 | リーダー | フォロワー |
 |---------|--------|---------|
-| 書き込み | 対応 | 非対応（リーダーに転送） |
+| 書き込み | 対応 | 拒否しない（リーダーには反映されない。書き込まないこと） |
 | 読み取り | 対応 | 対応（ラグあり） |
 | ハートビート送信 | 送信 | 受信 |
 | WAL ストリーミング | 送信 | 受信・適用 |
