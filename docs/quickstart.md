@@ -118,13 +118,10 @@ properties_set
 maharit> MATCH (n:Person {name: "Bob"}) DETACH DELETE n
 deleted_nodes | deleted_edges
 --------------------------------
-1 | 0
+1 | 1
 
 1 row(s) returned
 ```
-
-!!! note
-    現在の実装では、`DETACH DELETE` で一緒に消えたリレーションシップは `deleted_edges` に数えられません（リレーションシップ自体は削除されています）。
 
 ## 4. サーバーモードで起動する
 

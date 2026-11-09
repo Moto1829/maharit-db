@@ -2774,6 +2774,22 @@ mod tests {
         }
     }
 
+    /// bug/142: DETACH DELETE のサーバー経路（RecordingGraph）でも、ノードと
+    /// 一緒に消えたリレーションシップが deleted_edges に数えられる。
+    #[tokio::test]
+    async fn detach_delete_reports_removed_edges() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        query(&mut s, "CREATE (a:P {n: 1})-[:K]->(b:P {n: 2})").await;
+        match query(&mut s, "MATCH (n:P {n: 2}) DETACH DELETE n").await {
+            Response::Result { rows } => {
+                assert_eq!(rows[0]["deleted_nodes"], serde_json::json!(1));
+                assert_eq!(rows[0]["deleted_edges"], serde_json::json!(1));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
     /// Changes made inside a transaction (SET on existing nodes, label changes,
     /// CREATE, DETACH DELETE) run on the index-maintaining executor. ROLLBACK
     /// must restore the graph *and* the property index; label changes and

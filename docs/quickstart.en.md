@@ -119,13 +119,10 @@ properties_set
 maharit> MATCH (n:Person {name: "Bob"}) DETACH DELETE n
 deleted_nodes | deleted_edges
 --------------------------------
-1 | 0
+1 | 1
 
 1 row(s) returned
 ```
-
-!!! note
-    In the current implementation, relationships removed along with the node by `DETACH DELETE` are not counted in `deleted_edges` (the relationships themselves are deleted).
 
 ## 4. Start in server mode
 

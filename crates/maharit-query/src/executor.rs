@@ -640,6 +640,15 @@ impl<'a> Executor<'a> {
     /// Must only be called when `self.readonly == false`.  For `ConcurrentGraph`
     /// this is always safe because writes use DashMap interior mutability.
     #[inline]
+    /// ノードに接続しているエッジの本数（自己ループは 1 本と数える）。
+    fn incident_edge_count(&self, node_id: NodeId) -> i64 {
+        let graph = self.graph_ref();
+        let mut ids: HashSet<maharit_core::EdgeId> =
+            graph.outgoing_edges(node_id).iter().map(|e| e.id).collect();
+        ids.extend(graph.incoming_edges(node_id).iter().map(|e| e.id));
+        ids.len() as i64
+    }
+
     fn graph_mut(&mut self) -> &mut dyn GraphBackend {
         debug_assert!(
             !self.readonly,
@@ -1003,10 +1012,12 @@ impl<'a> Executor<'a> {
         let mut deleted_nodes = 0;
         for node_id in nodes_to_delete {
             if d.delete_clause.detach {
-                // delete_node already handles related edges
+                // delete_node は隣接エッジも消すので、その本数を先に数えておく
+                let incident = self.incident_edge_count(node_id);
                 if self.graph_mut().delete_node(node_id).is_some() {
                     self.property_index.remove_node(node_id);
                     deleted_nodes += 1;
+                    deleted_edges += incident;
                 }
             } else {
                 // Check if node has edges
@@ -12007,6 +12018,31 @@ mod tests {
         // Expect 2 cities * 2 names = 4 persons
         let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
         assert_eq!(result.row_count(), 4);
+    }
+
+    #[test]
+    fn test_detach_delete_counts_removed_edges() {
+        // bug/142: DETACH DELETE で一緒に消えたエッジを deleted_edges に数える
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (a:P {n: 1})-[:K]->(b:P {n: 2})-[:K]->(c:P {n: 3})",
+        )
+        .unwrap();
+        execute(&mut graph, "MATCH (b:P {n: 2}) CREATE (b)-[:SELF]->(b)").unwrap();
+
+        let r = execute(&mut graph, "MATCH (n:P {n: 2}) DETACH DELETE n").unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(1), Value::Int(3)]);
+
+        // 2 ノードを同時に消すとき、両者の間のエッジは 1 回だけ数える
+        execute(
+            &mut graph,
+            "MATCH (a:P {n: 1}), (c:P {n: 3}) CREATE (a)-[:K]->(c)",
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (n:P) DETACH DELETE n").unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(2), Value::Int(1)]);
+        assert_eq!(graph.edge_count(), 0);
     }
 
     #[test]
