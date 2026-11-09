@@ -127,7 +127,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 ### maharit-storage: 永続化
 
 - `wal.rs` / `wal_group_commit.rs`: Write-Ahead Log。グループコミットでスループット向上。
-- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を保存・復元（保存は tmp + fsync + rename で原子的）。現行は v4 形式（bincode 1 互換のバイト列を `snapshot_codec.rs` が自前で読み書き。bincode 依存は削除済み）。形式を変えるときは `VERSION` を上げ、旧版の読み込みを残す。`tests/fixtures/v4_*.mgdb` は bincode 時代に書いた互換性確認用ファイル
+- `persistence.rs`: `PersistentStorage::load(path)` / `save(path)` でファイル全体を保存・復元（保存は tmp + fsync + rename で原子的）。サーバーは v5 形式（`save_concurrent_with_schema`: v4 のペイロード + スキーマ JSON 文字列）、`save` / `save_with_index` は v4 形式（bincode 1 互換のバイト列を `snapshot_codec.rs` が自前で読み書き。bincode 依存は削除済み）。形式を変えるときはバージョンを上げ、旧版の読み込みを残す。スキーマ（インデックス・制約の定義）は `maharit-server` の `schema.rs` が扱い、WAL では `WalEntryData::SetSchema`（全体置き換え）で記録・複製する。`tests/fixtures/v4_*.mgdb` は bincode 時代に書いた互換性確認用ファイル
 - `mvcc.rs`: MVCC トランザクション。
 - `backup.rs`: `Backup::create` / `restore` / `verify` / `metadata`。`CompressionType::None | Gzip | Zstd`。
 
