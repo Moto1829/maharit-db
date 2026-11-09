@@ -65,9 +65,6 @@ RETURN n.name
 
 ## マッププロパティの展開
 
-!!! warning "未対応"
-    `CREATE (n:Person $props)` の形（マップをプロパティとして展開）は、現在パースできません。代わりにプロパティを 1 つずつパラメータで渡すか、`UNWIND [$props] AS p CREATE (n:Person {name: p.name, age: p.age})` のように `UNWIND`（次節）で展開してください（`$props.name` のようにパラメータのキーを直接参照する書き方もまだパースできません）。
-
 パラメータとしてマップを渡し、プロパティとして展開する構文です。
 
 ```cypher
@@ -85,6 +82,28 @@ RETURN n
     "city": "Tokyo"
   }
 }
+```
+
+同じ形はリレーションシップ（`-[r:KNOWS $rel]->`）、`MATCH`、`MERGE` でも使えます。`MATCH` / `MERGE` では、マップの全キーが等価条件になります。
+
+```cypher
+MATCH (n:Person $props)
+RETURN n.name
+```
+
+`SET` でマップパラメータを使うと、プロパティをまとめて更新できます。`+=` は既存のプロパティを残し、`=` はマップに無いプロパティを削除します。
+
+```cypher
+MATCH (n:Person {name: $name})
+SET n += $changes
+```
+
+### パラメータのキーを参照する
+
+マップパラメータのキーは `$props.name` または `$props['name']` で参照できます。存在しないキーは `null` になります。
+
+```cypher
+CREATE (n:Person {name: $props.name, city: $props.address.city})
 ```
 
 ## UNWIND とパラメータの組み合わせ

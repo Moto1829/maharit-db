@@ -908,13 +908,13 @@ impl<'a> Executor<'a> {
         let primary_label = labels.first().cloned().unwrap_or_default();
 
         // Evaluate property expressions
-        let evaluated_props: Vec<(String, PropertyValue)> = pattern
-            .properties
-            .iter()
+        let evaluated_props: Vec<(String, PropertyValue)> = self
+            .pattern_property_exprs(&pattern.properties, &pattern.properties_param)?
+            .into_iter()
             .map(|(k, expr)| {
-                let val = self.evaluate_expression(expr, bindings as &Bindings)?;
+                let val = self.evaluate_expression(&expr, bindings as &Bindings)?;
                 let prop_val = self.value_to_property(&val)?;
-                Ok((k.clone(), prop_val))
+                Ok((k, prop_val))
             })
             .collect::<Result<_, ExecuteError>>()?;
 
@@ -1169,14 +1169,16 @@ impl<'a> Executor<'a> {
                         let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
                         // Evaluate and set edge properties
-                        let edge_props: Vec<(String, PropertyValue)> = segment
-                            .edge
-                            .properties
-                            .iter()
+                        let edge_props: Vec<(String, PropertyValue)> = self
+                            .pattern_property_exprs(
+                                &segment.edge.properties,
+                                &segment.edge.properties_param,
+                            )?
+                            .into_iter()
                             .map(|(k, expr)| {
-                                let val = self.evaluate_expression(expr, &bindings)?;
+                                let val = self.evaluate_expression(&expr, &bindings)?;
                                 let prop_val = self.value_to_property(&val)?;
-                                Ok((k.clone(), prop_val))
+                                Ok((k, prop_val))
                             })
                             .collect::<Result<_, ExecuteError>>()?;
 
@@ -1234,6 +1236,88 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// マップを返す式を評価し、プロパティの (キー, 値) 列にする。
+    fn evaluate_property_map(
+        &self,
+        expr: &Expression,
+        bindings: &Bindings,
+        clause: &str,
+    ) -> Result<Vec<(String, PropertyValue)>, ExecuteError> {
+        match self.evaluate_expression(expr, bindings)? {
+            Value::Map(map) => map
+                .into_iter()
+                .map(|(k, v)| Ok((k, self.value_to_property(&v)?)))
+                .collect(),
+            other => Err(ExecuteError::TypeError(format!(
+                "{clause} requires a map, got {other:?}"
+            ))),
+        }
+    }
+
+    /// `SET n += map`（`replace = false`）/ `SET n = map`（`replace = true`）を適用する。
+    /// 置き換えでは、マップに無い既存のプロパティを削除する。
+    fn set_properties_from_map(
+        &mut self,
+        bindings: &Bindings,
+        variable: &str,
+        evaluated: Vec<(String, PropertyValue)>,
+        replace: bool,
+    ) -> Result<(), ExecuteError> {
+        let binding_value = bindings
+            .get(variable)
+            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.to_string()))?;
+        match binding_value {
+            BindingValue::Node(node_id) => {
+                let node_id = *node_id;
+                // Validate constraints for each new property
+                for (key, prop_val) in &evaluated {
+                    if let Some(node) = self.graph_ref().get_node(node_id) {
+                        self.constraints.validate_property_set(
+                            self.graph_ref(),
+                            &node,
+                            key,
+                            prop_val,
+                        )?;
+                    }
+                }
+                if replace && let Some(node) = self.graph_ref().get_node(node_id) {
+                    for key in node.properties.keys() {
+                        if evaluated.iter().any(|(k, _)| k == key) {
+                            continue;
+                        }
+                        let old = self.graph_mut().remove_node_property(node_id, key);
+                        self.reindex_node_property(node_id, key, old, None);
+                    }
+                }
+                for (key, prop_val) in evaluated {
+                    let old = self.graph_ref().get_node_property(node_id, &key);
+                    self.graph_mut()
+                        .set_node_property(node_id, &key, prop_val.clone());
+                    self.reindex_node_property(node_id, &key, old, Some(&prop_val));
+                }
+            }
+            BindingValue::Edge(edge_id) => {
+                let edge_id = *edge_id;
+                if replace && let Some(edge) = self.graph_ref().get_edge(edge_id) {
+                    for key in edge.properties.keys() {
+                        if !evaluated.iter().any(|(k, _)| k == key) {
+                            self.graph_mut().remove_edge_property(edge_id, key);
+                        }
+                    }
+                }
+                for (key, prop_val) in evaluated {
+                    self.graph_mut().set_edge_property(edge_id, &key, prop_val);
+                }
+            }
+            _ => {
+                return Err(ExecuteError::TypeError(
+                    "SET requires node or edge binding".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_set_clause(
         &mut self,
         set_clause: &SetClause,
@@ -1286,10 +1370,6 @@ impl<'a> Executor<'a> {
                         }
                     }
                     SetItem::MergeProperties(variable, props_map) => {
-                        let binding_value = bindings
-                            .get(variable.as_str())
-                            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.clone()))?;
-
                         // Evaluate all property expressions first
                         let evaluated: Vec<(String, PropertyValue)> = props_map
                             .iter()
@@ -1299,46 +1379,15 @@ impl<'a> Executor<'a> {
                                 Ok((k.clone(), prop_val))
                             })
                             .collect::<Result<_, ExecuteError>>()?;
-
-                        match binding_value {
-                            BindingValue::Node(node_id) => {
-                                // Validate constraints for each new property
-                                for (key, prop_val) in &evaluated {
-                                    if let Some(node) = self.graph_ref().get_node(*node_id) {
-                                        self.constraints.validate_property_set(
-                                            self.graph_ref(),
-                                            &node,
-                                            key,
-                                            prop_val,
-                                        )?;
-                                    }
-                                }
-                                for (key, prop_val) in evaluated {
-                                    let old = self.graph_ref().get_node_property(*node_id, &key);
-                                    self.graph_mut().set_node_property(
-                                        *node_id,
-                                        &key,
-                                        prop_val.clone(),
-                                    );
-                                    self.reindex_node_property(
-                                        *node_id,
-                                        &key,
-                                        old,
-                                        Some(&prop_val),
-                                    );
-                                }
-                            }
-                            BindingValue::Edge(edge_id) => {
-                                for (key, prop_val) in evaluated {
-                                    self.graph_mut().set_edge_property(*edge_id, &key, prop_val);
-                                }
-                            }
-                            _ => {
-                                return Err(ExecuteError::TypeError(
-                                    "SET += requires node or edge binding".to_string(),
-                                ));
-                            }
-                        }
+                        self.set_properties_from_map(bindings, variable, evaluated, false)?;
+                    }
+                    SetItem::MergeMap(variable, expr) => {
+                        let evaluated = self.evaluate_property_map(expr, bindings, "SET +=")?;
+                        self.set_properties_from_map(bindings, variable, evaluated, false)?;
+                    }
+                    SetItem::ReplaceProperties(variable, expr) => {
+                        let evaluated = self.evaluate_property_map(expr, bindings, "SET =")?;
+                        self.set_properties_from_map(bindings, variable, evaluated, true)?;
                     }
                     SetItem::AddLabel(variable, new_label) => {
                         let binding_value = bindings
@@ -1486,14 +1535,16 @@ impl<'a> Executor<'a> {
                     let edge_id = self.graph_mut().create_edge(from, to, edge_label)?;
 
                     // Evaluate and set edge properties
-                    let edge_props: Vec<(String, PropertyValue)> = segment
-                        .edge
-                        .properties
-                        .iter()
+                    let edge_props: Vec<(String, PropertyValue)> = self
+                        .pattern_property_exprs(
+                            &segment.edge.properties,
+                            &segment.edge.properties_param,
+                        )?
+                        .into_iter()
                         .map(|(k, expr)| {
-                            let val = self.evaluate_expression(expr, bindings as &Bindings)?;
+                            let val = self.evaluate_expression(&expr, bindings as &Bindings)?;
                             let prop_val = self.value_to_property(&val)?;
-                            Ok((k.clone(), prop_val))
+                            Ok((k, prop_val))
                         })
                         .collect::<Result<_, ExecuteError>>()?;
 
@@ -2388,7 +2439,7 @@ impl<'a> Executor<'a> {
         };
         // Inline properties or multiple labels would filter the set, so the
         // simple count identity no longer holds.
-        if !np.properties.is_empty() || np.labels.len() > 1 {
+        if !np.properties.is_empty() || np.properties_param.is_some() || np.labels.len() > 1 {
             return None;
         }
 
@@ -2757,6 +2808,7 @@ impl<'a> Executor<'a> {
             variable: np.variable.clone(),
             labels: np.labels.clone(),
             properties,
+            properties_param: np.properties_param.clone(),
         }
     }
 
@@ -3777,7 +3829,10 @@ impl<'a> Executor<'a> {
             if !backend.node_has_all_labels(node_id, &pattern.labels) {
                 return Ok(false);
             }
-        } else if pattern.properties.is_empty() && !backend.contains_node(node_id) {
+        } else if pattern.properties.is_empty()
+            && pattern.properties_param.is_none()
+            && !backend.contains_node(node_id)
+        {
             // No labels and no properties: still require the node to exist.
             return Ok(false);
         }
@@ -3795,8 +3850,62 @@ impl<'a> Executor<'a> {
                 None => return Ok(false),
             }
         }
+        for (key, expected_expr) in self.param_property_exprs(&pattern.properties_param)? {
+            match backend.get_node_property(node_id, &key) {
+                Some(actual) => {
+                    let expected_val = self.evaluate_expression(&expected_expr, bindings)?;
+                    if !self.property_value_matches(&actual, &expected_val) {
+                        return Ok(false);
+                    }
+                }
+                None => return Ok(false),
+            }
+        }
 
         Ok(true)
+    }
+
+    /// パターンの `$props` を、マップの各キーを参照する式（`$props['key']`）の
+    /// 並びに展開する。パラメータが無ければ空。マップ以外ならエラー。
+    fn param_property_exprs(
+        &self,
+        param: &Option<String>,
+    ) -> Result<Vec<(String, Expression)>, ExecuteError> {
+        let Some(name) = param else {
+            return Ok(Vec::new());
+        };
+        match self.params.get(name) {
+            Some(Value::Map(map)) => Ok(map
+                .keys()
+                .map(|k| {
+                    (
+                        k.clone(),
+                        Expression::IndexAccess(
+                            Box::new(Expression::Parameter(name.clone())),
+                            Box::new(Expression::Literal(Literal::String(k.clone()))),
+                        ),
+                    )
+                })
+                .collect()),
+            Some(other) => Err(ExecuteError::TypeError(format!(
+                "parameter ${name} used as pattern properties must be a map, got {other:?}"
+            ))),
+            None => Err(ExecuteError::UndefinedVariable(format!("${name}"))),
+        }
+    }
+
+    /// パターンのインラインプロパティと `$props` の展開をまとめて返す。
+    fn pattern_property_exprs(
+        &self,
+        properties: &HashMap<String, Expression>,
+        param: &Option<String>,
+    ) -> Result<Vec<(String, Expression)>, ExecuteError> {
+        let mut out: Vec<(String, Expression)> = properties
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        out.extend(self.param_property_exprs(param)?);
+        Ok(out)
     }
 
     /// リレーションシップがパターンのインラインプロパティ（`-[r {w: 1}]-`）を満たすか。
@@ -3806,11 +3915,16 @@ impl<'a> Executor<'a> {
         pattern: &EdgePattern,
         bindings: &Bindings,
     ) -> Result<bool, ExecuteError> {
-        for (key, expected_expr) in &pattern.properties {
-            let Some(actual) = edge.properties.get(key) else {
+        if pattern.properties.is_empty() && pattern.properties_param.is_none() {
+            return Ok(true);
+        }
+        for (key, expected_expr) in
+            self.pattern_property_exprs(&pattern.properties, &pattern.properties_param)?
+        {
+            let Some(actual) = edge.properties.get(&key) else {
                 return Ok(false);
             };
-            let expected = self.evaluate_expression(expected_expr, bindings)?;
+            let expected = self.evaluate_expression(&expected_expr, bindings)?;
             if !self.property_value_matches(actual, &expected) {
                 return Ok(false);
             }
@@ -6052,6 +6166,10 @@ impl<'a> Executor<'a> {
                         } else {
                             Ok(Value::Null)
                         }
+                    }
+                    // マップのキー参照: `$props['name']` / `$props.name`
+                    (Value::Map(map), Value::String(key)) => {
+                        Ok(map.get(&key).cloned().unwrap_or(Value::Null))
                     }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     _ => Ok(Value::Null),
@@ -11517,6 +11635,158 @@ mod tests {
     }
 
     // ========== Task 44: Query Parameters ==========
+
+    fn run_with(
+        graph: &mut Graph,
+        q: &str,
+        params: &[(&str, Value)],
+    ) -> Result<ResultSet, ExecuteError> {
+        let stmt = Parser::new(q).unwrap().parse().unwrap();
+        let params = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        Executor::new(graph).execute_with_params(stmt, params)
+    }
+
+    fn map_value(pairs: &[(&str, Value)]) -> Value {
+        Value::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_map_param_as_pattern_properties() {
+        // task145: (n:Label $props) / -[r:T $props]-> / $props.key
+        let mut graph = Graph::new();
+        let alice = map_value(&[
+            ("name", Value::String("Alice".into())),
+            ("age", Value::Int(30)),
+        ]);
+        run_with(
+            &mut graph,
+            "CREATE (n:Person $props)",
+            &[("props", alice.clone())],
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (n:Person) RETURN n.name, n.age").unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::String("Alice".into()), Value::Int(30)]
+        );
+
+        // MATCH: 全キーの等価条件
+        let r = run_with(
+            &mut graph,
+            "MATCH (n:Person $p) RETURN n.name",
+            &[("p", alice.clone())],
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 1);
+        let other = map_value(&[
+            ("name", Value::String("Alice".into())),
+            ("age", Value::Int(31)),
+        ]);
+        let r = run_with(&mut graph, "MATCH (n:Person $p) RETURN n", &[("p", other)]).unwrap();
+        assert_eq!(r.row_count(), 0);
+
+        // リレーションシップ
+        run_with(
+            &mut graph,
+            "MATCH (a:Person) CREATE (a)-[:KNOWS $r]->(:Person {name: 'Bob'})",
+            &[("r", map_value(&[("since", Value::Int(2020))]))],
+        )
+        .unwrap();
+        let r = run_with(
+            &mut graph,
+            "MATCH ()-[r:KNOWS $r]->(b) RETURN r.since, b.name",
+            &[("r", map_value(&[("since", Value::Int(2020))]))],
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::Int(2020), Value::String("Bob".into())]
+        );
+        let r = run_with(
+            &mut graph,
+            "MATCH ()-[r:KNOWS $r]->() RETURN r",
+            &[("r", map_value(&[("since", Value::Int(1999))]))],
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 0);
+
+        // MERGE: 一致すれば作らない、しなければ作る
+        run_with(&mut graph, "MERGE (n:Person $p)", &[("p", alice.clone())]).unwrap();
+        let carol = map_value(&[("name", Value::String("Carol".into()))]);
+        run_with(&mut graph, "MERGE (n:Person $p)", &[("p", carol)]).unwrap();
+        let r = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
+        assert_eq!(r.row_count(), 3);
+
+        // $p.key / $p['key'] / ネスト
+        let nested = map_value(&[
+            ("name", Value::String("Dave".into())),
+            (
+                "addr",
+                map_value(&[("city", Value::String("Osaka".into()))]),
+            ),
+        ]);
+        run_with(
+            &mut graph,
+            "CREATE (n:Person {name: $p.name, city: $p.addr.city, k: $p['name']})",
+            &[("p", nested.clone())],
+        )
+        .unwrap();
+        let r = run_with(
+            &mut graph,
+            "MATCH (n:Person) WHERE n.name = $p.name RETURN n.city, n.k, $p.missing AS m",
+            &[("p", nested)],
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::String("Osaka".into()),
+                Value::String("Dave".into()),
+                Value::Null
+            ]
+        );
+
+        // マップ以外はエラー
+        let err = run_with(&mut graph, "CREATE (n:X $p)", &[("p", Value::Int(1))]).unwrap_err();
+        assert!(err.to_string().contains("must be a map"), "{err}");
+        assert!(run_with(&mut graph, "CREATE (n:X $nope)", &[]).is_err());
+    }
+
+    #[test]
+    fn test_set_from_map_param() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:P {name: 'a', old: 1})").unwrap();
+        run_with(
+            &mut graph,
+            "MATCH (n:P) SET n += $p",
+            &[("p", map_value(&[("age", Value::Int(5))]))],
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (n:P) RETURN n.name, n.old, n.age").unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::String("a".into()), Value::Int(1), Value::Int(5)]
+        );
+        run_with(
+            &mut graph,
+            "MATCH (n:P) SET n = $p",
+            &[("p", map_value(&[("name", Value::String("b".into()))]))],
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (n:P) RETURN n.name, n.old, n.age").unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::String("b".into()), Value::Null, Value::Null]
+        );
+    }
 
     #[test]
     fn test_param_in_where() {

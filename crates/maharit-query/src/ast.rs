@@ -258,6 +258,10 @@ pub enum SetItem {
     Property(String, String, Expression),
     /// プロパティのマージ: n += {key: value, ...}
     MergeProperties(String, HashMap<String, Expression>),
+    /// マップ式によるマージ: n += $props（評価結果のマップの全キーを設定）
+    MergeMap(String, Expression),
+    /// プロパティの置き換え: n = {key: value} / n = $props（マップに無いキーは削除）
+    ReplaceProperties(String, Expression),
     /// ラベルの追加: n:NewLabel
     AddLabel(String, String),
 }
@@ -276,6 +280,9 @@ pub struct NodePattern {
     /// マッチに使用するラベルリスト（全て保持していることが条件）
     pub labels: Vec<String>,
     pub properties: HashMap<String, Expression>,
+    /// `(n:Label $props)` のパラメータ名。実行時にマップの全キーを
+    /// プロパティとして使う（`properties` とは併用されない）。
+    pub properties_param: Option<String>,
 }
 
 /// パスパターン: (a)-[r:TYPE]->(b)
@@ -311,6 +318,8 @@ pub struct EdgePattern {
     pub variable: Option<String>,
     pub edge_type: Option<String>,
     pub properties: HashMap<String, Expression>,
+    /// `-[r:TYPE $props]->` のパラメータ名（[`NodePattern::properties_param`] と同じ）。
+    pub properties_param: Option<String>,
     pub direction: EdgeDirection,
     /// Variable-length path: *min..max (None means exactly 1 hop)
     pub length_range: Option<LengthRange>,

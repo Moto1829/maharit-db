@@ -692,10 +692,22 @@ impl Parser {
         let variable = self.expect_ident()?;
 
         if self.check(TokenKind::PlusEquals) {
-            // n += {key: value, ...}
             self.advance(); // consume +=
-            let props = self.parse_properties()?;
-            Ok(SetItem::MergeProperties(variable, props))
+            if self.check(TokenKind::LBrace) {
+                // n += {key: value, ...}
+                let props = self.parse_properties()?;
+                Ok(SetItem::MergeProperties(variable, props))
+            } else {
+                // n += $props
+                Ok(SetItem::MergeMap(variable, self.parse_expression()?))
+            }
+        } else if self.check(TokenKind::Eq) {
+            // n = {key: value} / n = $props
+            self.advance();
+            Ok(SetItem::ReplaceProperties(
+                variable,
+                self.parse_expression()?,
+            ))
         } else if self.check(TokenKind::Colon) {
             // n:NewLabel1:NewLabel2:...
             self.advance(); // consume :
@@ -2620,10 +2632,8 @@ impl Parser {
             labels.push(self.expect_ident_or_keyword()?);
         }
 
-        // Properties (optional)
-        if self.check(TokenKind::LBrace) {
-            properties = self.parse_properties()?;
-        }
+        // Properties (optional): `{k: v}` or `$props`
+        let properties_param = self.parse_pattern_properties(&mut properties)?;
 
         self.expect(TokenKind::RParen)?;
 
@@ -2631,6 +2641,7 @@ impl Parser {
             variable,
             labels,
             properties,
+            properties_param,
         })
     }
 
@@ -2655,6 +2666,7 @@ impl Parser {
         let mut variable = None;
         let mut edge_type = None;
         let mut properties = HashMap::new();
+        let mut properties_param = None;
         let mut length_range = None;
 
         // Edge details in brackets (optional)
@@ -2678,10 +2690,8 @@ impl Parser {
                 length_range = Some(self.parse_length_range()?);
             }
 
-            // Properties (optional)
-            if self.check(TokenKind::LBrace) {
-                properties = self.parse_properties()?;
-            }
+            // Properties (optional): `{k: v}` or `$props`
+            properties_param = self.parse_pattern_properties(&mut properties)?;
 
             self.expect(TokenKind::RBracket)?;
         }
@@ -2708,6 +2718,7 @@ impl Parser {
             variable,
             edge_type,
             properties,
+            properties_param,
             direction: final_direction,
             length_range,
         })
@@ -2743,6 +2754,24 @@ impl Parser {
         // If no min and no .., it's just [*] meaning 1..unlimited (max stays None)
 
         Ok(LengthRange { min, max })
+    }
+
+    /// パターンのプロパティ位置を読む。`{k: v}` なら `properties` に入れ、
+    /// `$props` ならパラメータ名を返す。どちらも無ければ何もしない。
+    fn parse_pattern_properties(
+        &mut self,
+        properties: &mut HashMap<String, Expression>,
+    ) -> Result<Option<String>, ParseError> {
+        if self.check(TokenKind::LBrace) {
+            *properties = self.parse_properties()?;
+            return Ok(None);
+        }
+        if let Some(TokenKind::Parameter(name)) = self.peek_kind() {
+            let name = name.clone();
+            self.advance();
+            return Ok(Some(name));
+        }
+        Ok(None)
     }
 
     fn parse_properties(&mut self) -> Result<HashMap<String, Expression>, ParseError> {
@@ -2936,7 +2965,25 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expression, ParseError> {
         let mut expr = self.parse_primary()?;
-        while self.check(TokenKind::LBracket) {
+        loop {
+            // `$param.key` / `$param['key'].nested`: パラメータ（とそのキー参照の結果）に
+            // 続く `.key` はマップのキー参照として IndexAccess にする。`n.prop` は
+            // parse_primary が Property として読むので、ここでは扱わない。
+            if self.check(TokenKind::Dot)
+                && matches!(expr, Expression::Parameter(_) | Expression::IndexAccess(..))
+                && self.next_is_ident_or_keyword()
+            {
+                self.advance(); // consume .
+                let key = self.expect_ident_or_keyword()?;
+                expr = Expression::IndexAccess(
+                    Box::new(expr),
+                    Box::new(Expression::Literal(Literal::String(key))),
+                );
+                continue;
+            }
+            if !self.check(TokenKind::LBracket) {
+                break;
+            }
             self.advance(); // consume [
             let start = self.parse_expression()?;
             if self.check(TokenKind::Dot) {
@@ -2960,8 +3007,9 @@ impl Parser {
                 // Speculatively try to parse as a pattern predicate: (n)-->() or (n:Label {..})
                 let saved_pos = self.pos;
                 if let Ok(start_node) = self.parse_node_pattern() {
-                    let has_labels_or_props =
-                        !start_node.labels.is_empty() || !start_node.properties.is_empty();
+                    let has_labels_or_props = !start_node.labels.is_empty()
+                        || !start_node.properties.is_empty()
+                        || start_node.properties_param.is_some();
                     if self.is_edge_start() || has_labels_or_props {
                         // Commit as pattern predicate
                         let pattern = if self.is_edge_start() {
@@ -3264,6 +3312,15 @@ impl Parser {
 
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
+    }
+
+    /// 次の次のトークンが識別子（または識別子として読めるキーワード）か。
+    fn next_is_ident_or_keyword(&self) -> bool {
+        match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+            Some(TokenKind::Ident(_)) => true,
+            Some(kind) => crate::lexer::keyword_as_ident(kind).is_some(),
+            None => false,
+        }
     }
 
     fn peek_kind(&self) -> Option<&TokenKind> {

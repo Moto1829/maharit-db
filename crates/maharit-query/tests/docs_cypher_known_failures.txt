@@ -10,7 +10,6 @@ docs/advanced/transactions.md: CREATE (alice:Person {name: "Alice", balance: 100
 docs/advanced/transactions.md: MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 docs/algorithms/all-paths.md: MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
 docs/cypher/order-limit-skip.md: MATCH (n:Person)
-docs/cypher/parameters.md: CREATE (n:Person $props)
 docs/cypher/set-remove-merge.md: MATCH (n)
 docs/cypher/set-remove-merge.md: MATCH (n:Person {name: "Alice"})
 docs/cypher/unwind-with-union.md: MATCH (a:Article)
