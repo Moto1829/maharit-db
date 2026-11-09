@@ -4193,7 +4193,9 @@ impl<'a> Executor<'a> {
         }
     }
 
-    fn return_item_to_column_name(&self, item: &ReturnItem) -> String {
+    /// RETURN 項目の結果列名（エイリアス、または式の表示形）。シャーディングの
+    /// コーディネーターがシャードの結果を列名で突き合わせるために使う。
+    pub fn column_name(item: &ReturnItem) -> String {
         match item {
             ReturnItem::Alias(_, name) => name.clone(),
             ReturnItem::Variable(v) => v.clone(),
@@ -4203,53 +4205,50 @@ impl<'a> Executor<'a> {
             ReturnItem::Aggregate(agg) => match agg {
                 AggregateFunction::Count(inner) => match inner {
                     None => "COUNT(*)".to_string(),
-                    Some(inner) => format!("count({})", self.return_item_to_column_name(inner)),
+                    Some(inner) => format!("count({})", Self::column_name(inner)),
                 },
                 AggregateFunction::Sum(inner) => {
-                    format!("SUM({})", self.return_item_to_column_name(inner))
+                    format!("SUM({})", Self::column_name(inner))
                 }
                 AggregateFunction::Avg(inner) => {
-                    format!("AVG({})", self.return_item_to_column_name(inner))
+                    format!("AVG({})", Self::column_name(inner))
                 }
                 AggregateFunction::Min(inner) => {
-                    format!("MIN({})", self.return_item_to_column_name(inner))
+                    format!("MIN({})", Self::column_name(inner))
                 }
                 AggregateFunction::Max(inner) => {
-                    format!("MAX({})", self.return_item_to_column_name(inner))
+                    format!("MAX({})", Self::column_name(inner))
                 }
                 AggregateFunction::Collect(inner) => {
-                    format!("COLLECT({})", self.return_item_to_column_name(inner))
+                    format!("COLLECT({})", Self::column_name(inner))
                 }
                 AggregateFunction::PercentileCont(e, p) => format!(
                     "percentileCont({}, {})",
-                    self.return_item_to_column_name(e),
-                    self.return_item_to_column_name(p)
+                    Self::column_name(e),
+                    Self::column_name(p)
                 ),
                 AggregateFunction::PercentileDisc(e, p) => format!(
                     "percentileDisc({}, {})",
-                    self.return_item_to_column_name(e),
-                    self.return_item_to_column_name(p)
+                    Self::column_name(e),
+                    Self::column_name(p)
                 ),
                 AggregateFunction::StDev(inner) => {
-                    format!("stDev({})", self.return_item_to_column_name(inner))
+                    format!("stDev({})", Self::column_name(inner))
                 }
                 AggregateFunction::StDevP(inner) => {
-                    format!("stDevP({})", self.return_item_to_column_name(inner))
+                    format!("stDevP({})", Self::column_name(inner))
                 }
                 AggregateFunction::CountDistinct(inner) => {
-                    format!("COUNT(DISTINCT {})", self.return_item_to_column_name(inner))
+                    format!("COUNT(DISTINCT {})", Self::column_name(inner))
                 }
                 AggregateFunction::SumDistinct(inner) => {
-                    format!("SUM(DISTINCT {})", self.return_item_to_column_name(inner))
+                    format!("SUM(DISTINCT {})", Self::column_name(inner))
                 }
                 AggregateFunction::AvgDistinct(inner) => {
-                    format!("AVG(DISTINCT {})", self.return_item_to_column_name(inner))
+                    format!("AVG(DISTINCT {})", Self::column_name(inner))
                 }
                 AggregateFunction::CollectDistinct(inner) => {
-                    format!(
-                        "COLLECT(DISTINCT {})",
-                        self.return_item_to_column_name(inner)
-                    )
+                    format!("COLLECT(DISTINCT {})", Self::column_name(inner))
                 }
             },
             ReturnItem::Function(func) => match func {
@@ -4387,6 +4386,10 @@ impl<'a> Executor<'a> {
                 ScalarFunction::DurationFunc(_) => "duration(...)".to_string(),
             },
         }
+    }
+
+    fn return_item_to_column_name(&self, item: &ReturnItem) -> String {
+        Self::column_name(item)
     }
 
     fn evaluate_return_item(

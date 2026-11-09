@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use maharit_cluster::shard_client::{ShardClient, ShardConnectOptions};
-use maharit_cluster::{ClusterConfig, Row, RowValue, ShardId};
+use maharit_cluster::{ClusterConfig, Row, ShardId};
 use maharit_query::{Parser, is_read_only};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::auth::{AuthManager, Operation};
+use crate::coordinator_plan::{self, CoordPlan, WireRow};
 use crate::tls::{DEFAULT_TLS_RELOAD_INTERVAL, ReloadableTlsAcceptor};
 
 /// メッセージ長プレフィックスの上限（バイト）。巨大な長さ宣言による
@@ -298,10 +299,8 @@ impl ShardCoordinatorServer {
                     ..
                 } => match self.check_query_auth(&session_token, &query).await {
                     Err(resp) => resp,
-                    Ok(()) => match self.execute_on_all_shards(&query).await {
-                        Ok(rows) => CoordResponse::Result {
-                            rows: rows_to_wire(rows),
-                        },
+                    Ok(()) => match self.execute(&query).await {
+                        Ok(rows) => CoordResponse::Result { rows },
                         Err(e) => CoordResponse::Error { message: e },
                     },
                 },
@@ -374,11 +373,33 @@ impl ShardCoordinatorServer {
 
     // ── Query fan-out ─────────────────────────────────────────────────────────
 
-    /// Send `query` to every known shard concurrently and merge results.
-    async fn execute_on_all_shards(&self, query: &str) -> Result<Vec<Row>, String> {
+    /// Run a client query: decide how it maps onto the shards
+    /// ([`coordinator_plan::plan`]), run it and merge the shard results.
+    async fn execute(&self, query: &str) -> Result<Vec<WireRow>, String> {
+        match coordinator_plan::plan(query)? {
+            CoordPlan::SingleShard => {
+                let first = self.shard_ids.iter().take(1).copied().collect::<Vec<_>>();
+                let mut batches = self.execute_on_shards(&first, query).await?;
+                Ok(batches.pop().unwrap_or_default())
+            }
+            CoordPlan::FanOut { shard_query, merge } => {
+                let batches = self
+                    .execute_on_shards(&self.shard_ids, &shard_query)
+                    .await?;
+                Ok(coordinator_plan::merge_rows(&merge, batches))
+            }
+        }
+    }
+
+    /// Send `query` to the given shards concurrently; one batch per shard.
+    async fn execute_on_shards(
+        &self,
+        shard_ids: &[ShardId],
+        query: &str,
+    ) -> Result<Vec<Vec<WireRow>>, String> {
         let mut handles = Vec::new();
 
-        for &shard_id in &self.shard_ids {
+        for &shard_id in shard_ids {
             if self.pool.contains_key(&shard_id) {
                 let q = query.to_string();
                 // Clone the Arc so the spawned task owns it.
@@ -400,11 +421,11 @@ impl ShardCoordinatorServer {
 
         // A failed shard fails the whole query: returning the other shards'
         // rows would silently drop data.
-        let mut all_rows: Vec<Vec<Row>> = Vec::new();
+        let mut all_rows: Vec<Vec<WireRow>> = Vec::new();
         let mut errors = Vec::new();
         for handle in handles {
             match handle.await {
-                Ok(Ok(rows)) => all_rows.push(rows),
+                Ok(Ok(rows)) => all_rows.push(rows_to_wire(rows)),
                 Ok(Err(e)) => errors.push(e),
                 Err(e) => errors.push(format!("task join error: {e}")),
             }
@@ -413,7 +434,7 @@ impl ShardCoordinatorServer {
             return Err(errors.join("; "));
         }
 
-        Ok(merge_rows(all_rows))
+        Ok(all_rows)
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
@@ -476,41 +497,8 @@ fn role_label(role: crate::auth::Role) -> String {
     }
 }
 
-/// Deduplicate and merge rows from multiple shards.
-fn merge_rows(batches: Vec<Vec<Row>>) -> Vec<Row> {
-    use std::collections::HashSet;
-
-    let mut seen: HashSet<Vec<(String, String)>> = HashSet::new();
-    let mut out = Vec::new();
-
-    for batch in batches {
-        for row in batch {
-            let mut key: Vec<(String, String)> = row
-                .columns
-                .iter()
-                .map(|(k, v)| (k.clone(), row_value_to_string(v)))
-                .collect();
-            key.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-            if seen.insert(key) {
-                out.push(row);
-            }
-        }
-    }
-    out
-}
-
-fn row_value_to_string(v: &RowValue) -> String {
-    match v {
-        RowValue::Null => "null".to_string(),
-        RowValue::Int(n) => n.to_string(),
-        RowValue::Text(s) => s.clone(),
-        RowValue::Bool(b) => b.to_string(),
-        RowValue::Json(text) => text.clone(),
-    }
-}
-
 /// Rows as the client protocol sends them: values keep their JSON types.
-fn rows_to_wire(rows: Vec<Row>) -> Vec<HashMap<String, serde_json::Value>> {
+fn rows_to_wire(rows: Vec<Row>) -> Vec<WireRow> {
     rows.into_iter()
         .map(|row| {
             row.columns
@@ -526,7 +514,7 @@ fn rows_to_wire(rows: Vec<Row>) -> Vec<HashMap<String, serde_json::Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maharit_cluster::{ClusterConfig, ShardConfig};
+    use maharit_cluster::{ClusterConfig, RowValue, ShardConfig};
 
     fn make_config(n_shards: usize) -> (CoordinatorConfig, ClusterConfig) {
         let shards = (0..n_shards as u32)
@@ -636,25 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_rows_dedup() {
-        let mut r = Row::new();
-        r.insert("x", RowValue::Int(1));
-        let batches = vec![vec![r.clone()], vec![r]];
-        let merged = merge_rows(batches);
-        assert_eq!(merged.len(), 1);
-    }
-
-    #[test]
-    fn test_merge_rows_distinct() {
-        let mut r1 = Row::new();
-        r1.insert("x", RowValue::Int(1));
-        let mut r2 = Row::new();
-        r2.insert("x", RowValue::Int(2));
-        let merged = merge_rows(vec![vec![r1], vec![r2]]);
-        assert_eq!(merged.len(), 2);
-    }
-
-    #[test]
     fn test_coordinator_server_new() {
         let (cc, cluster) = make_config(2);
         let srv = ShardCoordinatorServer::new(cc, cluster);
@@ -707,7 +676,7 @@ mod tests {
         srv: &ShardCoordinatorServer,
         q: &str,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
-        srv.execute_on_all_shards(q).await.map(rows_to_wire)
+        srv.execute(q).await
     }
 
     #[tokio::test]
@@ -748,6 +717,66 @@ mod tests {
         assert!(err.contains("shard 1 (127.0.0.1:1)"), "{err}");
     }
 
+    /// task154: aggregates, ORDER BY / SKIP / LIMIT and duplicates behave as
+    /// on a single database holding the union of the shards; writes are refused.
+    #[tokio::test]
+    async fn reads_merge_like_a_single_database_and_writes_are_refused() {
+        let a = start_shard().await.to_string();
+        let b = start_shard().await.to_string();
+        let srv = coordinator_for(&[a.clone(), b.clone()]);
+        for (addr, names) in [(&a, ["a", "c", "e"]), (&b, ["b", "c", "d"])] {
+            let mut c = ShardClient::new(addr.as_str());
+            for (i, n) in names.iter().enumerate() {
+                c.execute(&format!("CREATE (:P {{name: '{n}', v: {i}}})"))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let rows = wire(&srv, "MATCH (p:P) RETURN count(p) AS c")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["c"], 6);
+
+        let rows = wire(
+            &srv,
+            "MATCH (p:P) RETURN p.name AS name, count(p) AS c, sum(p.v) AS s ORDER BY c DESC, name LIMIT 2",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "c");
+        assert_eq!(rows[0]["c"], 2);
+        assert_eq!(rows[0]["s"], 2);
+        assert_eq!(rows[1]["name"], "a");
+
+        let rows = wire(
+            &srv,
+            "MATCH (p:P) RETURN p.name AS name ORDER BY name SKIP 1 LIMIT 3",
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["b", "c", "c"]);
+
+        let rows = wire(&srv, "MATCH (p:P) RETURN DISTINCT p.name AS name")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+        let rows = wire(&srv, "RETURN 1 AS one").await.unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let err = wire(&srv, "CREATE (:P {name: 'x'})").await.unwrap_err();
+        assert!(err.contains("read-only"), "{err}");
+        let err = wire(&srv, "MATCH (p:P) RETURN avg(p.v)").await.unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+        let rows = wire(&srv, "MATCH (p:P {name: 'x'}) RETURN p")
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
     // ── TLS and shard authentication (task151) ──────────────────────────────
 
     /// A shard serving TLS with the test certificate and requiring login as
@@ -782,7 +811,12 @@ mod tests {
 
         let srv = coordinator_for(std::slice::from_ref(&shard))
             .with_shard_options(options(cert.path(), "admin"));
-        wire(&srv, "CREATE (:S {v: 1})").await.unwrap();
+        // The coordinator is read-only: write to the shard directly.
+        ShardClient::new(shard.as_str())
+            .with_options(options(cert.path(), "admin"))
+            .execute("CREATE (:S {v: 1})")
+            .await
+            .unwrap();
         let rows = wire(&srv, "MATCH (s:S) RETURN s.v AS v").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["v"], 1);

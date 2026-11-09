@@ -304,6 +304,31 @@ def test_coordinator_over_tls(binary: str, port: int, tmp: str) -> None:
         with Client.connect(f"127.0.0.1:{coord_port}", ca_file=cert, max_retries=0) as c:
             return list(c.query(q))
 
+    def shard_write(port: int, q: str) -> dict:
+        """コーディネーターは読み取り専用なので、シャードに TLS + ログインで直接書く。"""
+        import json
+        import socket
+        import ssl as ssl_mod
+        import struct
+
+        ctx = ssl_mod.create_default_context(cafile=cert)
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as raw, \
+                ctx.wrap_socket(raw, server_hostname="127.0.0.1") as s:
+            def call(req: dict) -> dict:
+                body = json.dumps(req).encode()
+                s.sendall(struct.pack(">I", len(body)) + body)
+                def read(n: int) -> bytes:
+                    buf = b""
+                    while len(buf) < n:
+                        buf += s.recv(n - len(buf))
+                    return buf
+
+                (n,) = struct.unpack(">I", read(4))
+                return json.loads(read(n))
+
+            token = call({"type": "login", "username": "admin", "password": "shard-pw"})["sessionToken"]
+            return call({"type": "query", "query": q, "sessionToken": token})
+
     try:
         for i, p in enumerate(shard_ports):
             procs.append(start_server(
@@ -318,9 +343,17 @@ def test_coordinator_over_tls(binary: str, port: int, tmp: str) -> None:
         procs.append(good)
         check("TLS コーディネーター起動", wait_tls_ready(coord_port, cert))
         try:
-            query("CREATE (:Sharded {n: 42})")
-            rows = query("MATCH (s:Sharded) RETURN s.n AS n")
-            check("TLS・認証付きのシャードに届き、数値が返る", rows == [{"n": 42}], str(rows))
+            shard_write(shard_ports[0], "CREATE (:Sharded {n: 42})")
+            shard_write(shard_ports[1], "CREATE (:Sharded {n: 8})")
+            rows = query("MATCH (s:Sharded) RETURN s.n AS n ORDER BY n")
+            check("TLS・認証付きのシャードに届き、数値が返る", rows == [{"n": 8}, {"n": 42}], str(rows))
+            rows = query("MATCH (s:Sharded) RETURN count(s) AS c, sum(s.n) AS total")
+            check("集計がシャードをまたいで合算される", rows == [{"c": 2, "total": 50}], str(rows))
+            try:
+                query("CREATE (:Sharded {n: 1})")
+                check("コーディネーターでの書き込みは拒否される", False, "accepted")
+            except Exception as e:
+                check("コーディネーターでの書き込みは拒否される", "read-only" in str(e), str(e))
         except Exception as e:
             check("TLS・認証付きのシャードに届き、数値が返る", False, str(e))
         stop(good)

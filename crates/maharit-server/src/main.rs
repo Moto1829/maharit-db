@@ -3,6 +3,7 @@ pub mod auth;
 #[cfg(test)]
 mod concurrency_stress_test;
 pub mod coordinator;
+pub mod coordinator_plan;
 pub mod durable_wal;
 pub mod http_server;
 pub mod logging;
