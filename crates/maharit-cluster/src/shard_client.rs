@@ -30,7 +30,9 @@ enum ShardRequest {
 #[serde(tag = "type")]
 enum ShardResponse {
     #[serde(rename = "result")]
-    Result { rows: Vec<HashMap<String, String>> },
+    Result {
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(other)]
@@ -172,7 +174,7 @@ impl ShardClient {
                 .map(|cols| {
                     let mut row = Row::new();
                     for (k, v) in cols {
-                        row.insert(k, RowValue::Text(v));
+                        row.insert(k, RowValue::from_json(v));
                     }
                     row
                 })

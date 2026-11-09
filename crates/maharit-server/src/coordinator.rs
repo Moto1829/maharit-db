@@ -55,7 +55,9 @@ enum CoordRequest {
 #[serde(tag = "type")]
 enum CoordResponse {
     #[serde(rename = "result")]
-    Result { rows: Vec<HashMap<String, String>> },
+    Result {
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "pong")]
@@ -331,17 +333,28 @@ impl ShardCoordinatorServer {
                         .expect("shard_id must exist in pool")
                         .lock()
                         .await;
-                    guard.execute(&q).await.unwrap_or_default()
+                    let addr = guard.addr().to_string();
+                    guard
+                        .execute(&q)
+                        .await
+                        .map_err(|e| format!("shard {shard_id} ({addr}): {e}"))
                 }));
             }
         }
 
+        // A failed shard fails the whole query: returning the other shards'
+        // rows would silently drop data.
         let mut all_rows: Vec<Vec<Row>> = Vec::new();
+        let mut errors = Vec::new();
         for handle in handles {
             match handle.await {
-                Ok(rows) => all_rows.push(rows),
-                Err(e) => return Err(format!("Task join error: {}", e)),
+                Ok(Ok(rows)) => all_rows.push(rows),
+                Ok(Err(e)) => errors.push(e),
+                Err(e) => errors.push(format!("task join error: {e}")),
             }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
         }
 
         Ok(merge_rows(all_rows))
@@ -432,15 +445,17 @@ fn row_value_to_string(v: &RowValue) -> String {
         RowValue::Int(n) => n.to_string(),
         RowValue::Text(s) => s.clone(),
         RowValue::Bool(b) => b.to_string(),
+        RowValue::Json(text) => text.clone(),
     }
 }
 
-fn rows_to_wire(rows: Vec<Row>) -> Vec<HashMap<String, String>> {
+/// Rows as the client protocol sends them: values keep their JSON types.
+fn rows_to_wire(rows: Vec<Row>) -> Vec<HashMap<String, serde_json::Value>> {
     rows.into_iter()
         .map(|row| {
             row.columns
                 .into_iter()
-                .map(|(k, v)| (k, row_value_to_string(&v)))
+                .map(|(k, v)| (k, v.to_json()))
                 .collect()
         })
         .collect()
@@ -593,7 +608,83 @@ mod tests {
         r.insert("age", RowValue::Int(30));
         let wire = rows_to_wire(vec![r]);
         assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0].get("name").unwrap(), "Alice");
-        assert_eq!(wire[0].get("age").unwrap(), "30");
+        assert_eq!(wire[0]["name"], "Alice");
+        assert_eq!(wire[0]["age"], 30);
+    }
+
+    // ── Against real shard servers ──────────────────────────────────────────
+
+    async fn start_shard() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = crate::tcp_server::TcpServer::new(crate::tcp_server::ServerConfig {
+            bind_address: addr.to_string(),
+            ..Default::default()
+        });
+        tokio::spawn(async move { server.start_with_listener(listener).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
+    }
+
+    fn coordinator_for(addrs: &[String]) -> ShardCoordinatorServer {
+        let cluster = ClusterConfig {
+            enabled: true,
+            strategy: "hash".into(),
+            shards: addrs
+                .iter()
+                .enumerate()
+                .map(|(i, a)| ShardConfig {
+                    id: i as u32,
+                    address: a.clone(),
+                })
+                .collect(),
+            replication_factor: 1,
+        };
+        ShardCoordinatorServer::new(CoordinatorConfig::default(), cluster)
+    }
+
+    async fn wire(
+        srv: &ShardCoordinatorServer,
+        q: &str,
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
+        srv.execute_on_all_shards(q).await.map(rows_to_wire)
+    }
+
+    #[tokio::test]
+    async fn typed_values_and_errors_pass_through_the_coordinator() {
+        let a = start_shard().await.to_string();
+        let b = start_shard().await.to_string();
+        let srv = coordinator_for(&[a.clone(), b.clone()]);
+        for (addr, n) in [(&a, 1), (&b, 2)] {
+            let mut c = ShardClient::new(addr.as_str());
+            c.execute(&format!("CREATE (:P {{n: {n}, f: {n}.5, ok: true}})"))
+                .await
+                .unwrap();
+        }
+
+        let mut rows = wire(
+            &srv,
+            // Lists and maps cannot be stored as properties yet (graph/146),
+            // so build them in RETURN.
+            "MATCH (p:P) RETURN p.n AS n, p.f AS f, p.ok AS ok, ['x', 'y'] AS tags, {k: p.n} AS m",
+        )
+        .await
+        .unwrap();
+        rows.sort_by_key(|r| r["n"].as_i64());
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["n"], 1);
+        assert_eq!(rows[1]["f"], 2.5);
+        assert_eq!(rows[0]["ok"], true);
+        assert_eq!(rows[0]["tags"], serde_json::json!(["x", "y"]));
+        assert_eq!(rows[1]["m"], serde_json::json!({"k": 2}));
+
+        // A query error on the shards is reported, not turned into no rows.
+        let err = wire(&srv, "MATCH (p:P RETURN p").await.unwrap_err();
+        assert!(err.contains("shard 0") && err.contains("shard 1"), "{err}");
+
+        // An unreachable shard fails the query instead of dropping its rows.
+        let srv = coordinator_for(&[a, "127.0.0.1:1".to_string()]);
+        let err = wire(&srv, "MATCH (p:P) RETURN p.n AS n").await.unwrap_err();
+        assert!(err.contains("shard 1 (127.0.0.1:1)"), "{err}");
     }
 }

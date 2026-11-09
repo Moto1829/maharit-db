@@ -110,6 +110,33 @@ pub enum RowValue {
     Text(String),
     /// Boolean value.
     Bool(bool),
+    /// Any other JSON value (float, list, map, temporal), kept as its
+    /// serialized JSON text so that rows stay hashable.
+    Json(String),
+}
+
+impl RowValue {
+    /// Convert a value of a shard's `result` row.
+    pub fn from_json(value: serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => RowValue::Null,
+            serde_json::Value::Bool(b) => RowValue::Bool(b),
+            serde_json::Value::String(s) => RowValue::Text(s),
+            serde_json::Value::Number(n) if n.is_i64() => RowValue::Int(n.as_i64().unwrap_or(0)),
+            other => RowValue::Json(other.to_string()),
+        }
+    }
+
+    /// The JSON value to send to a client.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            RowValue::Null => serde_json::Value::Null,
+            RowValue::Int(n) => serde_json::Value::from(*n),
+            RowValue::Text(s) => serde_json::Value::String(s.clone()),
+            RowValue::Bool(b) => serde_json::Value::Bool(*b),
+            RowValue::Json(text) => serde_json::from_str(text).unwrap_or(serde_json::Value::Null),
+        }
+    }
 }
 
 impl From<&PropertyValue> for RowValue {
@@ -117,7 +144,7 @@ impl From<&PropertyValue> for RowValue {
         match pv {
             PropertyValue::Null => RowValue::Null,
             PropertyValue::Int(v) => RowValue::Int(*v),
-            PropertyValue::Float(v) => RowValue::Int(*v as i64),
+            PropertyValue::Float(v) => RowValue::Json(serde_json::Value::from(*v).to_string()),
             PropertyValue::String(s) => RowValue::Text(s.clone()),
             PropertyValue::Bool(b) => RowValue::Bool(*b),
             PropertyValue::Date(_)
