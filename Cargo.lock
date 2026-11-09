@@ -1029,10 +1029,12 @@ name = "maharit-cluster"
 version = "0.2.0"
 dependencies = [
  "maharit-core",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "toml",
 ]
 

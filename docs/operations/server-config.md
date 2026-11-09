@@ -83,6 +83,8 @@ maharit server [OPTIONS]
 | `--node-id` | | `node-1` | クラスター内で一意なノード ID（環境変数: `MAHARIT_NODE_ID`） |
 | `--shard` / `--shard-id` | | なし | シャードノードとして起動（[シャーディング](../advanced/sharding.md)） |
 | `--coordinator` / `--coordinator-port` / `--shards` / `--strategy` | | なし | コーディネーターとして起動 |
+| `--shard-ca` | | なし | シャードの証明書を検証する CA 証明書。指定するとシャードに TLS で接続する（コーディネーター、環境変数: `MAHARIT_SHARD_CA`） |
+| `--shard-user` / `--shard-password` | | `admin` / なし | `--require-auth` のシャードにログインする資格情報（コーディネーター、環境変数: `MAHARIT_SHARD_USER` / `MAHARIT_SHARD_PASSWORD`） |
 
 ## 使用例
 

@@ -10,16 +10,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use maharit_cluster::shard_client::ShardClient;
+use maharit_cluster::shard_client::{ShardClient, ShardConnectOptions};
 use maharit_cluster::{ClusterConfig, Row, RowValue, ShardId};
 use maharit_query::{Parser, is_read_only};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::auth::{AuthManager, Operation};
+use crate::tls::{DEFAULT_TLS_RELOAD_INTERVAL, ReloadableTlsAcceptor};
 
 /// メッセージ長プレフィックスの上限（バイト）。巨大な長さ宣言による
 /// メモリ枯渇 DoS を防ぐ。`tcp_server::MAX_MESSAGE_SIZE` と同値。
@@ -87,10 +88,11 @@ enum CoordResponse {
 /// A pool of [`ShardClient`]s keyed by shard ID, protected by a `Mutex`.
 type ShardPool = Arc<HashMap<ShardId, Mutex<ShardClient>>>;
 
-fn build_shard_pool(config: &ClusterConfig) -> ShardPool {
+fn build_shard_pool(config: &ClusterConfig, options: &ShardConnectOptions) -> ShardPool {
     let mut map = HashMap::new();
     for shard in &config.shards {
-        map.insert(shard.id, Mutex::new(ShardClient::new(&shard.address)));
+        let client = ShardClient::new(&shard.address).with_options(options.clone());
+        map.insert(shard.id, Mutex::new(client));
     }
     Arc::new(map)
 }
@@ -130,20 +132,38 @@ pub struct ShardCoordinatorServer {
     shutdown: Arc<AtomicBool>,
     /// Authentication manager. Only enforced when `coord_config.require_auth = true`.
     auth: Arc<Mutex<AuthManager>>,
+    /// TLS for client connections. `None` serves plaintext.
+    tls: Option<ReloadableTlsAcceptor>,
+    /// Shards, kept to rebuild the pool with other connect options.
+    cluster_config: ClusterConfig,
 }
 
 impl ShardCoordinatorServer {
     /// Create a new coordinator server from the given configurations.
     pub fn new(coord_config: CoordinatorConfig, cluster_config: ClusterConfig) -> Self {
         let shard_ids: Vec<ShardId> = cluster_config.shards.iter().map(|s| s.id).collect();
-        let pool = build_shard_pool(&cluster_config);
+        let pool = build_shard_pool(&cluster_config, &ShardConnectOptions::default());
         Self {
             coord_config,
             pool,
             shard_ids,
             shutdown: Arc::new(AtomicBool::new(false)),
             auth: Arc::new(Mutex::new(AuthManager::new())),
+            tls: None,
+            cluster_config,
         }
+    }
+
+    /// Serve client connections over TLS.
+    pub fn with_tls(mut self, tls: ReloadableTlsAcceptor) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Connect to the shards over TLS and/or with credentials.
+    pub fn with_shard_options(mut self, options: ShardConnectOptions) -> Self {
+        self.pool = build_shard_pool(&self.cluster_config, &options);
+        self
     }
 
     /// Replace the authentication manager (e.g. to set a non-default admin
@@ -162,10 +182,26 @@ impl ShardCoordinatorServer {
     pub async fn start(self: Arc<Self>) -> std::io::Result<()> {
         let listener = TcpListener::bind(&self.coord_config.bind_address).await?;
         println!(
-            "Coordinator listening on {} ({} shards)",
+            "Coordinator listening on {} ({} shards, {})",
             self.coord_config.bind_address,
-            self.shard_ids.len()
+            self.shard_ids.len(),
+            if self.tls.is_some() {
+                "TLS"
+            } else {
+                "plaintext"
+            }
         );
+        if self.tls.is_none()
+            && !crate::tcp_server::is_loopback_bind(&self.coord_config.bind_address)
+        {
+            eprintln!(
+                "WARN: client connections are NOT encrypted (no --tls-cert/--tls-key) and the coordinator listens on {}.",
+                self.coord_config.bind_address
+            );
+        }
+        if let Some(tls) = &self.tls {
+            tls.spawn_watcher(DEFAULT_TLS_RELOAD_INTERVAL, Arc::clone(&self.shutdown));
+        }
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -184,8 +220,25 @@ impl ShardCoordinatorServer {
             };
 
             let srv = Arc::clone(&self);
+            let acceptor = self.tls.as_ref().map(ReloadableTlsAcceptor::acceptor);
             tokio::spawn(async move {
-                if let Err(e) = srv.handle_connection(stream).await {
+                let result = match acceptor {
+                    None => srv.handle_connection(stream).await,
+                    Some(acceptor) => {
+                        match timeout(srv.coord_config.timeout, acceptor.accept(stream)).await {
+                            Ok(Ok(tls)) => srv.handle_connection(tls).await,
+                            Ok(Err(e)) => Err(std::io::Error::new(
+                                e.kind(),
+                                format!("TLS handshake failed: {e}"),
+                            )),
+                            Err(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "TLS handshake timed out",
+                            )),
+                        }
+                    }
+                };
+                if let Err(e) = result {
                     eprintln!("Coordinator: connection from {} error: {}", peer, e);
                 }
             });
@@ -195,7 +248,10 @@ impl ShardCoordinatorServer {
 
     // ── Connection handler ────────────────────────────────────────────────────
 
-    async fn handle_connection(&self, mut stream: TcpStream) -> std::io::Result<()> {
+    async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        mut stream: S,
+    ) -> std::io::Result<()> {
         loop {
             // Read request
             let req = match self.read_request(&mut stream).await {
@@ -362,7 +418,10 @@ impl ShardCoordinatorServer {
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
 
-    async fn read_request(&self, stream: &mut TcpStream) -> std::io::Result<CoordRequest> {
+    async fn read_request<S: AsyncRead + Unpin>(
+        &self,
+        stream: &mut S,
+    ) -> std::io::Result<CoordRequest> {
         let mut len_buf = [0u8; 4];
         timeout(self.coord_config.timeout, stream.read_exact(&mut len_buf))
             .await
@@ -387,9 +446,9 @@ impl ShardCoordinatorServer {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    async fn write_response(
+    async fn write_response<S: AsyncWrite + Unpin>(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut S,
         resp: &CoordResponse,
     ) -> std::io::Result<()> {
         let payload = serde_json::to_vec(resp)
@@ -398,7 +457,8 @@ impl ShardCoordinatorServer {
 
         timeout(self.coord_config.timeout, async {
             stream.write_all(&len_bytes).await?;
-            stream.write_all(&payload).await
+            stream.write_all(&payload).await?;
+            stream.flush().await
         })
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))?
@@ -569,7 +629,7 @@ mod tests {
     #[test]
     fn test_build_shard_pool() {
         let (_, cluster) = make_config(3);
-        let pool = build_shard_pool(&cluster);
+        let pool = build_shard_pool(&cluster, &ShardConnectOptions::default());
         assert_eq!(pool.len(), 3);
         assert!(pool.contains_key(&0));
         assert!(pool.contains_key(&2));
@@ -686,5 +746,135 @@ mod tests {
         let srv = coordinator_for(&[a, "127.0.0.1:1".to_string()]);
         let err = wire(&srv, "MATCH (p:P) RETURN p.n AS n").await.unwrap_err();
         assert!(err.contains("shard 1 (127.0.0.1:1)"), "{err}");
+    }
+
+    // ── TLS and shard authentication (task151) ──────────────────────────────
+
+    /// A shard serving TLS with the test certificate and requiring login as
+    /// admin/admin, with sessions that expire after `session`.
+    async fn start_secure_shard(cert: &str, key: &str, session: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tls = ReloadableTlsAcceptor::new(crate::tls::TlsConfig::new(cert, key)).unwrap();
+        let server = crate::tcp_server::TcpServer::new(crate::tcp_server::ServerConfig {
+            bind_address: addr.to_string(),
+            require_auth: true,
+            ..Default::default()
+        })
+        .with_auth(AuthManager::with_session_timeout(session))
+        .with_tls(tls);
+        tokio::spawn(async move { server.start_with_listener(listener).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn coordinator_reaches_tls_shards_with_credentials() {
+        use crate::tls::test_support::*;
+        let cert = TempPem::new("shard_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("shard_key", TEST_SERVER_KEY_PEM);
+        let other = TempPem::new("shard_other", TEST_SERVER_CERT2_PEM);
+        let shard = start_secure_shard(cert.path(), key.path(), Duration::from_secs(1)).await;
+        let options = |ca: &str, password: &str| ShardConnectOptions {
+            tls: Some(crate::tls::build_client_config(Some(ca), false).unwrap()),
+            credentials: Some(("admin".to_string(), password.to_string())),
+        };
+
+        let srv = coordinator_for(std::slice::from_ref(&shard))
+            .with_shard_options(options(cert.path(), "admin"));
+        wire(&srv, "CREATE (:S {v: 1})").await.unwrap();
+        let rows = wire(&srv, "MATCH (s:S) RETURN s.v AS v").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["v"], 1);
+
+        // The session expires: the client logs in again and the query works.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let rows = wire(&srv, "MATCH (s:S) RETURN s.v AS v").await.unwrap();
+        assert_eq!(rows.len(), 1, "after session expiry");
+
+        // Wrong password, untrusted certificate, and plaintext all fail.
+        let bad_pw = coordinator_for(std::slice::from_ref(&shard))
+            .with_shard_options(options(cert.path(), "wrong"));
+        let err = wire(&bad_pw, "MATCH (s:S) RETURN s").await.unwrap_err();
+        assert!(err.contains("credentials"), "{err}");
+        let untrusted = coordinator_for(std::slice::from_ref(&shard))
+            .with_shard_options(options(other.path(), "admin"));
+        let err = wire(&untrusted, "MATCH (s:S) RETURN s").await.unwrap_err();
+        assert!(err.contains("TLS"), "{err}");
+        let plain = coordinator_for(std::slice::from_ref(&shard));
+        assert!(wire(&plain, "MATCH (s:S) RETURN s").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn coordinator_serves_clients_over_tls() {
+        use crate::tls::test_support::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let cert = TempPem::new("coord_cert", TEST_SERVER_CERT_PEM);
+        let key = TempPem::new("coord_key", TEST_SERVER_KEY_PEM);
+        let shard = start_shard().await.to_string();
+
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let cluster = ClusterConfig {
+            enabled: true,
+            strategy: "hash".into(),
+            shards: vec![ShardConfig {
+                id: 0,
+                address: shard,
+            }],
+            replication_factor: 1,
+        };
+        let tls = ReloadableTlsAcceptor::new(crate::tls::TlsConfig::new(cert.path(), key.path()))
+            .unwrap();
+        let srv = Arc::new(
+            ShardCoordinatorServer::new(
+                CoordinatorConfig {
+                    bind_address: addr.to_string(),
+                    ..Default::default()
+                },
+                cluster,
+            )
+            .with_tls(tls),
+        );
+        tokio::spawn(Arc::clone(&srv).start());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let config = crate::tls::build_client_config(Some(cert.path()), false).unwrap();
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+        let mut stream = tokio_rustls::TlsConnector::from(config)
+            .connect(name, tcp)
+            .await
+            .unwrap();
+        let body = br#"{"type":"query","query":"RETURN 1 AS one"}"#;
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut buf).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(resp["type"], "result", "{resp}");
+        assert_eq!(resp["rows"][0]["one"], 1);
+
+        // A plaintext client gets no answer.
+        let mut plain = tokio::net::TcpStream::connect(addr).await.unwrap();
+        plain
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        plain.write_all(body).await.unwrap();
+        let mut out = Vec::new();
+        let _ = timeout(Duration::from_secs(5), plain.read_to_end(&mut out)).await;
+        assert!(
+            !out.windows(8).any(|w| w == b"\"result\""),
+            "plaintext answered"
+        );
+        srv.shutdown();
     }
 }

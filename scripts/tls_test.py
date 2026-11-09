@@ -284,6 +284,68 @@ def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
           "Replication connections use TLS" in output)
 
 
+def test_coordinator_over_tls(binary: str, port: int, tmp: str) -> None:
+    section("コーディネーターとシャードを TLS・認証付きで動かす")
+    cert, key = make_cert(tmp, "coord")
+    shard_ports = [port + 40, port + 41]
+    coord_port = port + 42
+    procs: list[subprocess.Popen] = []
+
+    def start_coordinator(extra: list[str]) -> subprocess.Popen:
+        return subprocess.Popen(
+            [binary, "server", "--coordinator", "--host", "127.0.0.1",
+             "--coordinator-port", str(coord_port),
+             "--shards", ",".join(f"127.0.0.1:{p}" for p in shard_ports),
+             "--tls-cert", cert, "--tls-key", key, *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+
+    def query(q: str):
+        with Client.connect(f"127.0.0.1:{coord_port}", ca_file=cert, max_retries=0) as c:
+            return list(c.query(q))
+
+    try:
+        for i, p in enumerate(shard_ports):
+            procs.append(start_server(
+                binary, p, os.path.join(tmp, f"shard{i}.db"),
+                ["--tls-cert", cert, "--tls-key", key,
+                 "--require-auth", "--admin-password", "shard-pw"],
+            ))
+        for p in shard_ports:
+            check(f"シャード起動（{p}）", wait_tls_ready(p, cert))
+
+        good = start_coordinator(["--shard-ca", cert, "--shard-password", "shard-pw"])
+        procs.append(good)
+        check("TLS コーディネーター起動", wait_tls_ready(coord_port, cert))
+        try:
+            query("CREATE (:Sharded {n: 42})")
+            rows = query("MATCH (s:Sharded) RETURN s.n AS n")
+            check("TLS・認証付きのシャードに届き、数値が返る", rows == [{"n": 42}], str(rows))
+        except Exception as e:
+            check("TLS・認証付きのシャードに届き、数値が返る", False, str(e))
+        stop(good)
+        procs.remove(good)
+
+        for label, extra in (
+            ("--shard-password なしではシャードに拒否される", ["--shard-ca", cert]),
+            ("--shard-ca なしではシャードに接続できない", ["--shard-password", "shard-pw"]),
+        ):
+            bad = start_coordinator(extra)
+            procs.append(bad)
+            wait_tls_ready(coord_port, cert)
+            failed = False
+            try:
+                query("MATCH (s:Sharded) RETURN s.n AS n")
+            except Exception as e:
+                failed = "shard" in str(e)
+            check(label, failed)
+            stop(bad)
+            procs.remove(bad)
+    finally:
+        for proc in procs:
+            stop(proc)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MaharitDB TLS テスト")
     parser.add_argument("--binary", default=None)
@@ -301,6 +363,7 @@ def main() -> None:
         test_tls_connections(binary, args.port, tmp)
         test_misconfiguration(binary, args.port, tmp)
         test_replication_over_tls(binary, args.port, tmp)
+        test_coordinator_over_tls(binary, args.port, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     sys.exit(summarize())

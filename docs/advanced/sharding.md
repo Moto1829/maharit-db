@@ -142,6 +142,37 @@ let coordinator = ClusterCoordinator::new(config);
 let rows = coordinator.execute_all("MATCH (n:Person) RETURN n.name").await?;
 ```
 
+## コーディネーターサーバー（`maharit server --coordinator`）
+
+コーディネーターは、クライアントからのクエリを全シャード（通常の `maharit server`）に送り、結果を合わせて返します。
+
+```bash
+# シャード（TLS + 認証）
+maharit server --host 0.0.0.0 --port 7687 --data /var/lib/maharit/shard0.db \
+  --tls-cert /etc/maharit/shard0.crt --tls-key /etc/maharit/shard0.key \
+  --require-auth --admin-password "$SHARD_PASSWORD"
+
+# コーディネーター
+maharit server --coordinator --host 0.0.0.0 --coordinator-port 7690 \
+  --shards shard0.example.com:7687,shard1.example.com:7687 \
+  --tls-cert /etc/maharit/coord.crt --tls-key /etc/maharit/coord.key \
+  --shard-ca /etc/maharit/ca.crt \
+  --shard-user admin --shard-password "$SHARD_PASSWORD" \
+  --require-auth --admin-password "$COORD_PASSWORD"
+```
+
+- `--tls-cert` / `--tls-key`: クライアントからコーディネーターへの接続を TLS にする（[TLS/SSL 設定](../operations/tls.md)）
+- `--shard-ca`: シャードの証明書を検証して TLS で接続する。各シャードの証明書は、`--shards` に書いたホスト名（または IP アドレス）に対して有効である必要がある
+- `--shard-user` / `--shard-password`: `--require-auth` のシャードにログインする。セッションが切れたら自動でログインし直す
+- `--require-auth` / `--admin-password`: コーディネーター自身へのログイン（シャードの資格情報とは別）
+- どれかのシャードがエラーを返したり接続できなかったりすると、クエリ全体がエラーになる
+
+!!! warning "コーディネーターの制限"
+    コーディネーターは、受け取ったクエリをそのまま**全シャード**に送ります。
+
+    - 書き込み（`CREATE` など）も全シャードで実行され、同じデータが全シャードに作られます。シャーディング戦略（`--strategy`）によるルーティングは、まだコーディネーターで使われていません
+    - 結果は、全シャードの行を連結し、まったく同じ内容の行を 1 行にまとめたものです。`count()` などの集計はシャードごとの値になり、合算されません。`ORDER BY` / `LIMIT` もシャードごとに効きます
+
 ## リバランス（データ移動）
 
 シャード間のデータ偏りを解消するためにリバランスを実行できます。

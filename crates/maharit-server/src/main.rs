@@ -117,6 +117,10 @@ fn run_server(args: &[String]) {
     let mut tls_key: Option<String> = None;
     let mut tls_min_version: Option<String> = None;
     let mut leader_ca: Option<String> = None;
+    // Coordinator → shard connections
+    let mut shard_ca: Option<String> = None;
+    let mut shard_user: Option<String> = None;
+    let mut shard_password: Option<String> = None;
 
     // Sharding options
     let mut shard_mode = false;
@@ -260,6 +264,24 @@ fn run_server(args: &[String]) {
             "--coordinator" => {
                 coordinator_mode = true;
             }
+            "--shard-ca" => {
+                if i + 1 < args.len() {
+                    shard_ca = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--shard-user" => {
+                if i + 1 < args.len() {
+                    shard_user = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--shard-password" => {
+                if i + 1 < args.len() {
+                    shard_password = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             "--coordinator-port" => {
                 if i + 1 < args.len() {
                     coordinator_port = Some(args[i + 1].clone());
@@ -302,10 +324,6 @@ fn run_server(args: &[String]) {
 
     // ── Coordinator mode: no local graph needed ───────────────────────────────
     if coordinator_mode {
-        if tls.is_some() {
-            eprintln!("Error: TLS (--tls-cert/--tls-key) is not supported in coordinator mode yet");
-            std::process::exit(1);
-        }
         let coord_bind = {
             let host = config.bind_address.split(':').next().unwrap_or("127.0.0.1");
             let port = coordinator_port.as_deref().unwrap_or("7690");
@@ -340,9 +358,14 @@ fn run_server(args: &[String]) {
         };
 
         let coord_auth = resolve_admin_auth(config.require_auth, admin_password.take());
-        let mut srv_inner = ShardCoordinatorServer::new(coord_config, cluster_config);
+        let shard_options = resolve_shard_options(shard_ca, shard_user, shard_password);
+        let mut srv_inner = ShardCoordinatorServer::new(coord_config, cluster_config)
+            .with_shard_options(shard_options);
         if let Some(a) = coord_auth {
             srv_inner = srv_inner.with_auth(a);
+        }
+        if let Some(t) = tls {
+            srv_inner = srv_inner.with_tls(t);
         }
         let srv = Arc::new(srv_inner);
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
@@ -657,6 +680,44 @@ fn resolve_tls(
             std::process::exit(1);
         }
     }
+}
+
+/// How the coordinator connects to its shards: `--shard-ca` (TLS, verifying
+/// each shard's certificate for the host in `--shards`) and
+/// `--shard-user` / `--shard-password` (log in to shards started with
+/// `--require-auth`). Environment fallbacks: `MAHARIT_SHARD_CA`,
+/// `MAHARIT_SHARD_USER`, `MAHARIT_SHARD_PASSWORD`.
+fn resolve_shard_options(
+    ca: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+) -> maharit_cluster::shard_client::ShardConnectOptions {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let ca = ca.or_else(|| env("MAHARIT_SHARD_CA"));
+    let user = user.or_else(|| env("MAHARIT_SHARD_USER"));
+    let password = password.or_else(|| env("MAHARIT_SHARD_PASSWORD"));
+
+    let tls = ca.map(
+        |ca| match crate::tls::build_client_config(Some(&ca), false) {
+            Ok(config) => {
+                println!("Connecting to shards over TLS");
+                config
+            }
+            Err(e) => {
+                eprintln!("Error: failed to load --shard-ca {ca}: {e}");
+                std::process::exit(1);
+            }
+        },
+    );
+    let credentials = match (user, password) {
+        (None, None) => None,
+        (user, Some(password)) => Some((user.unwrap_or_else(|| "admin".to_string()), password)),
+        (Some(_), None) => {
+            eprintln!("Error: --shard-user requires --shard-password");
+            std::process::exit(1);
+        }
+    };
+    maharit_cluster::shard_client::ShardConnectOptions { tls, credentials }
 }
 
 /// Warn when the leader streams data (and the shared secret) in plaintext to
@@ -1422,6 +1483,15 @@ fn print_server_help() {
     );
     println!(
         "    --strategy <STRATEGY>            Sharding strategy: hash|range|label (default: hash)"
+    );
+    println!(
+        "    --shard-ca <PATH>                CA certificate to verify shards with; connects over TLS (coordinator, env: MAHARIT_SHARD_CA)"
+    );
+    println!(
+        "    --shard-user <USER>              User to log in to shards with --require-auth (coordinator, env: MAHARIT_SHARD_USER, default: admin)"
+    );
+    println!(
+        "    --shard-password <PW>            Password for --shard-user (coordinator, env: MAHARIT_SHARD_PASSWORD)"
     );
     println!("    --config <PATH>                  Path to a TOML cluster config file (reserved)");
     println!("    --help                           Print this help message");
