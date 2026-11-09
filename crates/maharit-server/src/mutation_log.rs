@@ -440,6 +440,7 @@ mod tests {
                 WalEntryData::RemoveProperty { .. } => "RemoveProperty",
                 WalEntryData::AddLabel { .. } => "AddLabel",
                 WalEntryData::RemoveLabel { .. } => "RemoveLabel",
+                WalEntryData::SetSchema { .. } => "SetSchema",
             })
             .collect();
         assert_eq!(

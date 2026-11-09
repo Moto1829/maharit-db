@@ -41,10 +41,12 @@ def find_binary() -> str:
     )
 
 
-def start_server(binary: str, port: int, data_path: str) -> subprocess.Popen:
+def start_server(
+    binary: str, port: int, data_path: str, extra: list[str] | None = None
+) -> subprocess.Popen:
     """サーバープロセスを起動して返す。"""
     proc = subprocess.Popen(
-        [binary, "server", "--port", str(port), "--data", data_path],
+        [binary, "server", "--port", str(port), "--data", data_path, *(extra or [])],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -237,6 +239,99 @@ def test_sigkill_roundtrip(binary: str, port: int, data_path: str):
         proc3.kill(); proc3.wait()
 
 
+def test_schema_roundtrip(binary: str, port: int, data_path: str, extra: list[str], label: str):
+    """インデックス・制約・全文検索インデックスの定義が再起動後も残ること。"""
+    section(f"スキーマの永続化（{label}）")
+
+    def restart(sig: signal.Signals):
+        nonlocal proc
+        stop_server(proc, sig, wait_secs=3.0)
+        proc = start_server(binary, port, data_path, extra)
+        return wait_for_server("127.0.0.1", port)
+
+    proc = start_server(binary, port, data_path, extra)
+    if not wait_for_server("127.0.0.1", port):
+        check("サーバー起動", False)
+        proc.kill(); proc.wait()
+        return
+    c = MaharitClient("127.0.0.1", port)
+    for q in [
+        "CREATE CONSTRAINT user_email FOR (u:User) REQUIRE u.email IS UNIQUE",
+        "CREATE INDEX ON :User(name)",
+        "CREATE (u:User {name: 'alice', email: 'a@example.com', bio: 'graph databases'})",
+    ]:
+        resp = c.query(q)
+        check(f"実行: {q[:40]}", resp.get("type") == "result", str(resp))
+    c.close()
+
+    check("SIGTERM 後に再起動", restart(signal.SIGTERM))
+    c = MaharitClient("127.0.0.1", port)
+    names = [r.get("name") for r in c.query("SHOW CONSTRAINTS").get("rows", [])]
+    check("再起動後も UNIQUE 制約が残る", names == ["user_email"], str(names))
+    resp = c.query("SHOW INDEXES")
+    check("再起動後もインデックスが残る", len(resp.get("rows", [])) == 1, str(resp))
+    resp = c.query("CREATE (u:User {name: 'mallory', email: 'a@example.com'})")
+    check("再起動後も UNIQUE 制約が効く", resp.get("type") == "error", str(resp))
+    resp = c.query("MATCH (u:User {name: 'alice'}) RETURN u.email AS email")
+    check("インデックス経由で既存ノードが見つかる",
+          resp.get("rows") == [{"email": "a@example.com"}], str(resp))
+
+    # 再起動直後に追加・削除した定義も残る（--wal あり: SIGKILL でも WAL から）
+    for q in [
+        "CREATE FULLTEXT INDEX user_bio FOR (u:User) ON EACH [u.bio]",
+        "CREATE CONSTRAINT user_name FOR (u:User) REQUIRE u.name IS NOT NULL",
+        "DROP INDEX ON :User(name)",
+    ]:
+        resp = c.query(q)
+        check(f"実行: {q[:40]}", resp.get("type") == "result", str(resp))
+    c.close()
+
+    sig = signal.SIGTERM if "off" in extra else signal.SIGKILL
+    check(f"{sig.name} 後に再起動", restart(sig))
+    c = MaharitClient("127.0.0.1", port)
+    names = sorted(r.get("name") for r in c.query("SHOW CONSTRAINTS").get("rows", []))
+    check("追加した制約も残る", names == ["user_email", "user_name"], str(names))
+    resp = c.query("SHOW INDEXES")
+    check("削除したインデックスは戻らない", resp.get("rows") == [], str(resp))
+    resp = c.query(
+        'CALL db.index.fulltext.search("user_bio", "graph") YIELD node RETURN node.name AS name'
+    )
+    check("全文検索インデックスが再構築される",
+          resp.get("rows") == [{"name": "alice"}], str(resp))
+    resp = c.query("CREATE (u:User {email: 'n@example.com'})")
+    check("NOT NULL 制約が効く", resp.get("type") == "error", str(resp))
+    c.close()
+    stop_server(proc, signal.SIGTERM)
+
+    # backup → restore した先でも定義が残る
+    backup_path = data_path + ".backup"
+    restored_path = data_path + ".restored"
+    out = subprocess.run(
+        [binary, "backup", "--source", data_path, "--output", backup_path, "--compress-zstd"],
+        capture_output=True, text=True,
+    )
+    check("backup", out.returncode == 0, out.stdout + out.stderr)
+    out = subprocess.run(
+        [binary, "restore", backup_path, "--output", restored_path],
+        capture_output=True, text=True,
+    )
+    check("restore", out.returncode == 0, out.stdout + out.stderr)
+    proc = start_server(binary, port, restored_path, extra)
+    if wait_for_server("127.0.0.1", port):
+        c = MaharitClient("127.0.0.1", port)
+        names = sorted(r.get("name") for r in c.query("SHOW CONSTRAINTS").get("rows", []))
+        check("リストア後も制約が残る", names == ["user_email", "user_name"], str(names))
+        resp = c.query("CREATE (u:User {name: 'eve', email: 'a@example.com'})")
+        check("リストア後も UNIQUE 制約が効く", resp.get("type") == "error", str(resp))
+        c.close()
+    else:
+        check("リストアしたデータで起動", False)
+    stop_server(proc, signal.SIGTERM)
+    for path in (backup_path, restored_path, restored_path + ".wal"):
+        if os.path.isfile(path):
+            os.remove(path)
+
+
 # ── エントリポイント ──────────────────────────────────────────────────────────
 
 def main():
@@ -270,6 +365,12 @@ def main():
                 os.remove(path)
 
         test_sigkill_roundtrip(binary, args.port, data_path)
+
+        for extra, label in (([], "WAL あり"), (["--wal", "off"], "--wal off")):
+            for path in (data_path, data_path + ".wal"):
+                if os.path.isfile(path):
+                    os.remove(path)
+            test_schema_roundtrip(binary, args.port, data_path, extra, label)
     finally:
         if use_tmpdir and tmpdir and os.path.isdir(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)

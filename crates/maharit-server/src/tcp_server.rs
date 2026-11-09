@@ -14,9 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use maharit_core::{
-    ConcurrentGraph, ConstraintManager, FulltextManager, GraphBackend, PropertyIndex,
-};
+use maharit_core::{ConcurrentGraph, ConstraintManager, FulltextManager, PropertyIndex};
 use maharit_query::{AstCache, Executor, Parser, Value, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
@@ -29,9 +27,10 @@ use tracing::Instrument;
 use crate::durable_wal::{DurableWal, snapshot_digest};
 use crate::mutation_log::RecordingGraph;
 use crate::replication::{
-    FollowerReplicationManager, LeaderReplicationManager, ReplicationConfig, ReplicationStats,
-    SnapshotSource, WalEntryData,
+    FollowerReplicationManager, LeaderReplicationManager, ReplicaApply, ReplicationConfig,
+    ReplicationStats, SnapshotSource, WalEntryData,
 };
+use crate::schema::Schema;
 use crate::tls::{DEFAULT_TLS_RELOAD_INTERVAL, ReloadableTlsAcceptor};
 use crate::tracing_setup::TracingConfig;
 use maharit_storage::UndoRecord;
@@ -603,6 +602,37 @@ impl Durability {
     }
 }
 
+/// Writes the graph and its schema to a data file.
+#[derive(Clone)]
+pub struct SnapshotWriter {
+    graph: Arc<ConcurrentGraph>,
+    managers: Arc<SharedManagers>,
+}
+
+impl SnapshotWriter {
+    /// Save atomically to `path`, with writers paused.
+    pub async fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let _gate = self.managers.write_gate.lock().await;
+        save_snapshot(&self.graph, &self.managers, path)
+    }
+}
+
+/// Save `graph` and the managers' schema to `path` (v5 data file).
+fn save_snapshot(
+    graph: &ConcurrentGraph,
+    managers: &SharedManagers,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let schema = managers.export_schema();
+    let schema_json = if schema.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(&schema).map_err(std::io::Error::other)?
+    };
+    maharit_storage::PersistentStorage::save_concurrent_with_schema(graph, &schema_json, path)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 /// Saves a snapshot and empties the WAL, with writers paused.
 #[derive(Clone)]
 pub struct Checkpointer {
@@ -623,11 +653,11 @@ impl Checkpointer {
     /// write gate.
     async fn checkpoint_gated(&self) -> std::io::Result<()> {
         let graph = Arc::clone(&self.graph);
+        let managers = Arc::clone(&self.managers);
         let durability = Arc::clone(&self.durability);
         tokio::task::spawn_blocking(move || {
             let path = &durability.data_path;
-            maharit_storage::PersistentStorage::save_concurrent(&graph, path)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            save_snapshot(&graph, &managers, path)?;
             durability.wal.reset(snapshot_digest(path)?)
         })
         .await
@@ -782,6 +812,16 @@ impl SharedManagers {
         // A poisoned lock only means another query panicked mid-execution; the
         // managers are still structurally valid, so keep serving.
         if is_write {
+            use maharit_query::ast::Statement;
+            let is_ddl = matches!(
+                stmt,
+                Statement::CreateConstraint(_)
+                    | Statement::DropConstraint(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::DropIndex(_)
+                    | Statement::CreateFulltextIndex(_)
+                    | Statement::DropFulltextIndex(_)
+            );
             let mut cm = self.constraints.write().unwrap_or_else(|e| e.into_inner());
             let mut fm = self.fulltext.write().unwrap_or_else(|e| e.into_inner());
             let mut pi = self
@@ -795,7 +835,14 @@ impl SharedManagers {
             let result =
                 Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
                     .execute_with_params(stmt, params);
-            let (wal, undo) = recorder.into_parts();
+            let (mut wal, undo) = recorder.into_parts();
+            // Log the whole schema after a DDL statement so that WAL replay
+            // and followers end up with the same constraints and indexes.
+            if is_ddl && record_wal && result.is_ok() {
+                wal.push(WalEntryData::SetSchema {
+                    schema: Schema::export(&cm, &fm, &pi),
+                });
+            }
             (result, wal, undo)
         } else {
             let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
@@ -835,20 +882,57 @@ impl SharedManagers {
             .unwrap_or_else(|e| e.into_inner());
         let mut recorder = RecordingGraph::new(graph, record_wal);
         let touched = tx_manager.rollback_backend(tx_id, &mut recorder)?;
-        for id in touched {
-            pi.remove_node(id);
-            fm.remove_node(id);
-            if let Some(node) = graph.get_node(id) {
-                let label = node.primary_label();
-                for (key, value) in node.properties.iter() {
-                    if pi.has_index(label, key) {
-                        pi.index_property(id, key, value);
-                    }
-                }
-                fm.index_node(id, label, &node.properties);
+        crate::schema::reindex_nodes(graph, touched, &mut fm, &mut pi);
+        Ok(recorder.into_log())
+    }
+
+    /// The current constraint and index definitions.
+    fn export_schema(&self) -> Schema {
+        let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
+        let fm = self.fulltext.read().unwrap_or_else(|e| e.into_inner());
+        let pi = self
+            .property_index
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        Schema::export(&cm, &fm, &pi)
+    }
+
+    /// Replace the definitions with `schema` and rebuild the indexes.
+    fn install_schema(&self, graph: &ConcurrentGraph, schema: &Schema) -> Result<(), String> {
+        let mut cm = self.constraints.write().unwrap_or_else(|e| e.into_inner());
+        let mut fm = self.fulltext.write().unwrap_or_else(|e| e.into_inner());
+        let mut pi = self
+            .property_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        schema.install(graph, &mut cm, &mut fm, &mut pi)
+    }
+}
+
+impl ReplicaApply for SharedManagers {
+    fn applied(&self, graph: &ConcurrentGraph, entry: &WalEntryData) {
+        if let WalEntryData::SetSchema { schema } = entry {
+            if let Err(e) = self.install_schema(graph, schema) {
+                tracing::error!(error = %e, "replication: failed to apply schema");
+            }
+            return;
+        }
+        if let Some(id) = crate::replication::touched_node(entry) {
+            let mut fm = self.fulltext.write().unwrap_or_else(|e| e.into_inner());
+            let mut pi = self
+                .property_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if pi.has_any_index() || !fm.list_indexes().is_empty() {
+                crate::schema::reindex_nodes(graph, [id], &mut fm, &mut pi);
             }
         }
-        Ok(recorder.into_log())
+    }
+
+    fn snapshot_applied(&self, graph: &ConcurrentGraph, schema: &Schema) {
+        if let Err(e) = self.install_schema(graph, schema) {
+            tracing::error!(error = %e, "replication: failed to apply schema from snapshot");
+        }
     }
 }
 
@@ -929,10 +1013,7 @@ impl TcpServer {
     /// write query automatically appends WAL entries to the manager, which
     /// broadcasts them to all connected followers.
     pub fn with_replication(self, manager: Arc<LeaderReplicationManager>) -> Self {
-        manager.set_snapshot_source(SnapshotSource {
-            graph: Arc::clone(&self.graph),
-            write_gate: Arc::clone(&self.managers.write_gate),
-        });
+        manager.set_snapshot_source(snapshot_source(&self.graph, &self.managers));
         *self.replication.write().unwrap_or_else(|e| e.into_inner()) = Some(manager);
         self
     }
@@ -972,8 +1053,24 @@ impl TcpServer {
     /// Attach a follower replication manager so the `stats` response can report
     /// this follower's view of leader liveness.
     pub fn with_follower(mut self, manager: Arc<FollowerReplicationManager>) -> Self {
+        manager.set_apply_hook(Arc::clone(&self.managers) as Arc<dyn ReplicaApply>);
         self.follower = Some(manager);
         self
+    }
+
+    /// Install `schema` (constraints and indexes, e.g. loaded from the data
+    /// file and WAL) and build its indexes from the current graph.
+    pub fn with_schema(self, schema: &Schema) -> Result<Self, String> {
+        self.managers.install_schema(&self.graph, schema)?;
+        Ok(self)
+    }
+
+    /// Saves the graph and schema to a data file (for shutdown without a WAL).
+    pub fn snapshot_writer(&self) -> SnapshotWriter {
+        SnapshotWriter {
+            graph: Arc::clone(&self.graph),
+            managers: Arc::clone(&self.managers),
+        }
     }
 
     /// Start the server
@@ -1855,6 +1952,16 @@ async fn execute_query(
     }
 }
 
+/// Snapshot source for a leader: this server's graph, write gate and schema.
+fn snapshot_source(graph: &Arc<ConcurrentGraph>, managers: &Arc<SharedManagers>) -> SnapshotSource {
+    let schema_managers = Arc::clone(managers);
+    SnapshotSource {
+        graph: Arc::clone(graph),
+        write_gate: Arc::clone(&managers.write_gate),
+        schema: Arc::new(move || schema_managers.export_schema()),
+    }
+}
+
 /// Error for a write sent to a follower that has not been promoted, or `None`
 /// when the query may run here.
 fn reject_write_on_follower(
@@ -1943,10 +2050,7 @@ async fn promote_to_leader(
         if let Some(tls) = &promotion.tls {
             leader = leader.with_tls(tls.clone());
         }
-        leader.set_snapshot_source(SnapshotSource {
-            graph: Arc::clone(graph),
-            write_gate: Arc::clone(&managers.write_gate),
-        });
+        leader.set_snapshot_source(snapshot_source(graph, managers));
         let leader = Arc::new(leader);
         replication_bind = Some(cfg.replication_bind_address.clone());
         if let Err(e) = leader.start_with_listener(listener).await {
@@ -4387,5 +4491,244 @@ mod tests {
             leader_graph.node_count()
         );
         assert!(leader_graph.node_count() > 400);
+    }
+
+    // ── Schema persistence and replication (task149) ─────────────────────────
+
+    /// Load the data file and replay the WAL like `maharit server` does,
+    /// returning a server (not started) with the recovered schema installed.
+    fn restart_from_disk(dir: &std::path::Path) -> TcpServer {
+        use crate::durable_wal::{DurableWal, WalMode, wal_path};
+        let data = dir.join("db");
+        let (graph, mut schema) = if data.exists() {
+            let (g, json) =
+                maharit_storage::PersistentStorage::load_concurrent_with_schema(&data).unwrap();
+            let schema = json
+                .map(|j| serde_json::from_str(&j).unwrap())
+                .unwrap_or_default();
+            (g, schema)
+        } else {
+            (ConcurrentGraph::new(), Schema::default())
+        };
+        let (_, recovery) = DurableWal::open(
+            &wal_path(&data),
+            snapshot_digest(&data).unwrap(),
+            WalMode::Os,
+        )
+        .unwrap();
+        crate::schema::replay_wal(&graph, &mut schema, &recovery.batches);
+        TcpServer::with_graph(ServerConfig::default(), graph)
+            .with_schema(&schema)
+            .unwrap()
+    }
+
+    async fn serve(server: TcpServer) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { server.start_with_listener(listener).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
+    }
+
+    async fn rows(stream: &mut TcpStream, q: &str) -> Vec<HashMap<String, serde_json::Value>> {
+        match query(stream, q).await {
+            Response::Result { rows } => rows,
+            other => panic!("{q}: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn schema_survives_restart_from_snapshot_and_wal() {
+        let dir = std::env::temp_dir().join(format!("maharit_schema_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, server) = start_durable_server(&dir).await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        for q in [
+            "CREATE CONSTRAINT email_unique FOR (p:Person) REQUIRE p.email IS UNIQUE",
+            "CREATE INDEX ON :Person(name)",
+            "CREATE (:Person {name: 'Alice', email: 'a@example.com', bio: 'graph databases'})",
+        ] {
+            let resp = query(&mut s, q).await;
+            assert!(matches!(resp, Response::Result { .. }), "{q}: {resp:?}");
+        }
+        // Checkpoint: the schema so far goes into the data file.
+        server.checkpointer().unwrap().checkpoint().await.unwrap();
+        for q in [
+            "CREATE FULLTEXT INDEX bios FOR (p:Person) ON EACH [p.bio]",
+            "CREATE CONSTRAINT age_int FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+            "DROP INDEX ON :Person(name)",
+            "CREATE INDEX ON :Person(email)",
+            "CREATE (:Person {name: 'Bob', email: 'b@example.com', bio: 'rust programming'})",
+        ] {
+            let resp = query(&mut s, q).await;
+            assert!(matches!(resp, Response::Result { .. }), "{q}: {resp:?}");
+        }
+
+        // "Crash" and restart from the data file + WAL.
+        let addr = serve(restart_from_disk(&dir)).await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let constraints: Vec<String> = rows(&mut s, "SHOW CONSTRAINTS")
+            .await
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(constraints.len(), 2, "{constraints:?}");
+        assert!(constraints.contains(&"email_unique".to_string()));
+        assert!(constraints.contains(&"age_int".to_string()));
+        let indexes = rows(&mut s, "SHOW INDEXES").await;
+        assert_eq!(indexes.len(), 1, "{indexes:?}");
+        assert_eq!(indexes[0]["property"], "email");
+
+        // The UNIQUE and type constraints are enforced again.
+        let dup = query(
+            &mut s,
+            "CREATE (:Person {name: 'X', email: 'a@example.com'})",
+        )
+        .await;
+        assert!(matches!(dup, Response::Error { .. }), "{dup:?}");
+        let bad = query(
+            &mut s,
+            "CREATE (:Person {name: 'Y', email: 'y@x', age: 'old'})",
+        )
+        .await;
+        assert!(matches!(bad, Response::Error { .. }), "{bad:?}");
+        // The rebuilt indexes find the existing nodes.
+        let hit = rows(
+            &mut s,
+            "MATCH (p:Person {email: 'b@example.com'}) RETURN p.name AS name",
+        )
+        .await;
+        assert_eq!(hit.len(), 1);
+        let found = rows(
+            &mut s,
+            "CALL db.index.fulltext.search(\"bios\", \"rust\") YIELD node RETURN node.name AS name",
+        )
+        .await;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["name"], "Bob");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn followers_receive_the_schema_and_keep_indexes_current() {
+        use crate::replication::NodeRole;
+
+        let repl_addr = free_addr().await;
+        let repl = Arc::new(LeaderReplicationManager::new(repl_config(
+            NodeRole::Leader,
+            "leader",
+            repl_addr.to_string(),
+            None,
+        )));
+        let leader_server =
+            TcpServer::new(ServerConfig::default()).with_replication(Arc::clone(&repl));
+        repl.start().await.unwrap();
+        let mut leader = TcpStream::connect(serve(leader_server).await)
+            .await
+            .unwrap();
+        for q in [
+            "CREATE CONSTRAINT email_unique FOR (p:Person) REQUIRE p.email IS UNIQUE",
+            "CREATE INDEX ON :Person(name)",
+            "CREATE (:Person {name: 'Alice', email: 'a@example.com'})",
+        ] {
+            query(&mut leader, q).await;
+        }
+
+        // The follower connects after the DDL: it comes with the snapshot.
+        let graph = Arc::new(ConcurrentGraph::new());
+        let follower = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            repl_config(
+                NodeRole::Follower,
+                "f",
+                "127.0.0.1:0".to_string(),
+                Some(repl_addr.to_string()),
+            ),
+            Arc::clone(&graph),
+        ));
+        let promoted_repl = free_addr().await;
+        let follower_server =
+            TcpServer::with_graph_arc(ServerConfig::default(), Arc::clone(&graph))
+                .with_follower(Arc::clone(&follower))
+                .with_promotion(Promotion {
+                    replication: Some(repl_config(
+                        NodeRole::Leader,
+                        "f",
+                        promoted_repl.to_string(),
+                        None,
+                    )),
+                    tls: None,
+                });
+        follower.start().await.unwrap();
+        let mut f = TcpStream::connect(serve(follower_server).await)
+            .await
+            .unwrap();
+
+        let mut synced = false;
+        for _ in 0..150 {
+            if row_count(&mut f, "SHOW CONSTRAINTS").await == 1
+                && row_count(&mut f, "SHOW INDEXES").await == 1
+            {
+                synced = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(synced, "schema did not arrive with the snapshot");
+
+        // Later DDL and data changes stream in; the follower's index follows.
+        query(
+            &mut leader,
+            "CREATE FULLTEXT INDEX names FOR (p:Person) ON EACH [p.name]",
+        )
+        .await;
+        query(
+            &mut leader,
+            "MATCH (p:Person {name: 'Alice'}) SET p.name = 'Alicia'",
+        )
+        .await;
+        query(
+            &mut leader,
+            "CREATE (:Person {name: 'Bob', email: 'b@example.com'})",
+        )
+        .await;
+        let q = "MATCH (p:Person {name: 'Alicia'}) RETURN p.email AS email";
+        let mut got = Vec::new();
+        for _ in 0..150 {
+            got = rows(&mut f, q).await;
+            if got.len() == 1 && row_count(&mut f, "MATCH (p:Person) RETURN p").await == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            rows(&mut f, "MATCH (p:Person {name: 'Alice'}) RETURN p")
+                .await
+                .is_empty(),
+            "stale index entry for the old name"
+        );
+        let found = rows(
+            &mut f,
+            "CALL db.index.fulltext.search(\"names\", \"bob\") YIELD node RETURN node.email AS email",
+        )
+        .await;
+        assert_eq!(found.len(), 1, "{found:?}");
+
+        // After promotion the replicated UNIQUE constraint is enforced.
+        let resp = send_recv(
+            &mut f,
+            &Request::Promote {
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Promoted { .. }), "{resp:?}");
+        let dup = query(
+            &mut f,
+            "CREATE (:Person {name: 'Z', email: 'b@example.com'})",
+        )
+        .await;
+        assert!(matches!(dup, Response::Error { .. }), "{dup:?}");
     }
 }

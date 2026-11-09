@@ -5,7 +5,7 @@
 
 ## 確認済みの不一致
 - `backup.md`: `--data-dir`、`--compress gzip`、`--type incremental`、`CALL db.backup(...)`、`maharit wal list`、`restore --wal-dir --target-time / --target-lsn` は存在しない。実際は `maharit backup --source <DB> --output <PATH> [--compress|--compress-zstd] [--description]`、`maharit backup --list <PATH>`、`maharit restore <BACKUP> --output <DB>`。増分バックアップ・PITR は `maharit-storage` の Rust API のみ
-- `backup.md`「バックアップの内容」: インデックス・スキーマ制約は含まれない（`save_concurrent` は `indexes: vec![]`）
+- `backup.md`「バックアップの内容」: storage/149 で定義がデータファイルに入るようになり、記述を直した（2026-11-09）
 - `tls.md`: server/147 で実装に合わせて書き直し済み（2026-11-08）
 
 ## 作業

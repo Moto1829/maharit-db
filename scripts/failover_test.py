@@ -131,6 +131,10 @@ def phase1_initial_check(leader, followers: list):
 
     # リーダーに書き込む
     section("フェーズ1: リーダーへの書き込み")
+    resp = leader.query(
+        "CREATE CONSTRAINT failover_name FOR (n:FailoverTest) REQUIRE n.name IS UNIQUE"
+    )
+    check("UNIQUE 制約を作成", resp.get("type") == "result", str(resp))
     ts = int(time.time())
     nodes = ["Failover_Alice", "Failover_Bob", "Failover_Carol"]
     for name in nodes:
@@ -242,6 +246,12 @@ def phase5_verify_new_leader(follower1_port: int, wait_sec: float):
         f"CREATE (n:FailoverTest {{name: 'Failover_Dave_new', ts: {ts}}}) RETURN n"
     )
     check("新リーダーへの書き込み成功", resp.get("type") == "result", str(resp))
+
+    # リーダーで作った制約が、昇格したノードでも効くこと
+    resp = new_leader.query(
+        "CREATE (n:FailoverTest {name: 'Failover_Alice'}) RETURN n"
+    )
+    check("複製された UNIQUE 制約が新リーダーで効く", resp.get("type") == "error", str(resp))
 
     # 書き込んだデータが MATCH で返ること
     resp = new_leader.query(

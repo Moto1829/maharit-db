@@ -13,6 +13,9 @@
 //!
 //! Decoding checks every length against the bytes that remain, so a corrupted
 //! or hostile file fails with an error instead of a huge allocation.
+//!
+//! v5 is the v4 payload followed by one more string: the schema (index and
+//! constraint definitions), opaque to this crate. See [`encode_v5`].
 
 use std::collections::HashMap;
 
@@ -92,6 +95,22 @@ pub(crate) fn encode(snapshot: &SSnapshot) -> Vec<u8> {
     out
 }
 
+/// Encode a v5 payload: the v4 payload, then `schema` as a string.
+pub(crate) fn encode_v5(snapshot: &SSnapshot, schema: &str) -> Vec<u8> {
+    let mut out = encode(snapshot);
+    put_str(&mut out, schema);
+    out
+}
+
+/// Decode a v5 payload into the snapshot and its schema string.
+pub(crate) fn decode_v5(bytes: &[u8]) -> Result<(SSnapshot, String), String> {
+    let mut d = Decoder { bytes, pos: 0 };
+    let snapshot = decode_body(&mut d)?;
+    let schema = d.string()?;
+    d.finish()?;
+    Ok((snapshot, schema))
+}
+
 fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -159,6 +178,12 @@ fn put_value(out: &mut Vec<u8>, v: &PropertyValue) {
 /// Decode a v4 payload. The error describes where the data went wrong.
 pub(crate) fn decode(bytes: &[u8]) -> Result<SSnapshot, String> {
     let mut d = Decoder { bytes, pos: 0 };
+    let snapshot = decode_body(&mut d)?;
+    d.finish()?;
+    Ok(snapshot)
+}
+
+fn decode_body(d: &mut Decoder<'_>) -> Result<SSnapshot, String> {
     // Minimum encoded sizes, used to bound element counts before allocating.
     const MIN_NODE: usize = 8 + 8 + 8; // id, label count, property count
     const MIN_EDGE: usize = 8 + 8 + 8 + 8 + 8; // id, label, from, to, property count
@@ -203,12 +228,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SSnapshot, String> {
         });
     }
 
-    if d.pos != bytes.len() {
-        return Err(format!(
-            "{} trailing byte(s) after the snapshot",
-            bytes.len() - d.pos
-        ));
-    }
     Ok(SSnapshot {
         nodes,
         edges,
@@ -222,6 +241,17 @@ struct Decoder<'a> {
 }
 
 impl Decoder<'_> {
+    /// Fail when bytes remain after the last field.
+    fn finish(&self) -> Result<(), String> {
+        if self.pos != self.bytes.len() {
+            return Err(format!(
+                "{} trailing byte(s) after the snapshot",
+                self.bytes.len() - self.pos
+            ));
+        }
+        Ok(())
+    }
+
     fn take<const N: usize>(&mut self) -> Result<[u8; N], String> {
         let end = self.pos.checked_add(N).filter(|&e| e <= self.bytes.len());
         let Some(end) = end else {

@@ -10,7 +10,10 @@ use crate::snapshot_codec::{self, SEdge, SIndex, SNode, SSnapshot};
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
-/// フォーマットバージョン（v4: bincode 1 互換のスナップショット。`snapshot_codec` 参照）
+/// v5: v4 のペイロードの後ろにスキーマ（インデックス・制約の定義、JSON 文字列）。
+/// `save_concurrent_with_schema` が書く
+const VERSION_V5: u32 = 5;
+/// v4: bincode 1 互換のスナップショット（`snapshot_codec` 参照）。`save_with_index` が書く
 const VERSION: u32 = 4;
 /// v3: ラベルを Vec<String> として保存
 const VERSION_V3: u32 = 3;
@@ -97,7 +100,7 @@ impl PersistentStorage {
 
         let encoded = snapshot_codec::encode(&snapshot);
 
-        Self::write_snapshot_file(path.as_ref(), &encoded)
+        Self::write_snapshot_file(path.as_ref(), VERSION, &encoded)
     }
 
     /// ヘッダー + 長さ付きペイロードを `path` に原子的に書き込む。
@@ -105,7 +108,7 @@ impl PersistentStorage {
     /// 一時ファイル（`<path>.tmp`）に書いて fsync してから rename で置き換え、
     /// ディレクトリも fsync する。保存中にプロセスが落ちても、元のファイルか
     /// 新しいファイルのどちらかが完全な形で残る（途中まで書かれたファイルにならない）。
-    fn write_snapshot_file(path: &Path, encoded: &[u8]) -> Result<()> {
+    fn write_snapshot_file(path: &Path, version: u32, encoded: &[u8]) -> Result<()> {
         let tmp = {
             let mut s = path.as_os_str().to_owned();
             s.push(".tmp");
@@ -117,7 +120,7 @@ impl PersistentStorage {
 
             // Header: magic + version
             writer.write_all(MAGIC)?;
-            writer.write_all(&VERSION.to_le_bytes())?;
+            writer.write_all(&version.to_le_bytes())?;
 
             // Length-prefixed payload
             let payload_len = encoded.len() as u64;
@@ -139,8 +142,18 @@ impl PersistentStorage {
         Ok(())
     }
 
-    /// ConcurrentGraph をファイルに保存
+    /// ConcurrentGraph をファイルに保存（スキーマなし）
     pub fn save_concurrent(graph: &ConcurrentGraph, path: impl AsRef<Path>) -> Result<()> {
+        Self::save_concurrent_with_schema(graph, "", path)
+    }
+
+    /// ConcurrentGraph とスキーマ（呼び出し側が決める文字列。空ならなし）を
+    /// v5 形式で原子的に保存する
+    pub fn save_concurrent_with_schema(
+        graph: &ConcurrentGraph,
+        schema: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
         let nodes: Vec<SNode> = graph
             .nodes()
             .map(|r| {
@@ -173,13 +186,21 @@ impl PersistentStorage {
             indexes: vec![],
         };
 
-        let encoded = snapshot_codec::encode(&snapshot);
+        let encoded = snapshot_codec::encode_v5(&snapshot, schema);
 
-        Self::write_snapshot_file(path.as_ref(), &encoded)
+        Self::write_snapshot_file(path.as_ref(), VERSION_V5, &encoded)
     }
 
-    /// ファイルから ConcurrentGraph を読み込み
+    /// ファイルから ConcurrentGraph を読み込み（スキーマは捨てる）
     pub fn load_concurrent(path: impl AsRef<Path>) -> Result<ConcurrentGraph> {
+        Self::load_concurrent_with_schema(path).map(|(graph, _)| graph)
+    }
+
+    /// ファイルから ConcurrentGraph とスキーマ文字列を読み込む。v4 のファイルは
+    /// スキーマを持たないので `None`、v5 で空文字列のときも `None`
+    pub fn load_concurrent_with_schema(
+        path: impl AsRef<Path>,
+    ) -> Result<(ConcurrentGraph, Option<String>)> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
@@ -190,11 +211,14 @@ impl PersistentStorage {
         }
 
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION {
-            return Err(PersistenceError::UnsupportedVersion(version));
-        }
-
-        let snapshot = Self::read_snapshot(&mut reader)?;
+        let (snapshot, schema) = match version {
+            VERSION => (Self::read_snapshot(&mut reader)?, None),
+            VERSION_V5 => {
+                let (snapshot, schema) = Self::read_snapshot_v5(&mut reader)?;
+                (snapshot, Some(schema).filter(|s| !s.is_empty()))
+            }
+            other => return Err(PersistenceError::UnsupportedVersion(other)),
+        };
 
         let graph = ConcurrentGraph::new();
 
@@ -230,7 +254,43 @@ impl PersistentStorage {
             }
         }
 
-        Ok(graph)
+        Ok((graph, schema))
+    }
+
+    /// Graph とスキーマ文字列を v5 形式で原子的に保存する（`maharit restore` 用）
+    pub fn save_with_schema(graph: &Graph, schema: &str, path: impl AsRef<Path>) -> Result<()> {
+        let concurrent = ConcurrentGraph::new();
+        for node in graph.nodes() {
+            concurrent.create_node_with_id_and_labels(node.id, node.labels.clone());
+            for (k, v) in node.properties.iter() {
+                concurrent.set_node_property(node.id, k, v.clone());
+            }
+        }
+        for edge in graph.edges() {
+            concurrent.create_edge_with_id(edge.id, edge.from, edge.to, &edge.label)?;
+            for (k, v) in edge.properties.iter() {
+                concurrent.set_edge_property(edge.id, k, v.clone());
+            }
+        }
+        Self::save_concurrent_with_schema(&concurrent, schema, path)
+    }
+
+    /// ファイルからグラフとスキーマ文字列を読み込む（v5 以外は `None`）
+    pub fn load_with_schema(path: impl AsRef<Path>) -> Result<(Graph, Option<String>)> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(PersistenceError::InvalidMagic);
+        }
+        if Self::read_u32(&mut reader)? == VERSION_V5 {
+            let (snapshot, schema) = Self::read_snapshot_v5(&mut reader)?;
+            let (graph, _) = Self::graph_from_snapshot(snapshot)?;
+            return Ok((graph, Some(schema).filter(|s| !s.is_empty())));
+        }
+        Ok((Self::load(path)?, None))
     }
 
     /// ファイルからグラフを読み込み（インデックスは無視）
@@ -256,6 +316,12 @@ impl PersistentStorage {
 
         if version == VERSION {
             return Self::load_v4(reader);
+        }
+        if version == VERSION_V5 {
+            // The schema is for the server; this API only carries the
+            // property index definitions stored in the v4 part.
+            let (snapshot, _schema) = Self::read_snapshot_v5(&mut reader)?;
+            return Self::graph_from_snapshot(snapshot);
         }
 
         if version != VERSION_V3 && version != VERSION_V2 && version != VERSION_V1 {
@@ -333,6 +399,16 @@ impl PersistentStorage {
     /// v4 フォーマットからグラフとインデックスを読み込む
     /// Read the length-prefixed v4 payload that follows the header.
     fn read_snapshot<R: Read>(reader: &mut R) -> Result<SSnapshot> {
+        let encoded = Self::read_payload(reader)?;
+        snapshot_codec::decode(&encoded).map_err(PersistenceError::CorruptedData)
+    }
+
+    fn read_snapshot_v5<R: Read>(reader: &mut R) -> Result<(SSnapshot, String)> {
+        let encoded = Self::read_payload(reader)?;
+        snapshot_codec::decode_v5(&encoded).map_err(PersistenceError::CorruptedData)
+    }
+
+    fn read_payload<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
         let mut len_bytes = [0u8; 8];
         reader.read_exact(&mut len_bytes)?;
         let payload_len = u64::from_le_bytes(len_bytes);
@@ -348,12 +424,15 @@ impl PersistentStorage {
                 payload_len
             )));
         }
-        snapshot_codec::decode(&encoded).map_err(PersistenceError::CorruptedData)
+        Ok(encoded)
     }
 
     fn load_v4<R: Read>(mut reader: R) -> Result<(Graph, PropertyIndex)> {
         let snapshot = Self::read_snapshot(&mut reader)?;
+        Self::graph_from_snapshot(snapshot)
+    }
 
+    fn graph_from_snapshot(snapshot: SSnapshot) -> Result<(Graph, PropertyIndex)> {
         let mut graph = Graph::new();
         let mut id_map: HashMap<u64, u64> = HashMap::new();
 
@@ -1090,5 +1169,44 @@ mod tests {
         assert_eq!(loaded.edge_count(), 0);
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v5_round_trips_the_schema_and_stays_readable_by_every_loader() {
+        let path = std::env::temp_dir().join(format!("maharit_v5_{}.mgdb", std::process::id()));
+        let graph = ConcurrentGraph::new();
+        let a = graph.create_node("Person");
+        graph.set_node_property(a, "name", PropertyValue::String("Alice".into()));
+        let b = graph.create_node("Person");
+        graph.create_edge(a, b, "KNOWS").unwrap();
+
+        let schema = r#"{"constraints":[{"name":"u"}]}"#;
+        PersistentStorage::save_concurrent_with_schema(&graph, schema, &path).unwrap();
+        let (loaded, got) = PersistentStorage::load_concurrent_with_schema(&path).unwrap();
+        assert_eq!(got.as_deref(), Some(schema));
+        assert_eq!(loaded.node_count(), 2);
+        assert_eq!(loaded.edge_count(), 1);
+        // The Graph loader reads v5 too (ignoring the schema).
+        let g = PersistentStorage::load(&path).unwrap();
+        assert_eq!(g.node_count(), 2);
+
+        // An empty schema reads back as none.
+        PersistentStorage::save_concurrent(&graph, &path).unwrap();
+        let (_, got) = PersistentStorage::load_concurrent_with_schema(&path).unwrap();
+        assert_eq!(got, None);
+
+        // A truncated v5 file is rejected.
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        assert!(PersistentStorage::load_concurrent_with_schema(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn v4_files_load_without_a_schema() {
+        let (graph, schema) =
+            PersistentStorage::load_concurrent_with_schema(fixture("v4_two_indexes.mgdb")).unwrap();
+        assert!(graph.node_count() > 0);
+        assert_eq!(schema, None);
     }
 }

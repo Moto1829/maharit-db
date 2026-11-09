@@ -16,6 +16,10 @@ use tokio::sync::RwLock;
 const MAGIC: &[u8; 8] = b"MHRTBKUP";
 /// Backup format version
 const VERSION: u32 = 1;
+/// v2: the header also carries the schema string (index and constraint
+/// definitions, see `PersistentStorage::save_concurrent_with_schema`) right
+/// after the description. Written by [`Backup::create_with_schema`].
+const VERSION_V2: u32 = 2;
 
 /// Compression algorithm for backup files.
 ///
@@ -152,6 +156,27 @@ impl Backup {
         path: impl AsRef<Path>,
         options: &BackupOptions,
     ) -> Result<BackupMetadata> {
+        Self::create_inner(graph, None, path.as_ref(), options)
+    }
+
+    /// Like [`create`](Self::create), but also stores `schema` (the index and
+    /// constraint definitions from the data file) for
+    /// [`restore_with_schema`](Self::restore_with_schema).
+    pub fn create_with_schema(
+        graph: &Graph,
+        schema: &str,
+        path: impl AsRef<Path>,
+        options: &BackupOptions,
+    ) -> Result<BackupMetadata> {
+        Self::create_inner(graph, Some(schema), path.as_ref(), options)
+    }
+
+    fn create_inner(
+        graph: &Graph,
+        schema: Option<&str>,
+        path: &Path,
+        options: &BackupOptions,
+    ) -> Result<BackupMetadata> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
 
@@ -162,7 +187,11 @@ impl Backup {
             .as_secs();
 
         let metadata = BackupMetadata {
-            version: VERSION,
+            version: if schema.is_some() {
+                VERSION_V2
+            } else {
+                VERSION
+            },
             timestamp,
             node_count: graph.node_count() as u64,
             edge_count: graph.edge_count() as u64,
@@ -178,6 +207,9 @@ impl Backup {
         writer.write_all(&metadata.edge_count.to_le_bytes())?;
         writer.write_all(&[metadata.compression.to_byte()])?;
         Self::write_string(&mut writer, &metadata.description)?;
+        if let Some(schema) = schema {
+            Self::write_string(&mut writer, schema)?;
+        }
 
         // Serialize graph data to a buffer
         let graph_data = Self::serialize_graph(graph, &[])?;
@@ -264,6 +296,13 @@ impl Backup {
     /// # Errors
     /// Returns errors if the file is invalid, corrupted, or cannot be read
     pub fn restore(path: impl AsRef<Path>) -> Result<Graph> {
+        Self::restore_with_schema(path).map(|(graph, _)| graph)
+    }
+
+    /// Restore a graph and the schema string stored by
+    /// [`create_with_schema`](Self::create_with_schema) (`None` for v1
+    /// backups or an empty schema).
+    pub fn restore_with_schema(path: impl AsRef<Path>) -> Result<(Graph, Option<String>)> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
@@ -276,7 +315,7 @@ impl Backup {
 
         // Read metadata
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION {
+        if version != VERSION && version != VERSION_V2 {
             return Err(BackupError::UnsupportedVersion(version));
         }
 
@@ -289,12 +328,22 @@ impl Backup {
         let compression = CompressionType::from_byte(compression_byte[0]);
 
         let _description = Self::read_string(&mut reader)?;
+        let schema = Self::read_schema(&mut reader, version)?;
 
         // Read graph data (decompress if needed)
         let graph_data = Self::read_compressed(reader, compression)?;
 
         // Deserialize graph
-        Self::deserialize_graph(&graph_data)
+        Ok((Self::deserialize_graph(&graph_data)?, schema))
+    }
+
+    /// The schema string of a v2 header (`None` for v1 or when empty).
+    fn read_schema<R: Read>(reader: &mut R, version: u32) -> Result<Option<String>> {
+        if version < VERSION_V2 {
+            return Ok(None);
+        }
+        let schema = Self::read_string(reader)?;
+        Ok(Some(schema).filter(|s| !s.is_empty()))
     }
 
     /// Create a backup of a graph along with its property index definitions.
@@ -383,7 +432,7 @@ impl Backup {
 
         // Read and validate header
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION {
+        if version != VERSION && version != VERSION_V2 {
             return Err(BackupError::UnsupportedVersion(version));
         }
 
@@ -396,6 +445,7 @@ impl Backup {
         let compression = CompressionType::from_byte(compression_byte[0]);
 
         let _description = Self::read_string(&mut reader)?;
+        let _schema = Self::read_schema(&mut reader, version)?;
 
         // Decompress graph section
         let graph_data = Self::read_compressed(reader, compression)?;
@@ -448,7 +498,7 @@ impl Backup {
 
         // Read metadata
         let version = Self::read_u32(&mut reader)?;
-        if version != VERSION {
+        if version != VERSION && version != VERSION_V2 {
             return Err(BackupError::UnsupportedVersion(version));
         }
 
@@ -2221,6 +2271,59 @@ mod tests {
         assert_eq!(restored_graph.node_count(), 1);
         assert_eq!(restored_index.list_indexes().len(), 0);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn schema_survives_backup_and_restore() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("Person");
+        graph
+            .get_node_mut(a)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Alice".into()));
+        let schema = r#"{"indexes":[{"label":"Person","property":"name"}]}"#;
+
+        for options in [BackupOptions::default(), BackupOptions::compressed_zstd()] {
+            let path = tmp_path("schema_v2");
+            Backup::create_with_schema(&graph, schema, &path, &options.with_description("d"))
+                .unwrap();
+            let meta = Backup::metadata(&path).unwrap();
+            assert_eq!(meta.version, VERSION_V2);
+            assert_eq!(meta.description, "d");
+            assert!(Backup::verify(&path).unwrap());
+            let (restored, got) = Backup::restore_with_schema(&path).unwrap();
+            assert_eq!(restored.node_count(), 1);
+            assert_eq!(got.as_deref(), Some(schema));
+            let (_, index) = Backup::restore_with_index(&path).unwrap();
+            assert_eq!(index.list_indexes().len(), 0);
+            std::fs::remove_file(&path).ok();
+        }
+
+        // v1 backups have no schema.
+        let path = tmp_path("schema_v1");
+        Backup::create(&graph, &path, &BackupOptions::default()).unwrap();
+        assert_eq!(Backup::metadata(&path).unwrap().version, VERSION);
+        assert_eq!(Backup::restore_with_schema(&path).unwrap().1, None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn data_file_schema_round_trips_through_graph_api() {
+        let mut graph = Graph::new();
+        let a = graph.create_node("A");
+        let b = graph.create_node("B");
+        graph.create_edge(a, b, "R").unwrap();
+        let path = tmp_path("graph_v5");
+        crate::PersistentStorage::save_with_schema(&graph, "{\"x\":1}", &path).unwrap();
+        let (g, schema) = crate::PersistentStorage::load_with_schema(&path).unwrap();
+        assert_eq!((g.node_count(), g.edge_count()), (2, 1));
+        assert_eq!(schema.as_deref(), Some("{\"x\":1}"));
+        crate::PersistentStorage::save(&graph, &path).unwrap();
+        assert_eq!(
+            crate::PersistentStorage::load_with_schema(&path).unwrap().1,
+            None
+        );
         std::fs::remove_file(&path).ok();
     }
 }

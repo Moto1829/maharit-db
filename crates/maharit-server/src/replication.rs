@@ -132,6 +132,8 @@ pub enum WalEntryData {
     AddLabel { node_id: u64, label: String },
     /// A label was removed from a node
     RemoveLabel { node_id: u64, label: String },
+    /// The complete schema after a DDL statement (replaces the previous one).
+    SetSchema { schema: crate::schema::Schema },
 }
 
 /// Messages exchanged between leader and follower over the replication channel
@@ -546,6 +548,8 @@ pub(crate) fn concurrent_graph_snapshot_entries(g: &ConcurrentGraph) -> Vec<WalE
 pub struct SnapshotSource {
     pub graph: Arc<ConcurrentGraph>,
     pub write_gate: Arc<AsyncMutex<()>>,
+    /// The current schema, sent after the graph so followers build indexes.
+    pub schema: Arc<dyn Fn() -> crate::schema::Schema + Send + Sync>,
 }
 
 /// Serialize the current graph as a list of WAL entries suitable for snapshot sync.
@@ -681,10 +685,11 @@ where
         let (entries, snapshot_lsn) = {
             let _gate = source.write_gate.lock().await;
             wal_subscribers.lock().await.push(wal_tx);
-            (
-                concurrent_graph_snapshot_entries(&source.graph),
-                lsn.load(Ordering::SeqCst),
-            )
+            let mut entries = concurrent_graph_snapshot_entries(&source.graph);
+            entries.push(WalEntryData::SetSchema {
+                schema: (source.schema)(),
+            });
+            (entries, lsn.load(Ordering::SeqCst))
         };
         let data = serde_json::to_vec(&entries)?;
         send_message(
@@ -855,6 +860,8 @@ pub struct FollowerReplicationManager {
     stopped: Arc<AtomicBool>,
     /// The task that receives from (and reconnects to) the leader.
     receiver: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Index / schema maintenance for applied changes.
+    apply_hook: Arc<std::sync::OnceLock<Arc<dyn ReplicaApply>>>,
 }
 
 impl FollowerReplicationManager {
@@ -874,6 +881,7 @@ impl FollowerReplicationManager {
             leader_tls: None,
             stopped: Arc::new(AtomicBool::new(false)),
             receiver: std::sync::Mutex::new(None),
+            apply_hook: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -889,6 +897,7 @@ impl FollowerReplicationManager {
             leader_tls: None,
             stopped: Arc::new(AtomicBool::new(false)),
             receiver: std::sync::Mutex::new(None),
+            apply_hook: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -995,6 +1004,12 @@ impl FollowerReplicationManager {
         self.is_leader_alive.store(false, Ordering::SeqCst);
     }
 
+    /// Keep indexes and schema up to date as changes are applied. Only the
+    /// first call has an effect.
+    pub fn set_apply_hook(&self, hook: Arc<dyn ReplicaApply>) {
+        let _ = self.apply_hook.set(hook);
+    }
+
     /// Record that this node was promoted to leader.
     pub fn mark_promoted(&self) {
         self.is_promoted.store(true, Ordering::SeqCst);
@@ -1034,6 +1049,7 @@ impl FollowerReplicationManager {
                     Arc::clone(&this.is_leader_alive),
                     Arc::clone(&this.last_heartbeat),
                     Arc::clone(&this.graph),
+                    this.apply_hook.get().cloned(),
                 )
                 .await
                 {
@@ -1121,7 +1137,40 @@ pub(crate) fn apply_wal_entry(graph: &ConcurrentGraph, entry: &WalEntryData) {
         WalEntryData::RemoveLabel { node_id, label } => {
             graph.remove_node_label(*node_id, label);
         }
+        // Schema lives in the server's managers, not the graph: callers that
+        // own managers apply it (see `ReplicaApply`, WAL recovery).
+        WalEntryData::SetSchema { .. } => {}
     }
+}
+
+/// Nodes whose index entries an applied entry may have changed.
+pub(crate) fn touched_node(entry: &WalEntryData) -> Option<u64> {
+    match entry {
+        WalEntryData::CreateNode { node_id, .. }
+        | WalEntryData::DeleteNode { node_id }
+        | WalEntryData::AddLabel { node_id, .. }
+        | WalEntryData::RemoveLabel { node_id, .. } => Some(*node_id),
+        WalEntryData::SetProperty {
+            target_id,
+            is_node: true,
+            ..
+        }
+        | WalEntryData::RemoveProperty {
+            target_id,
+            is_node: true,
+            ..
+        } => Some(*target_id),
+        _ => None,
+    }
+}
+
+/// What a follower does besides changing the graph: keep the server's
+/// indexes and schema in line with the replicated changes.
+pub trait ReplicaApply: Send + Sync {
+    /// `entry` (from the WAL stream) was just applied to `graph`.
+    fn applied(&self, graph: &ConcurrentGraph, entry: &WalEntryData);
+    /// A snapshot just replaced `graph`; `schema` came with it.
+    fn snapshot_applied(&self, graph: &ConcurrentGraph, schema: &crate::schema::Schema);
 }
 
 /// A byte stream to the leader: plain TCP or TLS.
@@ -1136,6 +1185,7 @@ async fn run_follower_receive_loop(
     is_leader_alive: Arc<AtomicBool>,
     last_heartbeat: Arc<RwLock<Instant>>,
     graph: Arc<ConcurrentGraph>,
+    hook: Option<Arc<dyn ReplicaApply>>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -1206,6 +1256,9 @@ async fn run_follower_receive_loop(
             ReplicationMessage::WalEntry { lsn, entry } => {
                 // Apply the WAL entry to the local graph (best-effort).
                 apply_wal_entry(&graph, &entry);
+                if let Some(hook) = &hook {
+                    hook.applied(&graph, &entry);
+                }
                 current_lsn.store(lsn, Ordering::SeqCst);
                 *last_heartbeat.write().await = Instant::now();
 
@@ -1225,8 +1278,15 @@ async fn run_follower_receive_loop(
                 match serde_json::from_slice::<Vec<WalEntryData>>(&data) {
                     Ok(entries) => {
                         graph.clear();
-                        for entry in &entries {
-                            apply_wal_entry(&graph, entry);
+                        let mut schema = crate::schema::Schema::default();
+                        for entry in entries {
+                            match entry {
+                                WalEntryData::SetSchema { schema: s } => schema = s,
+                                other => apply_wal_entry(&graph, &other),
+                            }
+                        }
+                        if let Some(hook) = &hook {
+                            hook.snapshot_applied(&graph, &schema);
                         }
                         current_lsn.store(lsn, Ordering::SeqCst);
                         *last_heartbeat.write().await = Instant::now();

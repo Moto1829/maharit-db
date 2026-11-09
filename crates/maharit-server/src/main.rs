@@ -12,6 +12,7 @@ mod repl;
 pub mod replication;
 #[cfg(test)]
 mod replication_diff_test;
+pub mod schema;
 pub mod tcp_server;
 pub mod tls;
 pub mod tracing_setup;
@@ -365,12 +366,20 @@ fn run_server(args: &[String]) {
         .or_else(|| std::env::var("MAHARIT_DATA").ok())
         .unwrap_or_else(|| "maharit.db".to_string());
 
-    // Load graph from file or start with empty graph
-    let graph = if std::path::Path::new(&data_path).exists() {
-        match PersistentStorage::load_concurrent(&data_path) {
-            Ok(g) => {
+    // Load graph and schema from file or start with an empty database
+    let (graph, mut schema) = if std::path::Path::new(&data_path).exists() {
+        match PersistentStorage::load_concurrent_with_schema(&data_path) {
+            Ok((g, schema_json)) => {
                 println!("Loaded database from {}", data_path);
-                g
+                let schema = match schema_json.as_deref().map(serde_json::from_str) {
+                    None => crate::schema::Schema::default(),
+                    Some(Ok(s)) => s,
+                    Some(Err(e)) => {
+                        eprintln!("Failed to read the schema in {}: {}", data_path, e);
+                        std::process::exit(1);
+                    }
+                };
+                (g, schema)
             }
             Err(e) => {
                 eprintln!("Failed to load database from {}: {}", data_path, e);
@@ -379,7 +388,10 @@ fn run_server(args: &[String]) {
         }
     } else {
         println!("Starting with empty database (will save to {})", data_path);
-        maharit_core::ConcurrentGraph::new()
+        (
+            maharit_core::ConcurrentGraph::new(),
+            crate::schema::Schema::default(),
+        )
     };
 
     // On-disk WAL (--wal / MAHARIT_WAL). Followers receive changes through
@@ -401,6 +413,7 @@ fn run_server(args: &[String]) {
     } else {
         Some(open_wal_and_recover(
             &graph,
+            &mut schema,
             std::path::Path::new(&data_path),
             wal_mode,
             checkpoint_mb.saturating_mul(1024 * 1024),
@@ -448,8 +461,11 @@ fn run_server(args: &[String]) {
             }
             let leader = Arc::new(leader);
             let leader_clone = Arc::clone(&leader);
-            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
-                .with_replication(Arc::clone(&leader));
+            let mut server = with_schema_or_exit(
+                TcpServer::with_graph_arc(config, Arc::clone(&graph_arc)),
+                &schema,
+            )
+            .with_replication(Arc::clone(&leader));
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
@@ -459,11 +475,11 @@ fn run_server(args: &[String]) {
             if let Some(d) = durability {
                 server = server.with_durability(d);
             }
-            let graph_for_signal = Arc::clone(&graph_arc);
+            let writer_for_signal = server.snapshot_writer();
             let path_for_signal = data_path.clone();
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
+                spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
@@ -525,9 +541,12 @@ fn run_server(args: &[String]) {
             }
             let follower = Arc::new(follower);
             let follower_clone = Arc::clone(&follower);
-            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
-                .with_follower(Arc::clone(&follower))
-                .with_promotion(promotion);
+            let mut server = with_schema_or_exit(
+                TcpServer::with_graph_arc(config, Arc::clone(&graph_arc)),
+                &schema,
+            )
+            .with_follower(Arc::clone(&follower))
+            .with_promotion(promotion);
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
@@ -537,11 +556,11 @@ fn run_server(args: &[String]) {
             if let Some(d) = durability {
                 server = server.with_durability(d);
             }
-            let graph_for_signal = Arc::clone(&graph_arc);
+            let writer_for_signal = server.snapshot_writer();
             let path_for_signal = data_path.clone();
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
+                spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
                 // Keep retrying until the leader is reachable, and reconnect
                 // whenever the connection drops.
@@ -560,7 +579,10 @@ fn run_server(args: &[String]) {
             std::process::exit(1);
         }
         None => {
-            let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc));
+            let mut server = with_schema_or_exit(
+                TcpServer::with_graph_arc(config, Arc::clone(&graph_arc)),
+                &schema,
+            );
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
@@ -570,11 +592,11 @@ fn run_server(args: &[String]) {
             if let Some(d) = durability {
                 server = server.with_durability(d);
             }
-            let graph_for_signal = Arc::clone(&graph_arc);
+            let writer_for_signal = server.snapshot_writer();
             let path_for_signal = data_path.clone();
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
+                spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
@@ -714,7 +736,7 @@ fn spawn_http_server(bind_address: Option<String>) {
 /// With a WAL, the save is a checkpoint (writers paused, snapshot written,
 /// WAL emptied). If it fails the WAL is kept, so nothing is lost.
 fn spawn_shutdown_handler(
-    graph: std::sync::Arc<maharit_core::ConcurrentGraph>,
+    writer: tcp_server::SnapshotWriter,
     data_path: String,
     checkpointer: Option<tcp_server::Checkpointer>,
 ) {
@@ -723,7 +745,9 @@ fn spawn_shutdown_handler(
         println!("\nShutting down, saving database to {}...", data_path);
         let result = match checkpointer {
             Some(c) => c.checkpoint().await.map_err(|e| e.to_string()),
-            None => maharit_storage::PersistentStorage::save_concurrent(&graph, &data_path)
+            None => writer
+                .save(std::path::Path::new(&data_path))
+                .await
                 .map_err(|e| e.to_string()),
         };
         match result {
@@ -734,9 +758,30 @@ fn spawn_shutdown_handler(
     });
 }
 
+/// Install the schema loaded from the data file and WAL, building its
+/// indexes. Exits when a definition cannot be installed.
+fn with_schema_or_exit(server: TcpServer, schema: &crate::schema::Schema) -> TcpServer {
+    if !schema.is_empty() {
+        println!(
+            "Restored {} constraint(s), {} index(es), {} fulltext index(es)",
+            schema.constraints.len(),
+            schema.indexes.len(),
+            schema.fulltext.len()
+        );
+    }
+    match server.with_schema(schema) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to restore the schema: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Open `<data>.wal` and replay it on top of the loaded snapshot.
 fn open_wal_and_recover(
     graph: &maharit_core::ConcurrentGraph,
+    schema: &mut crate::schema::Schema,
     data_path: &std::path::Path,
     mode: WalMode,
     checkpoint_bytes: u64,
@@ -771,11 +816,7 @@ fn open_wal_and_recover(
     }
     if !recovery.batches.is_empty() {
         let n = recovery.batches.len();
-        for entries in &recovery.batches {
-            for entry in entries {
-                replication::apply_wal_entry(graph, entry);
-            }
-        }
+        crate::schema::replay_wal(graph, schema, &recovery.batches);
         println!("Recovered {} write(s) from WAL {}", n, wal_file.display());
     }
     Durability::new(wal, data_path, checkpoint_bytes)
@@ -883,8 +924,8 @@ fn run_backup(args: &[String]) {
     }
 
     // Create backup from a persistent storage file
-    let graph = if let Some(ref src) = source_path {
-        match PersistentStorage::load(src) {
+    let (graph, schema) = if let Some(ref src) = source_path {
+        match PersistentStorage::load_with_schema(src) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("Failed to open database: {}", e);
@@ -905,7 +946,12 @@ fn run_backup(args: &[String]) {
         options = options.with_description(description);
     }
 
-    match Backup::create(&graph, &output_path, &options) {
+    // Keep the index and constraint definitions with the data.
+    let created = match &schema {
+        Some(schema) => Backup::create_with_schema(&graph, schema, &output_path, &options),
+        None => Backup::create(&graph, &output_path, &options),
+    };
+    match created {
         Ok(meta) => {
             let compression_label = match meta.compression {
                 CompressionType::None => "none",
@@ -989,13 +1035,13 @@ fn run_restore(args: &[String]) {
     }
 
     // Restore graph from backup
-    let graph = match Backup::restore(&input) {
-        Ok(g) => {
+    let (graph, schema) = match Backup::restore_with_schema(&input) {
+        Ok((g, schema)) => {
             println!("Backup restored successfully:");
             println!("  Source: {}", input);
             println!("  Nodes: {}", g.node_count());
             println!("  Edges: {}", g.edge_count());
-            g
+            (g, schema)
         }
         Err(e) => {
             eprintln!("Restore failed: {}", e);
@@ -1005,7 +1051,7 @@ fn run_restore(args: &[String]) {
 
     // If output path specified, save to persistent storage
     if let Some(ref out) = output_path {
-        match PersistentStorage::save(&graph, out) {
+        match PersistentStorage::save_with_schema(&graph, schema.as_deref().unwrap_or(""), out) {
             Ok(()) => println!("  Saved to: {}", out),
             Err(e) => {
                 eprintln!("Failed to save restored database: {}", e);
