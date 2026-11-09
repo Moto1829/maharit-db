@@ -3458,6 +3458,9 @@ impl<'a> Executor<'a> {
             {
                 continue;
             }
+            if !self.edge_matches_properties(&edge, &segment.edge, bindings)? {
+                continue;
+            }
 
             // A relationship variable bound earlier only matches that relationship.
             if let Some(bound) = segment
@@ -3538,6 +3541,9 @@ impl<'a> Executor<'a> {
                     if let Some(ref edge_type) = segment.edge.edge_type
                         && &edge.label != edge_type
                     {
+                        continue;
+                    }
+                    if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
                         continue;
                     }
 
@@ -3648,6 +3654,9 @@ impl<'a> Executor<'a> {
                         if let Some(ref edge_type) = segment.edge.edge_type
                             && &edge.label != edge_type
                         {
+                            continue;
+                        }
+                        if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
                             continue;
                         }
                         let to = self.get_next_node(node, &edge, segment.edge.direction);
@@ -3787,6 +3796,25 @@ impl<'a> Executor<'a> {
             }
         }
 
+        Ok(true)
+    }
+
+    /// リレーションシップがパターンのインラインプロパティ（`-[r {w: 1}]-`）を満たすか。
+    fn edge_matches_properties(
+        &self,
+        edge: &Edge,
+        pattern: &EdgePattern,
+        bindings: &Bindings,
+    ) -> Result<bool, ExecuteError> {
+        for (key, expected_expr) in &pattern.properties {
+            let Some(actual) = edge.properties.get(key) else {
+                return Ok(false);
+            };
+            let expected = self.evaluate_expression(expected_expr, bindings)?;
+            if !self.property_value_matches(actual, &expected) {
+                return Ok(false);
+            }
+        }
         Ok(true)
     }
 
@@ -12018,6 +12046,48 @@ mod tests {
         // Expect 2 cities * 2 names = 4 persons
         let result = execute(&mut graph, "MATCH (n:Person) RETURN n").unwrap();
         assert_eq!(result.row_count(), 4);
+    }
+
+    #[test]
+    fn test_match_filters_inline_edge_properties() {
+        // bug/155: MATCH のリレーションシップのインラインプロパティが無視されていた
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (a:A {n: 1})-[:K {w: 1}]->(b:B {n: 2})").unwrap();
+        execute(
+            &mut graph,
+            "MATCH (b:B) CREATE (b)-[:K {w: 2}]->(:C {n: 3})",
+        )
+        .unwrap();
+        execute(
+            &mut graph,
+            "MATCH (a:A) CREATE (a)-[:K {w: 2}]->(:B {n: 4})",
+        )
+        .unwrap();
+
+        let r = execute(&mut graph, "MATCH ()-[r:K {w: 1}]->() RETURN r.w").unwrap();
+        assert_eq!(r.row_count(), 1);
+        let r = execute(
+            &mut graph,
+            "MATCH (x)-[r {w: 2}]->(y) RETURN y.n ORDER BY y.n",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 2);
+        let r = execute(&mut graph, "MATCH (a:A)<-[r {w: 1}]-(x) RETURN x").unwrap();
+        assert_eq!(r.row_count(), 0);
+        // 可変長: 全てのホップが条件を満たす経路だけ
+        let r = execute(&mut graph, "MATCH (a:A)-[*1..2 {w: 1}]->(x) RETURN x.n").unwrap();
+        assert_eq!(r.row_count(), 1);
+        let r = execute(&mut graph, "MATCH (a:A)-[*1..2]->(x) RETURN x.n").unwrap();
+        assert_eq!(r.row_count(), 3);
+        // パラメータ・存在しないキー
+        let r = execute(&mut graph, "MATCH ()-[r {missing: 1}]->() RETURN r").unwrap();
+        assert_eq!(r.row_count(), 0);
+        let r = execute(
+            &mut graph,
+            "MATCH p = shortestPath((a:A)-[*..3 {w: 2}]->(c:C)) RETURN p",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 0);
     }
 
     #[test]
