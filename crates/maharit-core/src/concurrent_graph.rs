@@ -77,6 +77,19 @@ impl ConcurrentGraph {
         }
     }
 
+    /// Remove every node and edge and reset the ID counters, e.g. before
+    /// replacing the contents with a replicated snapshot. Not atomic with
+    /// respect to concurrent readers, which may briefly see a partial graph.
+    pub fn clear(&self) {
+        self.edges.clear();
+        self.outgoing.clear();
+        self.incoming.clear();
+        self.nodes.clear();
+        self.label_index.clear();
+        self.next_node_id.store(0, Ordering::SeqCst);
+        self.next_edge_id.store(0, Ordering::SeqCst);
+    }
+
     // ── Label index maintenance ───────────────────────────────────────────────
 
     /// Register `id` under each of `labels` in the label index.
@@ -577,5 +590,18 @@ mod tests {
         assert_eq!(labels.len(), 2);
         assert!(labels.contains(&"Person".to_string()));
         assert!(labels.contains(&"Employee".to_string()));
+    }
+
+    #[test]
+    fn clear_removes_everything_and_resets_ids() {
+        let g = ConcurrentGraph::new();
+        let a = g.create_node("A");
+        let b = g.create_node("B");
+        g.create_edge(a, b, "R").unwrap();
+        g.clear();
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+        assert!(g.nodes_by_label("A").is_empty());
+        assert_eq!(g.create_node("C"), 0);
     }
 }

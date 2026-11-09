@@ -190,6 +190,15 @@ def wait_rows(port: int, ca_file: str, query: str, expected: list, timeout: floa
     return rows
 
 
+def admin_promote(binary: str, addr: str, extra: list[str]) -> tuple[int, str]:
+    result = subprocess.run(
+        [binary, "admin", "promote-to-leader", "--addr", addr, *extra],
+        capture_output=True, text=True, timeout=30,
+        env={k: v for k, v in os.environ.items() if k != "MAHARIT_ADMIN_PASSWORD"},
+    )
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
 def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
     section("レプリケーションを TLS で行う")
     cert, key = make_cert(tmp, "repl")
@@ -210,12 +219,15 @@ def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
             ("trusted", ["--leader-ca", cert], True),
             ("plaintext", [], False),
             ("untrusted", ["--leader-ca", other_cert], False),
+            ("secured", ["--leader-ca", cert, "--require-auth", "--admin-password", "pw-e2e"], None),
         ]
         for i, (name, extra, _) in enumerate(follower_specs):
             followers.append(start_server(
                 binary, port + 2 + i, os.path.join(tmp, f"{name}.db"),
                 [*tls_flags, *secret, "--replication-role", "follower",
-                 "--leader-addr", f"127.0.0.1:{repl_port}", "--node-id", name, *extra],
+                 "--leader-addr", f"127.0.0.1:{repl_port}", "--node-id", name,
+                 # 昇格したときにレプリケーションを待ち受けるアドレス
+                 "--replication-bind", f"127.0.0.1:{port + 20 + i}", *extra],
             ))
         for i, (name, _, _) in enumerate(follower_specs):
             check(f"フォロワー起動（{name}）", wait_tls_ready(port + 2 + i, cert))
@@ -226,6 +238,8 @@ def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
         query = "MATCH (r:Replicated) RETURN r.name AS name"
         expected = [{"name": "over-tls"}]
         for i, (name, _, should_receive) in enumerate(follower_specs):
+            if should_receive is None:
+                continue
             if should_receive:
                 rows = wait_rows(port + 2 + i, cert, query, expected)
                 check("--leader-ca で検証したフォロワーにデータが届く", rows == expected, str(rows))
@@ -236,6 +250,32 @@ def test_replication_over_tls(binary: str, port: int, tmp: str) -> None:
                     "untrusted": "別の証明書を信頼したフォロワーには届かない",
                 }[name]
                 check(label, rows != expected, str(rows))
+
+        section("フォロワーを昇格する（TLS・認証）")
+        trusted = f"127.0.0.1:{port + 2}"
+        with Client.connect(trusted, ca_file=cert) as c:
+            rejected = False
+            try:
+                c.execute("CREATE (:Rogue)")
+            except Exception as e:
+                rejected = "read-only follower" in str(e)
+            check("昇格前のフォロワーは書き込みを拒否する", rejected)
+        rc, out = admin_promote(binary, trusted, ["--ca", cert])
+        check("admin promote-to-leader --ca で昇格できる", rc == 0 and "promoted" in out, out)
+        with Client.connect(trusted, ca_file=cert) as c:
+            c.execute("CREATE (:AfterPromotion)")
+            rows = list(c.query("MATCH (n:AfterPromotion) RETURN count(n) AS c"))
+            check("昇格後は書き込める", rows == [{"c": 1}], str(rows))
+        rc, out = admin_promote(binary, trusted, ["--ca", cert])
+        check("2 回目の昇格は拒否される", rc != 0, out)
+
+        secured = f"127.0.0.1:{port + 5}"
+        rc, out = admin_promote(binary, secured, ["--ca", cert])
+        check("--require-auth のフォロワーはログインなしでは昇格できない", rc != 0, out)
+        rc, out = admin_promote(binary, secured, ["--ca", cert, "--password", "wrong"])
+        check("誤ったパスワードでは昇格できない", rc != 0, out)
+        rc, out = admin_promote(binary, secured, ["--ca", cert, "--password", "pw-e2e"])
+        check("管理者でログインすると昇格できる", rc == 0, out)
     finally:
         for proc in followers:
             stop(proc)

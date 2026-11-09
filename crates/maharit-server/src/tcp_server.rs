@@ -29,7 +29,8 @@ use tracing::Instrument;
 use crate::durable_wal::{DurableWal, snapshot_digest};
 use crate::mutation_log::RecordingGraph;
 use crate::replication::{
-    FollowerReplicationManager, LeaderReplicationManager, ReplicationStats, WalEntryData,
+    FollowerReplicationManager, LeaderReplicationManager, ReplicationConfig, ReplicationStats,
+    SnapshotSource, WalEntryData,
 };
 use crate::tls::{DEFAULT_TLS_RELOAD_INTERVAL, ReloadableTlsAcceptor};
 use crate::tracing_setup::TracingConfig;
@@ -358,6 +359,13 @@ pub enum Request {
         #[serde(rename = "sessionToken", default)]
         session_token: Option<String>,
     },
+
+    /// Promote this follower to leader (admin only).
+    #[serde(rename = "promote")]
+    Promote {
+        #[serde(rename = "sessionToken", default)]
+        session_token: Option<String>,
+    },
 }
 
 /// Replication status embedded in the `stats` response.
@@ -488,6 +496,14 @@ pub enum Response {
         total_rows: usize,
     },
 
+    /// The follower was promoted and now accepts writes.
+    #[serde(rename = "promoted")]
+    Promoted {
+        /// Address now accepting followers, when the node serves replication.
+        #[serde(rename = "replicationBind", skip_serializing_if = "Option::is_none")]
+        replication_bind: Option<String>,
+    },
+
     /// Successful login. Subsequent requests can carry `sessionToken`.
     #[serde(rename = "loggedIn")]
     LoggedIn {
@@ -533,10 +549,12 @@ pub struct TcpServer {
     managers: Arc<SharedManagers>,
     /// Optional leader replication manager: when set, write operations are
     /// automatically replicated to followers via WAL entries.
-    replication: Option<Arc<LeaderReplicationManager>>,
-    /// Optional follower replication manager: when set, the `stats` response
-    /// reports the follower's view of leader liveness.
+    replication: SharedLeader,
+    /// Optional follower replication manager: when set, the node rejects
+    /// writes until it is promoted, and `stats` reports leader liveness.
     follower: Option<Arc<FollowerReplicationManager>>,
+    /// How a follower becomes a leader when promoted.
+    promotion: Option<Arc<Promotion>>,
     /// Authentication manager. Only enforced when `config.require_auth = true`.
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     /// Shared parsed-AST cache: avoids re-parsing identical query strings on the
@@ -547,6 +565,19 @@ pub struct TcpServer {
     durability: Option<Arc<Durability>>,
     /// TLS for client connections. `None` serves plaintext.
     tls: Option<ReloadableTlsAcceptor>,
+}
+
+/// The leader replication manager, if this node currently is a leader. Set at
+/// startup on a leader, or when a follower is promoted.
+pub type SharedLeader = Arc<std::sync::RwLock<Option<Arc<LeaderReplicationManager>>>>;
+
+/// What a follower does to become a leader.
+pub struct Promotion {
+    /// Leader replication settings (role, bind address, secret, node ID).
+    /// `None` makes the promoted node a standalone leader without followers.
+    pub replication: Option<ReplicationConfig>,
+    /// TLS for the replication listener.
+    pub tls: Option<ReloadableTlsAcceptor>,
 }
 
 /// On-disk durability for a server: the WAL and the snapshot it applies to.
@@ -585,6 +616,12 @@ impl Checkpointer {
     /// write gate throughout so no write lands between the two steps.
     pub async fn checkpoint(&self) -> std::io::Result<()> {
         let _gate = self.managers.write_gate.lock().await;
+        self.checkpoint_gated().await
+    }
+
+    /// [`checkpoint`](Self::checkpoint) for a caller already holding the
+    /// write gate.
+    async fn checkpoint_gated(&self) -> std::io::Result<()> {
         let graph = Arc::clone(&self.graph);
         let durability = Arc::clone(&self.durability);
         tokio::task::spawn_blocking(move || {
@@ -661,7 +698,7 @@ struct SharedManagers {
     /// Shared property (B-tree) index so that `CREATE INDEX` and subsequent
     /// index-accelerated lookups survive between requests.
     property_index: RwLock<PropertyIndex>,
-    write_gate: tokio::sync::Mutex<()>,
+    write_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SharedManagers {
@@ -670,7 +707,7 @@ impl SharedManagers {
             constraints: RwLock::new(ConstraintManager::new()),
             fulltext: RwLock::new(FulltextManager::new()),
             property_index: RwLock::new(PropertyIndex::new()),
-            write_gate: tokio::sync::Mutex::new(()),
+            write_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -828,8 +865,9 @@ impl TcpServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
             managers: Arc::new(SharedManagers::new()),
-            replication: None,
+            replication: SharedLeader::default(),
             follower: None,
+            promotion: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
@@ -846,8 +884,9 @@ impl TcpServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
             managers: Arc::new(SharedManagers::new()),
-            replication: None,
+            replication: SharedLeader::default(),
             follower: None,
+            promotion: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
@@ -864,8 +903,9 @@ impl TcpServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             tx_manager: Arc::new(TransactionManager::new()),
             managers: Arc::new(SharedManagers::new()),
-            replication: None,
+            replication: SharedLeader::default(),
             follower: None,
+            promotion: None,
             auth: Arc::new(Mutex::new(crate::auth::AuthManager::new())),
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
@@ -888,8 +928,19 @@ impl TcpServer {
     /// Attach a leader replication manager.  Once attached, every successful
     /// write query automatically appends WAL entries to the manager, which
     /// broadcasts them to all connected followers.
-    pub fn with_replication(mut self, manager: Arc<LeaderReplicationManager>) -> Self {
-        self.replication = Some(manager);
+    pub fn with_replication(self, manager: Arc<LeaderReplicationManager>) -> Self {
+        manager.set_snapshot_source(SnapshotSource {
+            graph: Arc::clone(&self.graph),
+            write_gate: Arc::clone(&self.managers.write_gate),
+        });
+        *self.replication.write().unwrap_or_else(|e| e.into_inner()) = Some(manager);
+        self
+    }
+
+    /// Let a follower be promoted with the `promote` request: it then stops
+    /// following, accepts writes and serves replication as `promotion` says.
+    pub fn with_promotion(mut self, promotion: Promotion) -> Self {
+        self.promotion = Some(Arc::new(promotion));
         self
     }
 
@@ -1028,8 +1079,9 @@ impl TcpServer {
                     let tx_manager = Arc::clone(&self.tx_manager);
                     let managers = Arc::clone(&self.managers);
                     let config = self.config.clone();
-                    let replication = self.replication.clone();
+                    let replication = Arc::clone(&self.replication);
                     let follower = self.follower.clone();
+                    let promotion = self.promotion.clone();
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
                     let durability = self.durability.clone();
@@ -1046,6 +1098,7 @@ impl TcpServer {
                             config,
                             replication,
                             follower,
+                            promotion,
                             auth,
                             ast_cache,
                             durability,
@@ -1127,8 +1180,9 @@ struct ConnectionContext {
     tx_manager: Arc<TransactionManager>,
     managers: Arc<SharedManagers>,
     config: ServerConfig,
-    replication: Option<Arc<LeaderReplicationManager>>,
+    replication: SharedLeader,
     follower: Option<Arc<FollowerReplicationManager>>,
+    promotion: Option<Arc<Promotion>>,
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
     durability: Option<Arc<Durability>>,
@@ -1152,17 +1206,25 @@ where
         config,
         replication,
         follower,
+        promotion,
         auth,
         ast_cache,
         durability,
     } = ctx;
     let mut buffer = BytesMut::with_capacity(4096);
-    let sinks = WriteSinks {
-        replication: replication.as_deref(),
-        wal: durability.as_ref().map(|d| &d.wal),
-    };
 
     loop {
+        // Read per request: a promoted follower starts publishing to its own
+        // followers from the next request on.
+        let leader = replication
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let sinks = WriteSinks {
+            replication: leader.as_deref(),
+            wal: durability.as_ref().map(|d| &d.wal),
+        };
+
         if shutdown.load(Ordering::SeqCst) {
             send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
             break;
@@ -1245,6 +1307,10 @@ where
                         resp
                     } else if let Some(resp) = authorize_query(role, &query) {
                         resp
+                    } else if let Some(resp) =
+                        reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
+                    {
+                        resp
                     } else {
                         stats.total_queries.fetch_add(1, Ordering::SeqCst);
                         // `.instrument` (not `span.enter()`): the guard of
@@ -1297,6 +1363,12 @@ where
                 Ok(role) if authorize_query(role, &query).is_some() => {
                     authorize_query(role, &query).unwrap()
                 }
+                Ok(_)
+                    if reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
+                        .is_some() =>
+                {
+                    reject_write_on_follower(follower.as_deref(), &ast_cache, &query).unwrap()
+                }
                 Ok(_) => {
                     stats.total_queries.fetch_add(1, Ordering::SeqCst);
                     tracing::info!(query = %query, "streaming query");
@@ -1329,11 +1401,17 @@ where
                 // Report replication status (role, node id, current LSN, follower
                 // count, leader liveness) when this node participates in
                 // replication as a follower or leader.
-                let replication_status = match follower.as_ref() {
-                    Some(f) => Some(ReplicationStatus::from(f.get_stats())),
-                    None => replication
-                        .as_ref()
-                        .map(|l| ReplicationStatus::from(l.get_stats())),
+                let replication_status = match (leader.as_ref(), follower.as_ref()) {
+                    (Some(l), _) => Some(ReplicationStatus::from(l.get_stats())),
+                    (None, Some(f)) if f.is_promoted() => Some(ReplicationStatus {
+                        role: "leader".to_string(),
+                        node_id: f.get_stats().node_id,
+                        current_lsn: 0,
+                        follower_count: 0,
+                        is_leader_alive: true,
+                    }),
+                    (None, Some(f)) => Some(ReplicationStatus::from(f.get_stats())),
+                    (None, None) => None,
                 };
                 Response::Stats {
                     connections: stats.current_connections.load(Ordering::SeqCst),
@@ -1341,6 +1419,25 @@ where
                     nodes: graph.node_count(),
                     edges: graph.edge_count(),
                     replication: replication_status,
+                }
+            }
+            Request::Promote { session_token } => {
+                match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(role) if role != crate::auth::Role::Admin => Response::AuthError {
+                        message: "promote requires the admin role".to_string(),
+                    },
+                    Ok(_) => {
+                        promote_to_leader(
+                            follower.as_deref(),
+                            promotion.as_deref(),
+                            &replication,
+                            &graph,
+                            &managers,
+                            durability.as_ref(),
+                        )
+                        .await
+                    }
                 }
             }
             Request::Disconnect => {
@@ -1758,6 +1855,117 @@ async fn execute_query(
     }
 }
 
+/// Error for a write sent to a follower that has not been promoted, or `None`
+/// when the query may run here.
+fn reject_write_on_follower(
+    follower: Option<&FollowerReplicationManager>,
+    ast_cache: &Arc<Mutex<AstCache>>,
+    query: &str,
+) -> Option<Response> {
+    let follower = follower?;
+    if follower.is_promoted() {
+        return None;
+    }
+    let stmt = ast_cache.lock().unwrap().get_or_parse(query).ok()?;
+    if is_read_only(&stmt) {
+        return None;
+    }
+    Some(Response::Error {
+        message: "this node is a read-only follower: send writes to the leader".to_string(),
+    })
+}
+
+/// Turn this follower into a leader: stop following, make the data file and
+/// WAL current, start serving replication (if configured) and accept writes.
+async fn promote_to_leader(
+    follower: Option<&FollowerReplicationManager>,
+    promotion: Option<&Promotion>,
+    replication: &SharedLeader,
+    graph: &Arc<ConcurrentGraph>,
+    managers: &Arc<SharedManagers>,
+    durability: Option<&Arc<Durability>>,
+) -> Response {
+    let Some(follower) = follower else {
+        return Response::Error {
+            message: "this node is not a follower".to_string(),
+        };
+    };
+    if follower.is_promoted() {
+        return Response::Error {
+            message: "this node has already been promoted".to_string(),
+        };
+    }
+    let Some(promotion) = promotion else {
+        return Response::Error {
+            message: "promotion is not configured on this node".to_string(),
+        };
+    };
+    // Bind first: if the address is taken, nothing has changed yet.
+    let listener = match &promotion.replication {
+        Some(cfg) => match TcpListener::bind(&cfg.replication_bind_address).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                return Response::Error {
+                    message: format!(
+                        "cannot listen for followers on {}: {e}",
+                        cfg.replication_bind_address
+                    ),
+                };
+            }
+        },
+        None => None,
+    };
+
+    let _gate = managers.write_gate.lock().await;
+    follower.stop().await;
+
+    // Everything replicated so far is only in memory: save it as the snapshot
+    // and start an empty WAL for it before the first write.
+    if let Some(d) = durability {
+        let checkpointer = Checkpointer {
+            graph: Arc::clone(graph),
+            managers: Arc::clone(managers),
+            durability: Arc::clone(d),
+        };
+        if let Err(e) = checkpointer.checkpoint_gated().await {
+            tracing::error!(error = %e, "checkpoint during promotion failed");
+            return Response::Error {
+                message: format!(
+                    "promotion stopped replication but failed to save the data file: {e}"
+                ),
+            };
+        }
+    }
+
+    let mut replication_bind = None;
+    if let (Some(cfg), Some(listener)) = (&promotion.replication, listener) {
+        let mut leader = LeaderReplicationManager::new(cfg.clone());
+        if let Some(tls) = &promotion.tls {
+            leader = leader.with_tls(tls.clone());
+        }
+        leader.set_snapshot_source(SnapshotSource {
+            graph: Arc::clone(graph),
+            write_gate: Arc::clone(&managers.write_gate),
+        });
+        let leader = Arc::new(leader);
+        replication_bind = Some(cfg.replication_bind_address.clone());
+        if let Err(e) = leader.start_with_listener(listener).await {
+            tracing::error!(error = %e, "failed to start the replication listener");
+        }
+        *replication.write().unwrap_or_else(|e| e.into_inner()) = Some(leader);
+    }
+    follower.mark_promoted();
+    tracing::warn!(replication_bind = ?replication_bind, "promoted to leader");
+    println!(
+        "Promoted to leader{}",
+        replication_bind
+            .as_deref()
+            .map(|b| format!(" (replication on {b})"))
+            .unwrap_or_default()
+    );
+    Response::Promoted { replication_bind }
+}
+
 /// Forward the mutations recorded during a write statement to the WAL, in
 /// execution order.
 async fn emit_wal_entries(entries: Vec<WalEntryData>, replication: &LeaderReplicationManager) {
@@ -2142,7 +2350,7 @@ mod tests {
         let config = ReplicationConfig::default();
         let repl = Arc::new(LeaderReplicationManager::new(config));
         let server = TcpServer::new(ServerConfig::default()).with_replication(Arc::clone(&repl));
-        assert!(server.replication.is_some());
+        assert!(server.replication.read().unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2567,6 +2775,7 @@ mod tests {
             },
             Arc::clone(&follower_graph),
         );
+        let follower = Arc::new(follower);
         follower.start().await.unwrap();
         for _ in 0..50 {
             if repl.get_follower_count() == 1 {
@@ -3867,5 +4076,316 @@ mod tests {
             send_recv(&mut old_conn, &Request::Ping).await,
             Response::Pong
         ));
+    }
+
+    // ── Follower writes, snapshot sync and promotion (bug/152) ──────────────
+
+    /// A free localhost port (bound and released).
+    async fn free_addr() -> std::net::SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap()
+    }
+
+    fn repl_config(
+        role: crate::replication::NodeRole,
+        id: &str,
+        bind: String,
+        leader: Option<String>,
+    ) -> ReplicationConfig {
+        ReplicationConfig {
+            role,
+            node_id: id.to_string(),
+            replication_bind_address: bind,
+            leader_address: leader,
+            heartbeat_interval_secs: 1,
+            heartbeat_timeout_secs: 5,
+            shared_secret: None,
+        }
+    }
+
+    async fn wait_rows(stream: &mut TcpStream, q: &str, n: usize) -> usize {
+        let mut got = 0;
+        for _ in 0..150 {
+            got = row_count(stream, q).await;
+            if got == n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        got
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn follower_syncs_rejects_writes_and_can_be_promoted() {
+        use crate::durable_wal::{DurableWal, WalMode, wal_path};
+        use crate::replication::NodeRole;
+
+        // Leader with data written before any follower connects.
+        let leader_repl_addr = free_addr().await;
+        let leader_repl = Arc::new(LeaderReplicationManager::new(repl_config(
+            NodeRole::Leader,
+            "leader",
+            leader_repl_addr.to_string(),
+            None,
+        )));
+        let leader_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = leader_listener.local_addr().unwrap();
+        let leader_server = TcpServer::new(ServerConfig {
+            bind_address: leader_addr.to_string(),
+            ..Default::default()
+        })
+        .with_replication(Arc::clone(&leader_repl));
+        leader_repl.start().await.unwrap();
+        tokio::spawn(async move { leader_server.start_with_listener(leader_listener).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut leader = TcpStream::connect(leader_addr).await.unwrap();
+        query(
+            &mut leader,
+            "CREATE (:Old {i: 1})-[:R {w: 2}]->(:Old {i: 2})",
+        )
+        .await;
+
+        // Follower whose graph holds stale data that the snapshot must replace.
+        let dir = std::env::temp_dir().join(format!("maharit_promote_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db");
+        let (wal, _) = DurableWal::open(
+            &wal_path(&data),
+            snapshot_digest(&data).unwrap(),
+            WalMode::Fsync,
+        )
+        .unwrap();
+        let follower_graph = Arc::new(ConcurrentGraph::new());
+        follower_graph.create_node("Stale");
+        let follower = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            repl_config(
+                NodeRole::Follower,
+                "follower",
+                "127.0.0.1:0".to_string(),
+                Some(leader_repl_addr.to_string()),
+            ),
+            Arc::clone(&follower_graph),
+        ));
+        let promoted_repl_addr = free_addr().await;
+        let follower_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let follower_addr = follower_listener.local_addr().unwrap();
+        let follower_server = TcpServer::with_graph_arc(
+            ServerConfig {
+                bind_address: follower_addr.to_string(),
+                ..Default::default()
+            },
+            Arc::clone(&follower_graph),
+        )
+        .with_follower(Arc::clone(&follower))
+        .with_promotion(Promotion {
+            replication: Some(repl_config(
+                NodeRole::Leader,
+                "follower",
+                promoted_repl_addr.to_string(),
+                None,
+            )),
+            tls: None,
+        })
+        .with_durability(Durability::new(wal, &data, 0));
+        follower.start().await.unwrap();
+        tokio::spawn(async move { follower_server.start_with_listener(follower_listener).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut f = TcpStream::connect(follower_addr).await.unwrap();
+
+        // The snapshot replaced the stale data with the leader's.
+        assert_eq!(wait_rows(&mut f, "MATCH (n:Old) RETURN n", 2).await, 2);
+        assert_eq!(row_count(&mut f, "MATCH (n:Stale) RETURN n").await, 0);
+        assert_eq!(row_count(&mut f, "MATCH ()-[r:R]->() RETURN r.w").await, 1);
+        // ...and later writes stream in.
+        query(&mut leader, "CREATE (:Old {i: 3})").await;
+        assert_eq!(wait_rows(&mut f, "MATCH (n:Old) RETURN n", 3).await, 3);
+
+        // Writes on the follower are refused; reads work.
+        let resp = query(&mut f, "CREATE (:Rogue)").await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("read-only follower")),
+            "{resp:?}"
+        );
+        assert_eq!(row_count(&mut f, "MATCH (n:Rogue) RETURN n").await, 0);
+
+        // Promote.
+        let resp = send_recv(
+            &mut f,
+            &Request::Promote {
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Promoted { replication_bind: Some(b) } if *b == promoted_repl_addr.to_string()),
+            "{resp:?}"
+        );
+        // The data file now holds everything replicated before promotion.
+        let saved = maharit_storage::PersistentStorage::load_concurrent(&data).unwrap();
+        assert_eq!(saved.node_count(), 3);
+        // A second promote is refused.
+        let again = send_recv(
+            &mut f,
+            &Request::Promote {
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(matches!(again, Response::Error { .. }), "{again:?}");
+
+        // The promoted node accepts writes and no longer follows the old leader.
+        let resp = query(&mut f, "CREATE (:New {i: 1})").await;
+        assert!(matches!(resp, Response::Result { .. }), "{resp:?}");
+        query(&mut leader, "CREATE (:Old {i: 4})").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(row_count(&mut f, "MATCH (n:Old) RETURN n").await, 3);
+
+        // A follower of the promoted node gets its full state, then new writes.
+        let graph2 = Arc::new(ConcurrentGraph::new());
+        let follower2 = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            repl_config(
+                NodeRole::Follower,
+                "follower2",
+                "127.0.0.1:0".to_string(),
+                Some(promoted_repl_addr.to_string()),
+            ),
+            Arc::clone(&graph2),
+        ));
+        follower2.start().await.unwrap();
+        query(&mut f, "CREATE (:New {i: 2})").await;
+        let mut synced = false;
+        for _ in 0..150 {
+            if graph2.node_count() == 5 && graph2.edge_count() == 1 {
+                synced = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            synced,
+            "follower2 has {} nodes / {} edges",
+            graph2.node_count(),
+            graph2.edge_count()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn promote_requires_a_follower_and_admin_role() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let resp = send_recv(
+            &mut s,
+            &Request::Promote {
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("not a follower")),
+            "{resp:?}"
+        );
+    }
+
+    /// A follower that connects while writes are in flight must end up with
+    /// exactly the leader's graph: nothing missing between the snapshot and
+    /// the stream, nothing applied twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_during_concurrent_writes_matches_leader() {
+        use crate::replication::NodeRole;
+
+        let repl_addr = free_addr().await;
+        let repl = Arc::new(LeaderReplicationManager::new(repl_config(
+            NodeRole::Leader,
+            "leader",
+            repl_addr.to_string(),
+            None,
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            ..Default::default()
+        })
+        .with_replication(Arc::clone(&repl));
+        let leader_graph = server.graph_arc();
+        repl.start().await.unwrap();
+        tokio::spawn(async move { server.start_with_listener(listener).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                tokio::spawn(async move {
+                    let mut s = TcpStream::connect(addr).await.unwrap();
+                    for i in 0..150 {
+                        query(&mut s, &format!("CREATE (:W {{w: {w}, i: {i}}})")).await;
+                        if i % 3 == 0 {
+                            query(
+                                &mut s,
+                                &format!("MATCH (n:W {{w: {w}, i: {i}}}) SET n.even = true"),
+                            )
+                            .await;
+                        }
+                        if i % 5 == 0 && i > 0 {
+                            let prev = i - 1;
+                            query(
+                                &mut s,
+                                &format!("MATCH (n:W {{w: {w}, i: {prev}}}) DELETE n"),
+                            )
+                            .await;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let graph = Arc::new(ConcurrentGraph::new());
+        let follower = Arc::new(FollowerReplicationManager::with_concurrent_graph(
+            repl_config(
+                NodeRole::Follower,
+                "f",
+                "127.0.0.1:0".to_string(),
+                Some(repl_addr.to_string()),
+            ),
+            Arc::clone(&graph),
+        ));
+        follower.start().await.unwrap();
+        for w in writers {
+            w.await.unwrap();
+        }
+
+        let fingerprint = |g: &ConcurrentGraph| {
+            let mut v: Vec<String> = g
+                .nodes()
+                .map(|n| {
+                    let mut props: Vec<_> = n
+                        .properties
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v:?}"))
+                        .collect();
+                    props.sort();
+                    format!("{}:{:?}:{}", n.id, n.labels, props.join(","))
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let mut same = false;
+        for _ in 0..200 {
+            if fingerprint(&graph) == fingerprint(&leader_graph) {
+                same = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            same,
+            "follower has {} nodes, leader {}",
+            graph.node_count(),
+            leader_graph.node_count()
+        );
+        assert!(leader_graph.node_count() > 400);
     }
 }

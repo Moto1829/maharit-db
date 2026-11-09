@@ -393,12 +393,10 @@ fn run_server(args: &[String]) {
             std::process::exit(1);
         }
     };
+    // A follower does not log replicated changes (it resyncs from the leader
+    // on every connect), but opens the WAL so that writes are durable once it
+    // is promoted.
     let durability = if wal_mode == WalMode::Off {
-        None
-    } else if replication_role.as_deref() == Some("follower") {
-        println!(
-            "WAL disabled on a follower (data is saved at shutdown and resynced from the leader)"
-        );
         None
     } else {
         Some(open_wal_and_recover(
@@ -486,7 +484,19 @@ fn run_server(args: &[String]) {
                     std::process::exit(1);
                 }
             };
-            let bind = replication_bind.unwrap_or_else(|| "127.0.0.1:7689".to_string());
+            // Where this node serves replication once promoted.
+            let bind = replication_bind.unwrap_or_else(|| "127.0.0.1:7688".to_string());
+            let promotion = crate::tcp_server::Promotion {
+                replication: Some(ReplicationConfig {
+                    role: NodeRole::Leader,
+                    node_id: node_id.clone(),
+                    replication_bind_address: bind.clone(),
+                    leader_address: None,
+                    shared_secret: replication_secret.clone(),
+                    ..Default::default()
+                }),
+                tls: tls.clone(),
+            };
             let repl_config = ReplicationConfig {
                 role: NodeRole::Follower,
                 node_id: node_id.clone(),
@@ -516,23 +526,26 @@ fn run_server(args: &[String]) {
             let follower = Arc::new(follower);
             let follower_clone = Arc::clone(&follower);
             let mut server = TcpServer::with_graph_arc(config, Arc::clone(&graph_arc))
-                .with_follower(Arc::clone(&follower));
+                .with_follower(Arc::clone(&follower))
+                .with_promotion(promotion);
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
             if let Some(t) = tls.clone() {
                 server = server.with_tls(t);
             }
+            if let Some(d) = durability {
+                server = server.with_durability(d);
+            }
             let graph_for_signal = Arc::clone(&graph_arc);
             let path_for_signal = data_path.clone();
+            let checkpointer = server.checkpointer();
             rt.block_on(async move {
-                spawn_shutdown_handler(graph_for_signal, path_for_signal, None);
+                spawn_shutdown_handler(graph_for_signal, path_for_signal, checkpointer);
                 spawn_http_server(metrics_bind.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = follower_clone.start().await {
-                        eprintln!("Replication follower error: {}", e);
-                    }
-                });
+                // Keep retrying until the leader is reachable, and reconnect
+                // whenever the connection drops.
+                follower_clone.start_with_retry();
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
                     std::process::exit(1);
@@ -1068,7 +1081,15 @@ fn run_admin(args: &[String]) {
             println!("MaharitDB Admin Commands");
             println!();
             println!("SUBCOMMANDS:");
-            println!("  promote-to-leader --addr <ADDR>  Send PromoteToLeader to a follower");
+            println!(
+                "  promote-to-leader --addr <ADDR> [--ca <PATH>] [--user <USER>] [--password <PW>]"
+            );
+            println!("      Promote the follower whose client port is <ADDR> to leader.");
+            println!("      --ca: CA certificate when the follower uses TLS.");
+            println!(
+                "      --password (env: MAHARIT_ADMIN_PASSWORD): log in as --user (default: admin)"
+            );
+            println!("      when the follower runs with --require-auth.");
         }
         other => {
             eprintln!("Unknown admin subcommand: {}", other);
@@ -1079,6 +1100,9 @@ fn run_admin(args: &[String]) {
 
 fn run_admin_promote(args: &[String]) {
     let mut addr: Option<String> = None;
+    let mut ca: Option<String> = None;
+    let mut user = "admin".to_string();
+    let mut password: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -1087,28 +1111,137 @@ fn run_admin_promote(args: &[String]) {
                 addr = Some(args[i + 1].clone());
                 i += 1;
             }
+            "--ca" if i + 1 < args.len() => {
+                ca = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--user" if i + 1 < args.len() => {
+                user = args[i + 1].clone();
+                i += 1;
+            }
+            "--password" if i + 1 < args.len() => {
+                password = Some(args[i + 1].clone());
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
     }
 
-    let addr = match addr {
-        Some(a) => a,
-        None => {
-            eprintln!("Error: --addr <ADDR> is required");
-            eprintln!("Usage: maharit admin promote-to-leader --addr <FOLLOWER_ADDR>");
+    let Some(addr) = addr else {
+        eprintln!("Error: --addr <ADDR> is required");
+        eprintln!(
+            "Usage: maharit admin promote-to-leader --addr <FOLLOWER_CLIENT_ADDR> [--ca <PATH>] [--user <USER>] [--password <PW>]"
+        );
+        std::process::exit(1);
+    };
+    let password = password.or_else(|| {
+        std::env::var("MAHARIT_ADMIN_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty())
+    });
+    let credentials = password.map(|p| (user, p));
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+    match rt.block_on(admin_promote(&addr, ca.as_deref(), credentials)) {
+        Ok(Some(bind)) => {
+            println!("{addr} was promoted to leader; followers can connect to {bind}")
+        }
+        Ok(None) => println!("{addr} was promoted to leader"),
+        Err(e) => {
+            eprintln!("Promotion failed: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Send a `promote` request to the follower whose client port is `addr`,
+/// logging in first when `credentials` are given. Returns the replication
+/// address the new leader listens on.
+async fn admin_promote(
+    addr: &str,
+    ca: Option<&str>,
+    credentials: Option<(String, String)>,
+) -> Result<Option<String>, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+    impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Stream for T {}
+
+    async fn call(
+        stream: &mut dyn Stream,
+        req: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let body = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.write_all(&body).await.map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())?;
+        let mut len = [0u8; 4];
+        stream
+            .read_exact(&mut len)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&buf).map_err(|e| e.to_string())
+    }
+
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("cannot connect to {addr}: {e}"))?;
+    let mut stream: Box<dyn Stream> = match ca {
+        None => Box::new(tcp),
+        Some(ca) => {
+            let config =
+                crate::tls::build_client_config(Some(ca), false).map_err(|e| e.to_string())?;
+            let host = addr
+                .rsplit_once(':')
+                .map_or(addr, |(h, _)| h)
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            let name = rustls::pki_types::ServerName::try_from(host.to_string())
+                .map_err(|e| e.to_string())?;
+            let tls = tokio_rustls::TlsConnector::from(config)
+                .connect(name, tcp)
+                .await
+                .map_err(|e| format!("TLS handshake failed: {e}"))?;
+            Box::new(tls)
         }
     };
 
-    use crate::replication::send_promote_to_leader;
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    match rt.block_on(send_promote_to_leader(&addr)) {
-        Ok(()) => println!("PromoteToLeader sent to {}", addr),
-        Err(e) => {
-            eprintln!("Failed to send PromoteToLeader: {}", e);
-            std::process::exit(1);
+    let mut token = None;
+    if let Some((user, password)) = credentials {
+        let resp = call(
+            stream.as_mut(),
+            serde_json::json!({"type": "login", "username": user, "password": password}),
+        )
+        .await?;
+        match resp.get("sessionToken").and_then(|t| t.as_str()) {
+            Some(t) => token = Some(t.to_string()),
+            None => return Err(format!("login failed: {resp}")),
         }
+    }
+    let resp = call(
+        stream.as_mut(),
+        serde_json::json!({"type": "promote", "sessionToken": token}),
+    )
+    .await?;
+    match resp.get("type").and_then(|t| t.as_str()) {
+        Some("promoted") => Ok(resp
+            .get("replicationBind")
+            .and_then(|b| b.as_str())
+            .map(str::to_string)),
+        _ => Err(resp
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| resp.to_string())),
     }
 }
 
@@ -1214,7 +1347,7 @@ fn print_server_help() {
     );
     println!("    --replication-role <ROLE>        Start as 'leader' or 'follower'");
     println!(
-        "    --replication-bind <ADDR>        Replication listen address (leader, default: 127.0.0.1:7688)"
+        "    --replication-bind <ADDR>        Replication listen address (leader, or a follower once promoted; default: 127.0.0.1:7688)"
     );
     println!(
         "    --replication-secret <SECRET>    Shared secret authenticating the replication channel (env: MAHARIT_REPLICATION_SECRET)"

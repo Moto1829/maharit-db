@@ -2,8 +2,11 @@
 """
 MaharitDB フェイルオーバーテストスクリプト
 
-docker-compose.replication.yml で起動した環境（リーダー1台 + フォロワー2台）で
+docker-compose.replication.yml または scripts/start_replication_local.sh で起動した
+環境（リーダー1台 + フォロワー2台）で、フォロワーが書き込みを拒否すること、
 リーダー停止 → フォロワー昇格 → 継続書き込み・読み取りを検証する。
+ローカルプロセス構成では、フォロワー2 が昇格したフォロワー1（同じ 127.0.0.1:7688 で
+レプリケーションを待ち受ける）に自動で接続し直し、昇格後の書き込みを受け取ることも検証する。
 
 前提条件:
   docker compose -f docker-compose.replication.yml up -d --build
@@ -115,6 +118,16 @@ def phase1_initial_check(leader, followers: list):
         if f:
             resp = f.send({"type": "ping"})
             check(f"フォロワー{i}: pong が返る", resp.get("type") == "pong", str(resp))
+
+    # フォロワーは書き込みを拒否する
+    for i, f in enumerate(followers, 1):
+        if f:
+            resp = f.query("CREATE (n:FailoverRogue {name: 'rogue'})")
+            check(
+                f"フォロワー{i}: 書き込みを拒否する",
+                resp.get("type") == "error" and "read-only follower" in resp.get("message", ""),
+                str(resp),
+            )
 
     # リーダーに書き込む
     section("フェーズ1: リーダーへの書き込み")
@@ -241,25 +254,47 @@ def phase5_verify_new_leader(follower1_port: int, wait_sec: float):
     return True
 
 
-def phase6_verify_follower2(follower2_port: int, wait_sec: float):
+def phase6_verify_follower2(follower2_port: int, wait_sec: float, use_docker: bool):
     """フェーズ6: フォロワー2の状態確認"""
     section("フェーズ6: フォロワー2の状態確認")
+
+    if not use_docker:
+        # ローカル構成: 昇格したフォロワー1 が 127.0.0.1:7688 で待ち受けるので、
+        # フォロワー2 は自動で接続し直し、スナップショットと以降の変更を受け取る。
+        deadline = time.time() + max(wait_sec, 10.0)
+        names: list = []
+        alive = False
+        while time.time() < deadline:
+            f2 = connect("127.0.0.1", follower2_port, "フォロワー2", timeout=5.0)
+            if f2:
+                try:
+                    resp = f2.query(
+                        "MATCH (n:FailoverTest) RETURN n.name ORDER BY n.name"
+                    )
+                    names = [r.get("n.name") for r in resp.get("rows", [])]
+                    stats = f2.send({"type": "stats"})
+                    alive = (stats.get("replication") or {}).get("is_leader_alive", False)
+                finally:
+                    f2.close()
+                if "Failover_Dave_new" in names and alive:
+                    break
+            time.sleep(0.5)
+        check("フォロワー2: 新リーダーに接続し直す（is_leader_alive）", alive)
+        check(
+            "フォロワー2: 新リーダーへの書き込みを受け取る",
+            "Failover_Dave_new" in names and len(names) >= 4,
+            str(names),
+        )
+        return
 
     print(f"  {YELLOW}⏳ {wait_sec}秒待機中（ハートビートタイムアウト待ち）...{RESET}")
     time.sleep(wait_sec)
 
     f2 = connect("127.0.0.1", follower2_port, "フォロワー2", timeout=5.0)
     if not f2:
-        # 接続失敗 = リーダーが落ちたことでフォロワー2 も応答不能になった可能性
-        check("フォロワー2: 接続試行（タイムアウト可）", True, "接続できないが期待通り")
+        check("フォロワー2: 接続", False, "接続できない")
         return
-
-    # stats で is_leader_alive が false になっていることを確認
     try:
-        resp = f2.send({"type": "ping"})
-        # ping に応答できる = クライアント接続は生きている
-        check("フォロワー2: クライアント接続は生きている", resp.get("type") == "pong", str(resp))
-
         resp = f2.send({"type": "stats"})
         is_leader_alive = resp.get("replication", {}).get("is_leader_alive", True)
         check(
@@ -398,8 +433,8 @@ def main():
     # フェーズ5: 昇格後の新リーダー動作確認
     phase5_verify_new_leader(args.follower1_port, args.promote_wait)
 
-    # フェーズ6: フォロワー2のハートビートタイムアウト確認
-    phase6_verify_follower2(args.follower2_port, args.hb_timeout_wait)
+    # フェーズ6: フォロワー2の確認（ローカル: 新リーダーへの再接続 / Docker: リーダー喪失の検知）
+    phase6_verify_follower2(args.follower2_port, args.hb_timeout_wait, use_docker)
 
     sys.exit(summarize())
 

@@ -237,6 +237,7 @@ async fn run_seed(seed: u64, clients: u64, ops: usize) -> Result<(), String> {
         },
         Arc::clone(&follower_graph),
     );
+    let follower = Arc::new(follower);
     follower.start().await.unwrap();
     for _ in 0..100 {
         if repl.get_follower_count() == 1 {

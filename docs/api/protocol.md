@@ -44,6 +44,7 @@ TCP ソケット（オプションで TLS）の上で、長さプレフィック
 | `rollback` | トランザクションをロールバックする | `txId`、`sessionToken`? |
 | `ping` | 死活確認 | なし |
 | `stats` | サーバーの統計を取得する | なし |
+| `promote` | このフォロワーをリーダーに昇格させる（admin のみ。[レプリケーション](../advanced/replication.md)） | `sessionToken`? |
 | `disconnect` | 接続を終了する | なし |
 
 `sessionToken` は、サーバーを `--require-auth` で起動したときに必要です（[認証](../operations/auth.md)）。
@@ -60,6 +61,7 @@ TCP ソケット（オプションで TLS）の上で、長さプレフィック
 | `rolledBack` | `rollback` | `txId` |
 | `pong` | `ping` | なし |
 | `stats` | `stats` | `connections`、`total_queries`、`nodes`、`edges`、`replication`? |
+| `promoted` | `promote` | `replicationBind`?（フォロワーの接続を受け付け始めたアドレス） |
 | `goodbye` | `disconnect`、またはサーバー停止時 | なし |
 | `error` | どれでも | `message` |
 | `authError` | どれでも | `message`（トークンがない・無効・期限切れ、権限不足、ログイン失敗） |

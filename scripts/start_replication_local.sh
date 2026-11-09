@@ -56,7 +56,7 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 # ── データファイルをリセット ───────────────────────────────────────────────────
-rm -f /tmp/maharit_leader.db /tmp/maharit_follower1.db /tmp/maharit_follower2.db
+rm -f /tmp/maharit_leader.db /tmp/maharit_follower1.db /tmp/maharit_follower2.db /tmp/maharit_leader.db.wal /tmp/maharit_follower1.db.wal /tmp/maharit_follower2.db.wal
 
 # ── リーダー起動 ──────────────────────────────────────────────────────────────
 echo "リーダー起動中... (port 7687, replication-bind 127.0.0.1:7688)"

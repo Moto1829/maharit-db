@@ -22,6 +22,9 @@ use tokio::time::{interval, timeout};
 use crate::mutation_log::{property_value_from_wal_string, property_value_to_wal_string};
 use crate::tls::ReloadableTlsAcceptor;
 
+/// How long a follower waits before reconnecting to the leader.
+const FOLLOWER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
 /// How long a TLS handshake on the replication channel may take.
 const REPLICATION_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -161,10 +164,17 @@ pub enum ReplicationMessage {
     WalEntry { lsn: u64, entry: WalEntryData },
     /// Follower -> Leader: confirm WAL entry was applied
     WalAck { follower_id: String, lsn: u64 },
-    /// Leader -> Follower: full graph snapshot (sent to new followers with LSN 0).
-    /// `data` is a JSON-serialized `Vec<WalEntryData>` that recreates the graph.
-    Snapshot { data: Vec<u8> },
-    /// Leader -> Follower: instruct the follower to promote itself to leader.
+    /// Leader -> Follower: full graph snapshot, sent right after the handshake.
+    /// `data` is a JSON-serialized `Vec<WalEntryData>` that recreates the graph;
+    /// the follower replaces its graph with it. `lsn` is the leader's LSN at the
+    /// moment of the snapshot: every later change arrives as a `WalEntry`.
+    Snapshot {
+        data: Vec<u8>,
+        #[serde(default)]
+        lsn: u64,
+    },
+    /// Obsolete (sent by older `admin promote-to-leader`); followers ignore it.
+    /// Promotion is the `promote` request on the client port.
     PromoteToLeader,
     /// Leader -> Follower: leader is shutting down
     Shutdown,
@@ -278,6 +288,9 @@ pub struct LeaderReplicationManager {
     graph: Option<Arc<RwLock<Graph>>>,
     /// When set, followers must connect over TLS.
     tls: Option<ReloadableTlsAcceptor>,
+    /// When set, every follower receives a consistent snapshot of the
+    /// server's graph on connect (see [`SnapshotSource`]).
+    snapshot_source: Arc<std::sync::OnceLock<SnapshotSource>>,
 }
 
 impl LeaderReplicationManager {
@@ -294,6 +307,7 @@ impl LeaderReplicationManager {
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: None,
             tls: None,
+            snapshot_source: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -307,7 +321,14 @@ impl LeaderReplicationManager {
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: Some(graph),
             tls: None,
+            snapshot_source: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Send followers a snapshot of `source` when they connect. Only the first
+    /// call has an effect.
+    pub fn set_snapshot_source(&self, source: SnapshotSource) {
+        let _ = self.snapshot_source.set(source);
     }
 
     /// Accept follower connections over TLS only. This also keeps the shared
@@ -400,6 +421,8 @@ impl LeaderReplicationManager {
         let wal_subscribers = Arc::clone(&self.wal_subscribers);
         let graph = self.graph.clone();
         let tls = self.tls.clone();
+        // Read per connection: the source may be set after the listener starts.
+        let snapshot_source = Arc::clone(&self.snapshot_source);
 
         tokio::spawn(async move {
             loop {
@@ -418,6 +441,7 @@ impl LeaderReplicationManager {
                         let wal_subscribers2 = Arc::clone(&wal_subscribers);
                         let graph2 = graph.clone();
                         let acceptor = tls.as_ref().map(ReloadableTlsAcceptor::acceptor);
+                        let snapshot_source2 = snapshot_source.get().cloned();
 
                         tokio::spawn(async move {
                             let ctx = LeaderConnection {
@@ -427,6 +451,7 @@ impl LeaderReplicationManager {
                                 shutdown: shutdown2,
                                 wal_subscribers: wal_subscribers2,
                                 graph: graph2,
+                                snapshot_source: snapshot_source2,
                             };
                             let result = match acceptor {
                                 None => handle_follower_connection(socket, ctx).await,
@@ -476,6 +501,51 @@ fn replication_secret_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Serialize a concurrent graph as WAL entries that recreate it (IDs kept).
+pub(crate) fn concurrent_graph_snapshot_entries(g: &ConcurrentGraph) -> Vec<WalEntryData> {
+    let mut entries = Vec::new();
+    for node in g.nodes() {
+        entries.push(WalEntryData::CreateNode {
+            node_id: node.id,
+            labels: node.labels.clone(),
+        });
+        for (key, val) in node.properties.iter() {
+            entries.push(WalEntryData::SetProperty {
+                target_id: node.id,
+                is_node: true,
+                key: key.clone(),
+                value: property_value_to_wal_string(val),
+            });
+        }
+    }
+    for edge in g.edges() {
+        entries.push(WalEntryData::CreateEdge {
+            edge_id: edge.id,
+            from: edge.from,
+            to: edge.to,
+            label: edge.label.clone(),
+        });
+        for (key, val) in edge.properties.iter() {
+            entries.push(WalEntryData::SetProperty {
+                target_id: edge.id,
+                is_node: false,
+                key: key.clone(),
+                value: property_value_to_wal_string(val),
+            });
+        }
+    }
+    entries
+}
+
+/// Where a leader takes the snapshot for a newly connected follower: the
+/// server's graph, read while holding the server's write gate so that the
+/// snapshot and the WAL stream that follows it neither overlap nor leave a gap.
+#[derive(Clone)]
+pub struct SnapshotSource {
+    pub graph: Arc<ConcurrentGraph>,
+    pub write_gate: Arc<AsyncMutex<()>>,
 }
 
 /// Serialize the current graph as a list of WAL entries suitable for snapshot sync.
@@ -528,6 +598,7 @@ struct LeaderConnection {
     shutdown: Arc<AtomicBool>,
     wal_subscribers: WalSubscribers,
     graph: Option<Arc<RwLock<Graph>>>,
+    snapshot_source: Option<SnapshotSource>,
 }
 
 /// Handle a single follower connection (plain TCP or TLS) on the leader side.
@@ -545,6 +616,7 @@ where
         shutdown,
         wal_subscribers,
         graph,
+        snapshot_source,
     } = ctx;
     let (mut reader, mut writer) = tokio::io::split(socket);
 
@@ -600,15 +672,40 @@ where
     // Subscribe to the WAL only after the follower authenticated, so an
     // unauthenticated peer can never exert backpressure on the leader.
     let (wal_tx, mut wal_rx) = mpsc::channel(WAL_QUEUE_CAPACITY);
-    wal_subscribers.lock().await.push(wal_tx);
 
-    // If the follower has no data (LSN == 0), send a full snapshot.
-    if follower_lsn == 0
-        && let Some(ref g) = graph
-    {
-        let entries = graph_to_snapshot_entries(g).await;
-        let data = serde_json::to_vec(&entries).unwrap_or_default();
-        send_message(&mut writer, &ReplicationMessage::Snapshot { data }).await?;
+    if let Some(source) = snapshot_source {
+        // Writers publish to followers while holding the write gate, so under
+        // the gate the graph matches the WAL up to the current LSN exactly:
+        // the snapshot covers everything before it and the subscription
+        // everything after it.
+        let (entries, snapshot_lsn) = {
+            let _gate = source.write_gate.lock().await;
+            wal_subscribers.lock().await.push(wal_tx);
+            (
+                concurrent_graph_snapshot_entries(&source.graph),
+                lsn.load(Ordering::SeqCst),
+            )
+        };
+        let data = serde_json::to_vec(&entries)?;
+        send_message(
+            &mut writer,
+            &ReplicationMessage::Snapshot {
+                data,
+                lsn: snapshot_lsn,
+            },
+        )
+        .await?;
+    } else {
+        wal_subscribers.lock().await.push(wal_tx);
+        // If the follower has no data (LSN == 0), send a full snapshot.
+        if follower_lsn == 0
+            && let Some(ref g) = graph
+        {
+            let entries = graph_to_snapshot_entries(g).await;
+            let data = serde_json::to_vec(&entries).unwrap_or_default();
+            let lsn = lsn.load(Ordering::SeqCst);
+            send_message(&mut writer, &ReplicationMessage::Snapshot { data, lsn }).await?;
+        }
     }
 
     // Register the follower.
@@ -750,10 +847,14 @@ pub struct FollowerReplicationManager {
     last_heartbeat: Arc<RwLock<Instant>>,
     /// Local graph to which WAL entries are applied
     graph: Arc<ConcurrentGraph>,
-    /// Set to `true` when a `PromoteToLeader` message is received.
+    /// Set once the server promoted this node to leader.
     is_promoted: Arc<AtomicBool>,
     /// When set, connect to the leader over TLS.
     leader_tls: Option<LeaderTls>,
+    /// Set by [`stop`](Self::stop): stop following and do not reconnect.
+    stopped: Arc<AtomicBool>,
+    /// The task that receives from (and reconnects to) the leader.
+    receiver: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl FollowerReplicationManager {
@@ -771,6 +872,8 @@ impl FollowerReplicationManager {
             graph: Arc::new(ConcurrentGraph::new()),
             is_promoted: Arc::new(AtomicBool::new(false)),
             leader_tls: None,
+            stopped: Arc::new(AtomicBool::new(false)),
+            receiver: std::sync::Mutex::new(None),
         }
     }
 
@@ -784,6 +887,8 @@ impl FollowerReplicationManager {
             graph,
             is_promoted: Arc::new(AtomicBool::new(false)),
             leader_tls: None,
+            stopped: Arc::new(AtomicBool::new(false)),
+            receiver: std::sync::Mutex::new(None),
         }
     }
 
@@ -824,25 +929,17 @@ impl FollowerReplicationManager {
         }
     }
 
-    /// Connect to the leader and start receiving WAL entries.
-    ///
-    /// Spawns two background tokio tasks:
-    /// 1. A receive loop that handles incoming messages from the leader.
-    /// 2. A watchdog that flips `is_leader_alive` to `false` when no heartbeat
-    ///    has been received within `heartbeat_timeout_secs`.
-    ///
-    /// Returns `Ok(())` as soon as both tasks are spawned.
-    pub async fn start(&self) -> Result<(), ReplicationError> {
+    /// Connect to the leader (plain TCP or TLS) and complete nothing else.
+    async fn connect(&self) -> Result<Box<dyn ReplicationStream>, ReplicationError> {
         let leader_address = self
             .config
             .leader_address
             .clone()
             .ok_or(ReplicationError::LeaderNotConfigured)?;
-
         let tcp = TcpStream::connect(&leader_address)
             .await
             .map_err(|e| ReplicationError::ConnectionFailed(e.to_string()))?;
-        let stream: Box<dyn ReplicationStream> = match &self.leader_tls {
+        Ok(match &self.leader_tls {
             None => Box::new(tcp),
             Some(tls) => {
                 let connector = tokio_rustls::TlsConnector::from(Arc::clone(&tls.client_config));
@@ -859,49 +956,111 @@ impl FollowerReplicationManager {
                     })?;
                 Box::new(stream)
             }
-        };
+        })
+    }
 
-        let config = self.config.clone();
-        let current_lsn = Arc::clone(&self.current_lsn);
-        let is_leader_alive = Arc::clone(&self.is_leader_alive);
-        let last_heartbeat = Arc::clone(&self.last_heartbeat);
-        let graph = Arc::clone(&self.graph);
-        let is_promoted = Arc::clone(&self.is_promoted);
+    /// Connect to the leader and start receiving WAL entries.
+    ///
+    /// Returns an error when the first connection attempt fails. Once
+    /// connected, a background task applies the leader's snapshot and WAL
+    /// stream and reconnects whenever the connection drops (each new
+    /// connection starts with a fresh snapshot), until [`stop`](Self::stop).
+    pub async fn start(self: &Arc<Self>) -> Result<(), ReplicationError> {
+        let stream = self.connect().await?;
+        self.spawn_receiver(Some(stream));
+        Ok(())
+    }
 
-        // ── Receive loop ─────────────────────────────────────────────────────
-        tokio::spawn(async move {
-            if let Err(e) = run_follower_receive_loop(
-                stream,
-                config,
-                current_lsn,
-                is_leader_alive,
-                last_heartbeat,
-                graph,
-                is_promoted,
-            )
-            .await
-            {
-                eprintln!("Follower receive loop error: {}", e);
+    /// Like [`start`](Self::start), but keeps retrying until the leader is
+    /// reachable instead of failing on the first attempt.
+    pub fn start_with_retry(self: &Arc<Self>) {
+        self.spawn_receiver(None);
+    }
+
+    /// Stop following the leader: close the connection, stop reconnecting and
+    /// wait until no more replicated changes are being applied.
+    pub async fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let handle = self
+            .receiver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            // The receive loop applies each message synchronously, so aborting
+            // at an await point never leaves a message half-applied.
+            handle.abort();
+            let _ = handle.await;
+        }
+        self.is_leader_alive.store(false, Ordering::SeqCst);
+    }
+
+    /// Record that this node was promoted to leader.
+    pub fn mark_promoted(&self) {
+        self.is_promoted.store(true, Ordering::SeqCst);
+    }
+
+    fn spawn_receiver(self: &Arc<Self>, first: Option<Box<dyn ReplicationStream>>) {
+        let this = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            let mut next = first;
+            let mut announced_wait = false;
+            loop {
+                if this.stopped.load(Ordering::SeqCst) || this.is_promoted() {
+                    break;
+                }
+                let stream = match next.take() {
+                    Some(s) => s,
+                    None => match this.connect().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if !announced_wait {
+                                eprintln!("Replication: cannot reach the leader ({e}); retrying");
+                                announced_wait = true;
+                            }
+                            tokio::time::sleep(FOLLOWER_RECONNECT_DELAY).await;
+                            continue;
+                        }
+                    },
+                };
+                if announced_wait {
+                    println!("Replication: connected to the leader");
+                    announced_wait = false;
+                }
+                if let Err(e) = run_follower_receive_loop(
+                    stream,
+                    this.config.clone(),
+                    Arc::clone(&this.current_lsn),
+                    Arc::clone(&this.is_leader_alive),
+                    Arc::clone(&this.last_heartbeat),
+                    Arc::clone(&this.graph),
+                )
+                .await
+                {
+                    eprintln!("Follower receive loop error: {}", e);
+                }
+                this.is_leader_alive.store(false, Ordering::SeqCst);
+                tokio::time::sleep(FOLLOWER_RECONNECT_DELAY).await;
             }
         });
+        *self.receiver.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
-        // ── Heartbeat watchdog ────────────────────────────────────────────────
-        let is_leader_alive2 = Arc::clone(&self.is_leader_alive);
-        let last_heartbeat2 = Arc::clone(&self.last_heartbeat);
+        // Heartbeat watchdog: flips `is_leader_alive` to false when no
+        // heartbeat arrived within `heartbeat_timeout_secs`.
+        let is_leader_alive = Arc::clone(&self.is_leader_alive);
+        let last_heartbeat = Arc::clone(&self.last_heartbeat);
+        let stopped = Arc::clone(&self.stopped);
         let timeout_secs = self.config.heartbeat_timeout_secs;
-
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(1));
-            loop {
+            while !stopped.load(Ordering::SeqCst) {
                 ticker.tick().await;
-                let last = *last_heartbeat2.read().await;
+                let last = *last_heartbeat.read().await;
                 if last.elapsed() > Duration::from_secs(timeout_secs) {
-                    is_leader_alive2.store(false, Ordering::SeqCst);
+                    is_leader_alive.store(false, Ordering::SeqCst);
                 }
             }
         });
-
-        Ok(())
     }
 }
 
@@ -977,7 +1136,6 @@ async fn run_follower_receive_loop(
     is_leader_alive: Arc<AtomicBool>,
     last_heartbeat: Arc<RwLock<Instant>>,
     graph: Arc<ConcurrentGraph>,
-    is_promoted: Arc<AtomicBool>,
 ) -> Result<(), ReplicationError> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -1060,16 +1218,24 @@ async fn run_follower_receive_loop(
                 }
             }
 
-            ReplicationMessage::Snapshot { data } => {
-                // Apply the full snapshot: deserialize as a list of WAL entries and apply each.
+            ReplicationMessage::Snapshot { data, lsn } => {
+                // Replace the local graph with the leader's: anything the
+                // follower kept from before (its data file, or changes made
+                // while it was disconnected) is out of date.
                 match serde_json::from_slice::<Vec<WalEntryData>>(&data) {
                     Ok(entries) => {
+                        graph.clear();
                         for entry in &entries {
                             apply_wal_entry(&graph, entry);
                         }
-                        // Advance LSN to the current leader LSN so future WAL entries
-                        // are applied correctly (snapshot is the baseline).
+                        current_lsn.store(lsn, Ordering::SeqCst);
                         *last_heartbeat.write().await = Instant::now();
+                        tracing::info!(
+                            nodes = graph.node_count(),
+                            edges = graph.edge_count(),
+                            lsn,
+                            "replication: applied snapshot from leader"
+                        );
                     }
                     Err(e) => {
                         eprintln!("Snapshot deserialization error: {}", e);
@@ -1078,10 +1244,12 @@ async fn run_follower_receive_loop(
             }
 
             ReplicationMessage::PromoteToLeader => {
-                // Signal that this follower should become the new leader.
-                is_promoted.store(true, Ordering::SeqCst);
-                is_leader_alive.store(false, Ordering::SeqCst);
-                break;
+                // Promotion must also save the data file, open the WAL and
+                // start serving replication, which only the server's
+                // `promote` request does. Older versions sent this message.
+                tracing::warn!(
+                    "replication: ignoring PromoteToLeader; promote with `maharit admin promote-to-leader`"
+                );
             }
 
             ReplicationMessage::Shutdown => {
@@ -1093,23 +1261,6 @@ async fn run_follower_receive_loop(
             _ => {}
         }
     }
-
-    Ok(())
-}
-
-/// Send a `PromoteToLeader` message to a follower at the given replication address.
-///
-/// Used by the `admin promote-to-leader` CLI command.
-pub async fn send_promote_to_leader(addr: &str) -> Result<(), ReplicationError> {
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| ReplicationError::ConnectionFailed(e.to_string()))?;
-
-    let data = serde_json::to_vec(&ReplicationMessage::PromoteToLeader)?;
-    let len = data.len() as u32;
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&data).await?;
-    stream.flush().await?;
 
     Ok(())
 }
@@ -1494,6 +1645,7 @@ mod tests {
     fn test_new_message_variants_serialize() {
         let snapshot = ReplicationMessage::Snapshot {
             data: b"hello".to_vec(),
+            lsn: 7,
         };
         let promote = ReplicationMessage::PromoteToLeader;
 
@@ -2004,7 +2156,8 @@ mod tests {
         );
     }
 
-    // 20. Verify that a follower promotes itself after receiving a PromoteToLeader message
+    // 20. The obsolete PromoteToLeader message must not promote a follower: that
+    // would accept writes without a WAL or a replication listener.
     /// Deterministic reproduction of task120: the follower's ACK frame arrives
     /// in two TCP segments and a WAL entry is broadcast in between. The leader
     /// must not lose the partially read frame (the old `select!` dropped the
@@ -2106,6 +2259,7 @@ mod tests {
             },
             Arc::clone(&follower_graph),
         );
+        let follower = Arc::new(follower);
         follower.start().await.unwrap();
         for _ in 0..50 {
             if leader.get_follower_count() == 1 {
@@ -2162,6 +2316,7 @@ mod tests {
             },
             Arc::clone(&follower_graph),
         );
+        let follower = Arc::new(follower);
         follower.start().await.unwrap();
 
         // Wait until the leader has registered the follower.
@@ -2204,7 +2359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_promote_to_leader() {
+    async fn test_promote_to_leader_message_is_ignored() {
         // Bind a mock leader listener on an ephemeral port
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let leader_addr = listener.local_addr().unwrap();
@@ -2261,13 +2416,10 @@ mod tests {
         // Wait for the PromoteToLeader message to be processed (arrives at ~200 ms).
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
-            manager.is_promoted(),
-            "follower should be promoted after PromoteToLeader"
+            !manager.is_promoted(),
+            "PromoteToLeader over the replication channel must be ignored"
         );
-        assert!(
-            !manager.is_leader_alive(),
-            "is_leader_alive should be false after promotion"
-        );
+        assert!(manager.is_leader_alive(), "the follower keeps following");
     }
 
     // 21. Verify that the heartbeat watchdog marks the leader as dead when no heartbeat arrives
@@ -2377,7 +2529,7 @@ mod tests {
             if let Some(t) = tls {
                 f = f.with_leader_tls(t);
             }
-            (f, graph)
+            (Arc::new(f), graph)
         };
 
         // A follower that trusts the leader's certificate replicates.
