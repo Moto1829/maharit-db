@@ -195,7 +195,9 @@ fn literal_count(expr: &Option<Expression>, clause: &str) -> Result<Option<usize
     match expr {
         None => Ok(None),
         Some(Expression::Literal(Literal::Int(n))) if *n >= 0 => Ok(Some(*n as usize)),
-        Some(_) => Err(unsupported(&format!("{clause} with a parameter"))),
+        Some(_) => Err(unsupported(&format!(
+            "{clause} other than an integer literal (e.g. a parameter)"
+        ))),
     }
 }
 

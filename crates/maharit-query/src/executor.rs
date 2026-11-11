@@ -12484,6 +12484,44 @@ mod tests {
     }
 
     #[test]
+    fn test_chained_comparison_and_skip_limit_expressions() {
+        let mut graph = Graph::new();
+        execute(&mut graph, "UNWIND range(1, 10) AS i CREATE (:P {n: i})").unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (p:P) WHERE 3 <= p.n < 6 RETURN p.n ORDER BY p.n",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 3);
+        let r = execute(
+            &mut graph,
+            "RETURN 1 < 2 < 3 AS a, 1 < 3 < 2 AS b, 2 = 2 = 2 AS c",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)]
+        );
+
+        let stmt =
+            Parser::new("MATCH (p:P) RETURN p.n ORDER BY p.n SKIP $size * ($page - 1) LIMIT $size")
+                .unwrap()
+                .parse()
+                .unwrap();
+        let params = HashMap::from([
+            ("size".to_string(), Value::Int(3)),
+            ("page".to_string(), Value::Int(2)),
+        ]);
+        let r = Executor::new(&mut graph)
+            .execute_with_params(stmt, params)
+            .unwrap();
+        let ns: Vec<Value> = r.rows.iter().map(|row| row.columns[0].clone()).collect();
+        assert_eq!(ns, vec![Value::Int(4), Value::Int(5), Value::Int(6)]);
+        assert!(execute(&mut graph, "MATCH (p:P) RETURN p SKIP 2 - 3").is_err());
+        assert!(execute(&mut graph, "MATCH (p:P) RETURN p LIMIT p.n").is_err());
+    }
+
+    #[test]
     fn test_label_predicates_and_multiple_labels() {
         let mut graph = Graph::new();
         execute(

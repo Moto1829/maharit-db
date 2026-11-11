@@ -878,18 +878,12 @@ impl Parser {
         })
     }
 
-    /// SKIP / LIMIT の値をパースする。整数リテラルまたは $param 形式を受け付ける。
+    /// SKIP / LIMIT の値をパースする。変数を含まない式（整数リテラル、`$param`、
+    /// `$size * ($page - 1)` など）を受け付け、実行時に 0 以上の整数か検査する。
     fn parse_skip_limit_expr(&mut self) -> Result<Expression, ParseError> {
-        match self.peek_kind().cloned() {
-            Some(TokenKind::Int(n)) if n >= 0 => {
-                self.advance();
-                Ok(Expression::Literal(Literal::Int(n)))
-            }
-            Some(TokenKind::Parameter(name)) => {
-                self.advance();
-                Ok(Expression::Parameter(name))
-            }
-            _ => Err(self.unexpected_token("positive integer or $parameter")),
+        match self.peek_kind() {
+            Some(TokenKind::Int(n)) if *n < 0 => Err(self.unexpected_token("non-negative integer")),
+            _ => self.parse_expression(),
         }
     }
 
@@ -2992,8 +2986,46 @@ impl Parser {
 
         self.advance();
         let right = self.parse_additive()?;
+        let mut result = Expression::BinaryOp(Box::new(left), op, Box::new(right.clone()));
 
-        Ok(Expression::BinaryOp(Box::new(left), op, Box::new(right)))
+        // 連続した比較 `a < b <= c` は `a < b AND b <= c`
+        let mut prev = right;
+        while let Some(op) = self.peek_kind().and_then(Self::chainable_comparison) {
+            if !matches!(
+                result,
+                Expression::BinaryOp(
+                    _,
+                    BinaryOp::Eq
+                        | BinaryOp::Neq
+                        | BinaryOp::Lt
+                        | BinaryOp::Gt
+                        | BinaryOp::Lte
+                        | BinaryOp::Gte,
+                    _
+                ) | Expression::BinaryOp(_, BinaryOp::And, _)
+            ) {
+                break;
+            }
+            self.advance();
+            let next = self.parse_additive()?;
+            let cmp = Expression::BinaryOp(Box::new(prev), op, Box::new(next.clone()));
+            result = Expression::BinaryOp(Box::new(result), BinaryOp::And, Box::new(cmp));
+            prev = next;
+        }
+
+        Ok(result)
+    }
+
+    fn chainable_comparison(kind: &TokenKind) -> Option<BinaryOp> {
+        Some(match kind {
+            TokenKind::Eq => BinaryOp::Eq,
+            TokenKind::Neq => BinaryOp::Neq,
+            TokenKind::Lt => BinaryOp::Lt,
+            TokenKind::Gt => BinaryOp::Gt,
+            TokenKind::Lte => BinaryOp::Lte,
+            TokenKind::Gte => BinaryOp::Gte,
+            _ => return None,
+        })
     }
 
     fn parse_additive(&mut self) -> Result<Expression, ParseError> {

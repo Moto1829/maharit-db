@@ -3,11 +3,9 @@
 # Follow-up work: todo/docs/124-docs-unsupported-syntax-backlog.md
 
 docs/algorithms/all-paths.md: MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
-docs/cypher/order-limit-skip.md: MATCH (n:Person)
 docs/cypher/unwind-with-union.md: MATCH (a:Article)
 docs/cypher/unwind-with-union.md: UNWIND [1, 2, 3] AS id
 docs/cypher/unwind-with-union.md: UNWIND [[1, 2], [3, 4], [5, 6]] AS sublist
-docs/cypher/where.md: MATCH (p:Product)
 docs/functions/aggregation.md: MATCH (p:Product)
 docs/functions/list.md: MATCH (p:Person {name: "Alice"})
 docs/functions/predicates.md: MATCH (dept:Department {name: "Engineering"})
