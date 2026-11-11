@@ -884,10 +884,10 @@ impl Parser {
             return Ok(ReturnItem::All);
         }
 
-        // Handle list expressions (comprehensions, literals) as RETURN items
+        // List literals and comprehensions, including what follows them
+        // (`[1, 2, 3][0]`, `[1] + [2]`)
         if self.check(TokenKind::LBracket) {
-            let expr = self.parse_list_expression()?;
-            return Ok(ReturnItem::Expr(expr));
+            return Ok(ReturnItem::Expr(self.parse_expression()?));
         }
 
         // Handle `last(expr)` specially since `last` is a keyword token
@@ -964,6 +964,7 @@ impl Parser {
                     | TokenKind::Dash
                     | TokenKind::Star
                     | TokenKind::Slash
+                    | TokenKind::Percent
                     | TokenKind::Eq
                     | TokenKind::Neq
                     | TokenKind::Lt
@@ -2936,6 +2937,7 @@ impl Parser {
             let op = match self.peek_kind() {
                 Some(TokenKind::Star) => BinaryOp::Mul,
                 Some(TokenKind::Slash) => BinaryOp::Div,
+                Some(TokenKind::Percent) => BinaryOp::Mod,
                 _ => break,
             };
 
@@ -2985,15 +2987,27 @@ impl Parser {
                 break;
             }
             self.advance(); // consume [
-            let start = self.parse_expression()?;
+            // `list[..end]`: 開始を省略したスライス
+            let start = if self.check(TokenKind::Dot) {
+                None
+            } else {
+                Some(self.parse_expression()?)
+            };
             if self.check(TokenKind::Dot) {
                 // List slice: list[start..end] - consume two Dot tokens
                 self.advance(); // first dot
-                self.advance(); // second dot
-                let end = self.parse_expression()?;
+                self.expect(TokenKind::Dot)?; // second dot
+                // `list[start..]`: 終わりを省略したスライス（null は末尾まで）
+                let end = if self.check(TokenKind::RBracket) {
+                    Expression::Literal(Literal::Null)
+                } else {
+                    self.parse_expression()?
+                };
                 self.expect(TokenKind::RBracket)?;
+                let start = start.unwrap_or(Expression::Literal(Literal::Int(0)));
                 expr = Expression::ListSlice(Box::new(expr), Box::new(start), Box::new(end));
             } else {
+                let start = start.ok_or_else(|| self.unexpected_token("index"))?;
                 self.expect(TokenKind::RBracket)?;
                 expr = Expression::IndexAccess(Box::new(expr), Box::new(start));
             }
@@ -3224,8 +3238,15 @@ impl Parser {
             } else {
                 None
             };
-            self.expect(TokenKind::Pipe)?;
-            let result = Box::new(self.parse_expression()?);
+            // `[x IN list WHERE pred]`: 射影を省略すると要素そのもの
+            let result = if self.check(TokenKind::Pipe) {
+                self.advance();
+                Box::new(self.parse_expression()?)
+            } else if predicate.is_some() {
+                Box::new(Expression::Variable(variable.clone()))
+            } else {
+                return Err(self.unexpected_token("| or WHERE"));
+            };
             self.expect(TokenKind::RBracket)?;
             return Ok(Expression::ListComprehension {
                 variable,

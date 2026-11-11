@@ -659,6 +659,8 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    /// 剰余 `%`（符号は左辺に従う）
+    Mod,
     Regex,
     Contains,
     StartsWith,

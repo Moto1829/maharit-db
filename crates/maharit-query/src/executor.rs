@@ -6186,6 +6186,12 @@ impl<'a> Executor<'a> {
                 let start_val = self.evaluate_expression(start_expr, bindings)?;
                 let end_val = self.evaluate_expression(end_expr, bindings)?;
                 match (list_val, start_val, end_val) {
+                    // `list[start..]`: 終わりが null なら末尾まで
+                    (Value::List(items), Value::Int(s), Value::Null) => {
+                        let len = items.len() as i64;
+                        let s = if s < 0 { (len + s).max(0) } else { s.min(len) } as usize;
+                        Ok(Value::List(items[s..].to_vec()))
+                    }
                     (Value::List(items), Value::Int(s), Value::Int(e)) => {
                         let len = items.len() as i64;
                         let s = if s < 0 { (len + s).max(0) } else { s.min(len) } as usize;
@@ -6542,6 +6548,12 @@ impl<'a> Executor<'a> {
                     return Err(ExecuteError::TypeError("division by zero".to_string()));
                 }
                 self.arithmetic_op(left, right, i64::checked_div, |a, b| a / b)
+            }
+            BinaryOp::Mod => {
+                if matches!(right, Value::Int(0)) && matches!(left, Value::Int(_)) {
+                    return Err(ExecuteError::TypeError("division by zero".to_string()));
+                }
+                self.arithmetic_op(left, right, i64::checked_rem, |a, b| a % b)
             }
             BinaryOp::Regex => match (left, right) {
                 (Value::String(s), Value::String(pattern)) => {
@@ -12376,6 +12388,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.row_count(), 0);
+    }
+
+    #[test]
+    fn test_list_literal_index_slice_and_where_only_comprehension() {
+        let mut graph = Graph::new();
+        let r = execute(
+            &mut graph,
+            "RETURN [1, 2, 3][0], [1, 2, 3][-1], [1, 2, 3][9], [1, 2, 3, 4, 5][1..3], \
+             [1, 2, 3, 4, 5][..3], [1, 2, 3, 4, 5][2..], [1, 2, 3, 4, 5][-2..], [1] + [2]",
+        )
+        .unwrap();
+        let list = |v: &[i64]| Value::List(v.iter().map(|i| Value::Int(*i)).collect());
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::Int(1),
+                Value::Int(3),
+                Value::Null,
+                list(&[2, 3]),
+                list(&[1, 2, 3]),
+                list(&[3, 4, 5]),
+                list(&[4, 5]),
+                list(&[1, 2]),
+            ]
+        );
+        let r = execute(
+            &mut graph,
+            "RETURN [x IN [1, 2, 3, 4, 5] WHERE x % 2 = 0] AS e",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], list(&[2, 4]));
+        assert!(
+            Parser::new("RETURN [x IN [1, 2]]")
+                .unwrap()
+                .parse()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_modulo_operator() {
+        let mut graph = Graph::new();
+        let r = execute(
+            &mut graph,
+            "RETURN 7 % 3 AS a, -7 % 3 AS b, 7.5 % 2 AS c, 2 + 7 % 3 * 2 AS d",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::Int(1),
+                Value::Int(-1),
+                Value::Float(1.5),
+                Value::Int(4)
+            ]
+        );
+        let r = execute(
+            &mut graph,
+            "RETURN all(x IN [2, 4, 6] WHERE x % 2 = 0) AS even",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Bool(true));
+        let err = execute(&mut graph, "RETURN 1 % 0").unwrap_err().to_string();
+        assert!(err.contains("division by zero"), "{err}");
+        let err = execute(&mut graph, "RETURN (-9223372036854775807 - 1) % -1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("integer overflow"), "{err}");
     }
 
     #[test]
