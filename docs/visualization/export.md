@@ -12,21 +12,7 @@ MaharitDB は `maharit-viz` クレートを通じて、グラフを Graphviz の
 
 DOT 形式は Graphviz で可視化できる標準的なグラフ記述言語です。
 
-### Cypher からのエクスポート
-
-```cypher
-// グラフ全体を DOT 形式で出力
-CALL db.export.dot()
-YIELD dot_string
-RETURN dot_string
-
-// 特定のサブグラフをエクスポート
-MATCH (p:Person)-[:KNOWS]->(f:Person)
-WHERE p.name = "Alice"
-CALL db.export.subgraph.dot(collect(p) + collect(f))
-YIELD dot_string
-RETURN dot_string
-```
+エクスポートは `maharit-viz` クレートの Rust API で行います（`Graph` 全体を書き出す）。Cypher のクエリ結果をブラウザで図として見るには、[Web アプリ](web-app.md) を使ってください。Cypher から呼べるエクスポート用のプロシージャはありません。
 
 ### Rust API からのエクスポート
 

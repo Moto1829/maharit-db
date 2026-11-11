@@ -108,23 +108,18 @@ WHERE size(n.name) > 5
 RETURN n.name
 ```
 
-### length(string)
-
-`size` と同様に文字列の長さを返します。
-
-```cypher
-RETURN length("Hello")
-// 結果: 5
-```
+`length()` はパスの長さを返す関数で、文字列には使えません。文字列の長さには `size()` を使ってください。
 
 ## 検索・一致
 
-### startsWith(string, prefix)
+前方一致・後方一致・部分一致は、関数ではなく演算子で書きます。どれも大文字と小文字を区別します。
 
-文字列が指定のプレフィックスで始まるかを返します。
+### STARTS WITH
+
+文字列が指定の文字列で始まるかを返します。
 
 ```cypher
-RETURN startsWith("Hello World", "Hello")
+RETURN "Hello World" STARTS WITH "Hello"
 // 結果: true
 
 MATCH (n:Person)
@@ -132,21 +127,21 @@ WHERE n.name STARTS WITH "Al"
 RETURN n.name
 ```
 
-### endsWith(string, suffix)
+### ENDS WITH
 
-文字列が指定のサフィックスで終わるかを返します。
+文字列が指定の文字列で終わるかを返します。
 
 ```cypher
-RETURN endsWith("alice@example.com", "@example.com")
+RETURN "alice@example.com" ENDS WITH "@example.com"
 // 結果: true
 ```
 
-### contains(string, substring)
+### CONTAINS
 
-文字列に指定の部分文字列が含まれるかを返します。
+文字列に指定の文字列が含まれるかを返します。
 
 ```cypher
-RETURN contains("Hello World", "World")
+RETURN "Hello World" CONTAINS "World"
 // 結果: true
 
 MATCH (n:Article)

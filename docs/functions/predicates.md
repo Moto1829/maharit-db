@@ -25,9 +25,9 @@ RETURN all(x IN [1, 2, 3] WHERE x > 1)
 // 結果: false
 
 // パスのすべてのノードが条件を満たすか確認
-MATCH p = (start:City)-[:ROAD*]->(end:City)
+MATCH p = (origin:City)-[:ROAD*]->(dest:City)
 WHERE all(city IN nodes(p) WHERE city.accessible = true)
-RETURN start.name, end.name
+RETURN origin.name, dest.name
 ```
 
 ### any(variable IN list WHERE condition)
@@ -108,9 +108,14 @@ RETURN n.name, exists(n.email) AS has_email
 注意: プロパティの存在確認には `IS NOT NULL` も使えます。
 
 ```cypher
-// 以下は等価
+// 以下の 2 つは同じ結果になる
+MATCH (n:Person)
 WHERE exists(n.email)
+RETURN n.name
+
+MATCH (n:Person)
 WHERE n.email IS NOT NULL
+RETURN n.name
 ```
 
 ### EXISTS {} サブクエリ（パターン存在確認）

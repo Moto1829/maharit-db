@@ -30,3 +30,8 @@ task 123 で docs の ```cypher ブロックをパース検査するテスト
 
 ## 完了条件
 - `docs_cypher_known_failures.txt` が空（コメント行のみ）になる
+
+## 進捗（2026-11-12）
+- docs 側で直したもの: transactions.md（BEGIN/COMMIT ではなくプロトコルの begin/commit/rollback。実際の動作に合わせて全面的に書き直し、bug/159・bug/160 を起票）、
+  export.md（存在しない db.export プロシージャ）、string.md（startsWith() などは演算子 STARTS WITH / ENDS WITH / CONTAINS、length(文字列) は size）、
+  predicates.md（変数名 end → dest、WHERE だけの断片を完全な文に）、acl.md・auth.md（task148）

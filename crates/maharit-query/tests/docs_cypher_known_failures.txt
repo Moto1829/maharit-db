@@ -4,10 +4,6 @@
 
 docs/advanced/query-optimization.md: CREATE INDEX FOR (n:Person) ON (n.email)
 docs/advanced/query-optimization.md: MATCH (p:Person {name: "Alice"})  // 1 件に絞り込み
-docs/advanced/transactions.md: BEGIN
-docs/advanced/transactions.md: COMMIT
-docs/advanced/transactions.md: CREATE (alice:Person {name: "Alice", balance: 1000})
-docs/advanced/transactions.md: MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"})
 docs/algorithms/all-paths.md: MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
 docs/cypher/order-limit-skip.md: MATCH (n:Person)
 docs/cypher/set-remove-merge.md: MATCH (n)
@@ -36,12 +32,5 @@ docs/functions/math.md: RETURN pow(2, 10)
 docs/functions/math.md: RETURN pow(3.0, 0.5)
 docs/functions/math.md: RETURN sin(0)    // 結果: 0.0
 docs/functions/predicates.md: MATCH (dept:Department {name: "Engineering"})
-docs/functions/predicates.md: MATCH p = (start:City)-[:ROAD*]->(end:City)
 docs/functions/predicates.md: RETURN all(x IN [2, 4, 6, 8] WHERE x % 2 = 0)
-docs/functions/predicates.md: WHERE exists(n.email)
 docs/functions/string.md: MATCH (a:Article)
-docs/functions/string.md: RETURN contains("Hello World", "World")
-docs/functions/string.md: RETURN endsWith("alice@example.com", "@example.com")
-docs/functions/string.md: RETURN length("Hello")
-docs/functions/string.md: RETURN startsWith("Hello World", "Hello")
-docs/visualization/export.md: MATCH (p:Person)-[:KNOWS]->(f:Person)
