@@ -66,9 +66,9 @@ The server stores the whole graph in a single data file and appends each write q
 
 The built-in TCP server supports TLS 1.2/1.3 through rustls. Certificates can be hot-reloaded, so you can renew them without stopping the service.
 
-### Prometheus metrics and OpenTelemetry tracing
+### Prometheus metrics and structured logs
 
-The `/metrics` endpoint exposes metrics in the Prometheus format, so you can monitor query latency, connection counts, memory usage, and more. Distributed tracing with OpenTelemetry is also supported for following each query's execution path in detail.
+A monitoring HTTP server serves `/metrics` (Prometheus format) and `/health`. The server writes its activity as structured JSON logs, including the time each query took.
 
 ### Replication (leader/follower)
 

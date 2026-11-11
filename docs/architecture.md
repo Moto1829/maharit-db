@@ -88,9 +88,8 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 
 - **TCP サーバー**: tokio 非同期 I/O、TLS 対応（rustls）
 - **認証・RBAC**: ユーザー管理、ロールベースアクセス制御
-- **細粒度 ACL**: ラベル・プロパティ単位のアクセス制御
 - **HTTP サーバー**: `/metrics`、`/health`、`/health/live`、`/health/ready`
-- **OpenTelemetry**: 分散トレーシング
+- **ログ**: tracing による JSON の構造化ログ
 - **WAL**: 書き込みクエリの変更（`WalEntryData`）を `<data>.wal` に追記し、起動時に再適用。グループコミット、チェックポイント
 - **レプリケーション**: WAL ストリーミング、リーダー/フォロワー構成
 
@@ -135,7 +134,7 @@ AST → Planner → QueryPlan → Executor（実測値付き）
 クライアント（TCP/TLS）
         ↓
     maharit-server
-     ├── 認証・ACL チェック
+     ├── 認証・ロールの権限チェック
      ├── クエリ受信
      └── maharit-query へ転送
               ↓

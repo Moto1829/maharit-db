@@ -6,168 +6,131 @@ nav_order: 7
 
 # バックアップ・リストア
 
-MaharitDB は gzip 圧縮付きのフルバックアップ、増分バックアップ、および WAL を使ったポイントインタイムリカバリ（PITR）をサポートしています。
+`maharit backup` はデータファイル（`--data` で指定したファイル）から 1 つのバックアップファイルを作り、`maharit restore` はバックアップファイルからデータファイルを作ります。圧縮は gzip と zstd に対応しています。
 
-## フルバックアップ
+## データファイルと WAL
 
-### バックアップの実行
+サーバーは変更をまず WAL（`<data>.wal`）に書き、次のときにデータファイルへまとめて保存します（チェックポイント）。
+
+- WAL が `--checkpoint-mb`（既定 64 MB）を超えたとき
+- サーバーを停止したとき（SIGTERM / Ctrl+C）
+
+`maharit backup` が読むのは**データファイルだけ**です。稼働中のサーバーのデータファイルからバックアップすると、**最後のチェックポイントの時点**の内容になり、それ以降の変更（WAL にだけある変更）は含まれません。まだ一度もチェックポイントしていなければ、データファイルが無いためエラーになります。
+
+すべての変更を含めるには、サーバーを停止してからバックアップしてください。データファイルは一時ファイルに書いてから置き換えるので、稼働中に読んでも書きかけの内容を読むことはありません。
+
+## バックアップを作る
 
 ```bash
-# フルバックアップを実行
-maharit backup --output /backup/maharit_20240101.bak.gz
+# サーバーを停止してからバックアップ
+systemctl stop maharit
+maharit backup --source /var/lib/maharit/maharit.db --output /backup/maharit_20260101.bak
+systemctl start maharit
 
-# 特定のデータディレクトリからバックアップ
-maharit backup \
-  --data-dir /var/lib/maharit \
-  --output /backup/maharit_20240101.bak.gz \
-  --compress gzip
+# gzip 圧縮・説明付き
+maharit backup --source /var/lib/maharit/maharit.db \
+  --output /backup/maharit_20260101.bak.gz --compress --description "nightly"
+
+# zstd 圧縮
+maharit backup --source /var/lib/maharit/maharit.db \
+  --output /backup/maharit_20260101.bak.zst --compress-zstd
 ```
 
-Cypher コマンドからバックアップを実行することもできます：
+| オプション | 説明 |
+|---|---|
+| `-s`, `--source <DB_PATH>` | バックアップするデータファイル（必須） |
+| `-o`, `--output <PATH>` | 出力するバックアップファイル（既定: `maharit_backup.db`） |
+| `-z`, `--compress` | gzip で圧縮する |
+| `--compress-zstd` | zstd で圧縮する |
+| `-d`, `--description <TEXT>` | バックアップに説明を付ける |
 
-```cypher
-CALL db.backup("/backup/maharit_20240101.bak.gz")
+出力例:
+
+```text
+Backup created successfully:
+  Output:      /backup/maharit_20260101.bak.gz
+  Nodes:       100000
+  Edges:       500000
+  Compression: gzip
 ```
 
 ### バックアップの内容
 
-バックアップファイルには以下が含まれます：
+- 全ノード・リレーションシップとそのラベル・プロパティ
+- インデックス・制約・全文検索インデックスの定義（インデックスの中身はリストア後の起動時に作り直す）
+- 作成日時・ノード数・リレーションシップ数・圧縮形式・説明
 
-- グラフの全ノードとエッジ（バイナリシリアライズ形式）
-- インデックス・制約・全文検索インデックスの定義（インデックスの中身は起動時に作り直す）
-- バックアップ時刻のタイムスタンプ
+ユーザーとパスワード（`--admin-password` / `CREATE USER`）はデータファイルに保存されないため、バックアップにも含まれません。
+
+## バックアップを確認する
+
+```bash
+# メタデータを表示
+maharit backup --list /backup/maharit_20260101.bak.gz
+
+# 全体を読み込んで壊れていないか検証（データファイルは作らない）
+maharit restore --verify /backup/maharit_20260101.bak.gz
+```
+
+出力例:
+
+```text
+Backup: /backup/maharit_20260101.bak.gz
+  Version:     2
+  Created:     2026-01-01 02:00:00 UTC
+  Nodes:       100000
+  Edges:       500000
+  Compression: gzip
+  Description: nightly
+```
+
+```text
+Backup verification passed: /backup/maharit_20260101.bak.gz
+```
 
 ## リストア
 
 ```bash
-# バックアップからリストア
-maharit restore --input /backup/maharit_20240101.bak.gz
-
-# 別のデータディレクトリにリストア
-maharit restore \
-  --input /backup/maharit_20240101.bak.gz \
-  --data-dir /var/lib/maharit_restored
+systemctl stop maharit
+maharit restore /backup/maharit_20260101.bak.gz --output /var/lib/maharit/maharit.db
+rm -f /var/lib/maharit/maharit.db.wal
+systemctl start maharit
 ```
 
-注意: リストアを実行する前にサーバーを停止してください。リストアは既存のデータを上書きします。
+| オプション | 説明 |
+|---|---|
+| `<BACKUP_PATH>` / `-i`, `--input <BACKUP_PATH>` | リストアするバックアップファイル。圧縮形式は自動で判別する |
+| `-o`, `--output <DB_PATH>` | 書き出すデータファイル。省略すると、読み込めることを確かめて件数を表示するだけでファイルは作らない |
+| `--verify` | 検証だけを行う |
 
-## 増分バックアップ
+!!! warning "リストアの注意"
+    - サーバーを停止してから行ってください。稼働中のサーバーは停止時にデータファイルを自分の内容で上書きします
+    - 古い WAL（`<data>.wal`）は削除してください。残っていると、起動時にリストアしたデータの上へ古い変更が再適用されます
+    - `--output` に既存のファイルを指定すると上書きします
 
-フルバックアップの後、変更されたデータのみをバックアップします。
+## 定期バックアップ
+
+稼働中のバックアップは最後のチェックポイントまでの内容になるため、変更を確実に含めたい場合は停止を伴う手順にします。停止できない場合は、`--checkpoint-mb` を小さくするとチェックポイントの間隔が短くなり、バックアップに含まれない変更が減ります。
 
 ```bash
-# フルバックアップ（ベースライン）
-maharit backup --output /backup/full_20240101.bak.gz --type full
-
-# 増分バックアップ（前回バックアップ以降の変更）
-maharit backup \
-  --output /backup/incr_20240102.bak.gz \
-  --type incremental \
-  --since /backup/full_20240101.bak.gz
+# /etc/cron.d/maharit-backup — 毎日 2 時（停止を伴う）
+0 2 * * * root systemctl stop maharit && \
+  /usr/local/bin/maharit backup --source /var/lib/maharit/maharit.db \
+    --output /backup/maharit_$(date +\%Y\%m\%d).bak.gz --compress; \
+  systemctl start maharit
 ```
 
-### 増分バックアップのリストア
+古いバックアップを削除する例:
 
 ```bash
-# フルバックアップをリストア
-maharit restore --input /backup/full_20240101.bak.gz
-
-# 増分バックアップを適用
-maharit restore \
-  --input /backup/incr_20240102.bak.gz \
-  --apply-incremental
+find /backup -name "maharit_*.bak.gz" -mtime +30 -delete
 ```
 
-## ポイントインタイムリカバリ（PITR）
+## 増分バックアップ・ポイントインタイムリカバリ
 
-WAL ログを使用して、特定の時点の状態に復元します。
+`maharit-storage` クレートの Rust API には、増分バックアップ（`Backup::create_incremental` / `Backup::restore_incremental`）と、指定時刻までの復元（`Backup::restore_to_point_in_time`）があります。`maharit` コマンドからは使えません。
 
-### WAL ログの確認
+## 運用の注意
 
-```bash
-maharit wal list --data-dir /var/lib/maharit
-```
-
-出力例：
-
-```
-WAL segments:
-  000000001 2024-01-01 00:00:00 - 2024-01-01 12:00:00 (123 MB)
-  000000002 2024-01-01 12:00:00 - 2024-01-02 00:00:00 (98 MB)
-  000000003 2024-01-02 00:00:00 - 現在 (45 MB)
-```
-
-### 特定時点へのリカバリ
-
-```bash
-# 2024-01-01 18:00:00 時点にリカバリ
-maharit restore \
-  --input /backup/full_20240101.bak.gz \
-  --wal-dir /var/lib/maharit/wal \
-  --target-time "2024-01-01T18:00:00Z"
-
-# 特定の WAL シーケンス番号までリカバリ
-maharit restore \
-  --input /backup/full_20240101.bak.gz \
-  --wal-dir /var/lib/maharit/wal \
-  --target-lsn 1234567
-```
-
-## バックアップスケジュール
-
-`cron` を使用して定期的なバックアップを設定できます。
-
-```bash
-# /etc/cron.d/maharit-backup
-# 毎日午前 2 時にフルバックアップ
-0 2 * * * maharit /usr/local/bin/maharit backup \
-  --data-dir /var/lib/maharit \
-  --output /backup/maharit_$(date +%Y%m%d).bak.gz
-
-# 毎時間増分バックアップ
-0 * * * * maharit /usr/local/bin/maharit backup \
-  --data-dir /var/lib/maharit \
-  --output /backup/incr_$(date +%Y%m%d_%H).bak.gz \
-  --type incremental
-```
-
-## バックアップの検証
-
-バックアップファイルが正常に作成されたか確認します。
-
-```bash
-maharit backup verify --input /backup/maharit_20240101.bak.gz
-```
-
-出力例：
-
-```
-Backup file: /backup/maharit_20240101.bak.gz
-Format: gzip-compressed binary
-Timestamp: 2024-01-01T02:00:00Z
-Nodes: 100,000
-Edges: 500,000
-Indexes: 5
-Constraints: 10
-Checksum: OK
-```
-
-## バックアップのローテーション
-
-古いバックアップを自動削除するスクリプト例：
-
-```bash
-#!/bin/bash
-BACKUP_DIR=/backup
-KEEP_DAYS=30
-
-# 30 日以上前のバックアップを削除
-find $BACKUP_DIR -name "maharit_*.bak.gz" -mtime +$KEEP_DAYS -delete
-find $BACKUP_DIR -name "incr_*.bak.gz" -mtime +7 -delete  # 増分は 7 日保持
-```
-
-## 重要な注意事項
-
-- バックアップ中もサーバーは稼働し続けますが、バックアップ期間中は書き込み操作のレイテンシが若干増加することがあります
-- バックアップファイルは必ず別のストレージ（別サーバー、クラウドストレージなど）にコピーしてください
-- 定期的にリストアテストを実施してバックアップの有効性を確認してください
+- バックアップファイルは別のストレージ（別サーバー、クラウドストレージなど）にもコピーしてください
+- 定期的にリストアを試し、`--verify` だけでなく実際に起動してデータを確認してください

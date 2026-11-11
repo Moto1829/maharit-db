@@ -44,24 +44,4 @@ docs/functions/string.md: RETURN contains("Hello World", "World")
 docs/functions/string.md: RETURN endsWith("alice@example.com", "@example.com")
 docs/functions/string.md: RETURN length("Hello")
 docs/functions/string.md: RETURN startsWith("Hello World", "Hello")
-docs/operations/acl.md: DENY READ ON LABEL FinancialRecord TO ROLE reader
-docs/operations/acl.md: DENY READ ON LABEL SecretProject TO specific_user
-docs/operations/acl.md: DENY READ ON PROPERTY salary ON LABEL Employee TO ROLE reader
-docs/operations/acl.md: DENY WRITE ON PROPERTY salary ON LABEL Employee TO default_user
-docs/operations/acl.md: GRANT READ ON ALL LABELS TO alice
-docs/operations/acl.md: GRANT READ ON LABEL Customer TO sales_user
-docs/operations/acl.md: GRANT READ ON LABEL Person TO alice
-docs/operations/acl.md: GRANT READ ON LABEL Product TO ROLE reader
-docs/operations/acl.md: GRANT READ ON LABEL Repository TO eng_user
-docs/operations/acl.md: GRANT READ ON PROPERTY name ON LABEL Person TO alice
-docs/operations/acl.md: GRANT WRITE ON LABEL Person TO alice
-docs/operations/acl.md: REVOKE READ ON LABEL Person FROM alice
-docs/operations/acl.md: REVOKE WRITE ON LABEL Person FROM alice
-docs/operations/acl.md: SET DEFAULT ACL READ ON LABEL Public
-docs/operations/acl.md: SHOW ACL FOR alice
-docs/operations/acl.md: SHOW ACL ON LABEL Person
-docs/operations/auth.md: CREATE USER admin_user WITH PASSWORD "adminpass" ROLE admin
-docs/operations/auth.md: CREATE USER alice WITH PASSWORD "securepassword"
-docs/operations/auth.md: CREATE USER bob WITH PASSWORD "password123" ROLE reader
-docs/operations/auth.md: LOGOUT
 docs/visualization/export.md: MATCH (p:Person)-[:KNOWS]->(f:Person)

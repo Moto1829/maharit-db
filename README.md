@@ -17,11 +17,9 @@ A graph database engine written in Rust. It offers intuitive graph operations th
 - **Durability with a WAL** — every write is appended to a write-ahead log (fsync with group commit) before the reply and replayed after a crash; checkpoints into a single data file
 - **TLS/SSL** — TLS 1.2/1.3 via rustls, with certificate hot reload
 - **Authentication and RBAC** — user management and role-based access control (admin / writer / reader)
-- **Fine-grained ACLs** — access control per label and per property
-- **Prometheus metrics** — `/metrics` and `/health` endpoints for your monitoring stack
-- **OpenTelemetry tracing** — distributed tracing of query execution
+- **Monitoring** — Prometheus `/metrics`, `/health` endpoints, and structured JSON logs
 - **Replication** — leader/follower setup with WAL streaming and failover
-- **Backup and restore** — gzip / zstd compression and incremental backups
+- **Backup and restore** — `maharit backup` / `maharit restore` with gzip / zstd compression
 - **Clients** — an async Rust client (tokio, connection pooling, plus a blocking API) and a [Python client](clients/python/)
 - **Visualization** — DOT / SVG / ASCII output, and a web app (`maharit-viz`) that shows query results as tables and graphs in the browser
 

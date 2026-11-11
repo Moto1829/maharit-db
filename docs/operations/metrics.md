@@ -6,170 +6,119 @@ nav_order: 5
 
 # メトリクス・ヘルスチェック
 
-MaharitDB はサーバーの状態を監視するための Prometheus メトリクスとヘルスチェックエンドポイントを提供します。
+`maharit server` は、クライアント用のポートとは別に、監視用の HTTP サーバーを起動します。Prometheus 形式のメトリクスと、ヘルスチェックのエンドポイントを返します。
 
-## メトリクスエンドポイント
-
-### /metrics
-
-Prometheus 形式のメトリクスを返します。デフォルトポートは `9090` です。
+## 監視用 HTTP サーバー
 
 ```bash
-curl http://localhost:9090/metrics
+maharit server --metrics-bind 0.0.0.0:9090
 ```
 
-出力例：
+- `--metrics-bind <ADDR>`: 監視用 HTTP サーバーの待ち受けアドレス（既定: `127.0.0.1:9090`。既定ではループバックだけ）
+- TLS と認証はありません。ネットワークに公開するときは、ファイアウォールなどで Prometheus からだけ届くようにしてください
 
+| パス | 内容 |
+|---|---|
+| `/metrics` | Prometheus 形式のメトリクス |
+| `/health` | 全体の状態（JSON） |
+| `/health/live` | Liveness プローブ用 |
+| `/health/ready` | Readiness プローブ用 |
+
+それ以外のパスは `404 Not Found` を返します。
+
+## メトリクス（`/metrics`）
+
+```bash
+curl http://127.0.0.1:9090/metrics
 ```
+
+!!! warning "既知の不具合"
+    現在、クエリ数・エラー数・レイテンシ・ノード数・リレーションシップ数・接続数は、クライアントの操作が反映されず常に 0 です（bug/156）。正しい値が出るのは `maharit_memory_usage_bytes` と `maharit_uptime_seconds` だけです。
+
+| メトリクス | 種類 | 説明 |
+|---|---|---|
+| `maharit_queries_total{type}` | counter | 実行したクエリ数。`type` は `create` / `match` / `delete` / `set` / `merge` / `remove` / `unwind` / `constraint` / `other` |
+| `maharit_errors_total` | counter | エラーになったクエリ数 |
+| `maharit_query_latency_microseconds{quantile}` | summary | クエリのレイテンシ（マイクロ秒）。`quantile` は `0.5` / `0.95` / `0.99` |
+| `maharit_nodes_total` | gauge | ノード数 |
+| `maharit_edges_total` | gauge | リレーションシップ数 |
+| `maharit_connections_current` | gauge | 現在の接続数 |
+| `maharit_connections_total` | counter | 累計の接続数 |
+| `maharit_memory_usage_bytes` | gauge | プロセスのメモリ使用量（RSS） |
+| `maharit_uptime_seconds` | gauge | 起動からの秒数 |
+
+出力の一部:
+
+```text
 # HELP maharit_queries_total Total number of queries executed
 # TYPE maharit_queries_total counter
-maharit_queries_total 12345
-
-# HELP maharit_query_duration_seconds Query execution time in seconds
-# TYPE maharit_query_duration_seconds histogram
-maharit_query_duration_seconds_bucket{le="0.001"} 9876
-maharit_query_duration_seconds_bucket{le="0.01"} 12000
-maharit_query_duration_seconds_bucket{le="0.1"} 12300
-maharit_query_duration_seconds_bucket{le="1.0"} 12345
-maharit_query_duration_seconds_sum 45.67
-maharit_query_duration_seconds_count 12345
-
-# HELP maharit_active_connections Current number of active connections
-# TYPE maharit_active_connections gauge
-maharit_active_connections 42
-
-# HELP maharit_node_count Total number of nodes in the graph
-# TYPE maharit_node_count gauge
-maharit_node_count 100000
-
-# HELP maharit_edge_count Total number of edges in the graph
-# TYPE maharit_edge_count gauge
-maharit_edge_count 500000
-
-# HELP maharit_memory_bytes Memory usage in bytes
-# TYPE maharit_memory_bytes gauge
-maharit_memory_bytes 1073741824
-
+maharit_queries_total{type="create"} 0
+maharit_queries_total{type="match"} 0
+…
+# HELP maharit_memory_usage_bytes Current process memory usage (RSS)
+# TYPE maharit_memory_usage_bytes gauge
+maharit_memory_usage_bytes 4669440
 # HELP maharit_uptime_seconds Server uptime in seconds
 # TYPE maharit_uptime_seconds gauge
-maharit_uptime_seconds 86400
+maharit_uptime_seconds 1
 ```
 
-## 利用可能なメトリクス
-
-| メトリクス名 | タイプ | 説明 |
-|------------|--------|------|
-| `maharit_queries_total` | Counter | 実行されたクエリの総数 |
-| `maharit_queries_failed_total` | Counter | 失敗したクエリの総数 |
-| `maharit_query_duration_seconds` | Histogram | クエリ実行時間 |
-| `maharit_active_connections` | Gauge | アクティブな接続数 |
-| `maharit_connections_total` | Counter | 累積接続数 |
-| `maharit_node_count` | Gauge | グラフ内のノード数 |
-| `maharit_edge_count` | Gauge | グラフ内のエッジ数 |
-| `maharit_memory_bytes` | Gauge | メモリ使用量（バイト） |
-| `maharit_uptime_seconds` | Gauge | サーバー稼働時間 |
-| `maharit_wal_size_bytes` | Gauge | WAL ファイルサイズ |
-| `maharit_backup_last_timestamp` | Gauge | 最後のバックアップ時刻（Unix 時間） |
-
-## ヘルスチェックエンドポイント
+## ヘルスチェック
 
 ### /health
 
-サーバーの全体的な健全性を返します。
-
 ```bash
-curl http://localhost:9090/health
+curl http://127.0.0.1:9090/health
 ```
 
-正常時（HTTP 200）：
 ```json
-{
-  "status": "healthy",
-  "version": "0.1.0",
-  "uptime_seconds": 86400,
-  "node_count": 100000,
-  "edge_count": 500000,
-  "active_connections": 42
-}
+{"status":"healthy","live":true,"ready":true}
 ```
 
-異常時（HTTP 503）：
-```json
-{
-  "status": "unhealthy",
-  "reason": "WAL write failed",
-  "timestamp": "2024-01-01T00:00:00Z"
-}
-```
+準備ができていないときは HTTP 503 で `"status"` が `"degraded"` または `"unhealthy"` になります。
 
 ### /health/live
 
-Kubernetes Liveness プローブ用。サーバープロセスが生きているかを確認します。
+プロセスが応答できれば HTTP 200 を返します。
 
-```bash
-curl http://localhost:9090/health/live
-```
-
-正常時（HTTP 200）：
 ```json
-{"status": "ok"}
+{"live":true}
 ```
 
 ### /health/ready
 
-Kubernetes Readiness プローブ用。サーバーがリクエストを受け付けられる状態かを確認します。
+リクエストを受け付けられるときは HTTP 200、そうでなければ HTTP 503 を返します。
 
-```bash
-curl http://localhost:9090/health/ready
-```
-
-正常時（HTTP 200）：
 ```json
-{"status": "ready"}
+{"ready":true}
 ```
 
-準備未完了時（HTTP 503）：
-```json
-{"status": "not_ready", "reason": "initializing"}
-```
+監視用 HTTP サーバーはデータファイルの読み込みと WAL の再適用が終わってから起動するため、応答が返った時点でクライアント用のポートも使えます。
 
-## Prometheus での設定
-
-`prometheus.yml` にスクレイプ設定を追加します。
+## Prometheus の設定
 
 ```yaml
 scrape_configs:
   - job_name: 'maharit-db'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['maharit.example.com:9090']
     scrape_interval: 15s
-    metrics_path: /metrics
 ```
 
-## Grafana ダッシュボード
-
-Prometheus と Grafana を組み合わせてダッシュボードを構築できます。主要なパネル例：
-
-- クエリスループット（QPS）: `rate(maharit_queries_total[1m])`
-- クエリレイテンシ（P99）: `histogram_quantile(0.99, rate(maharit_query_duration_seconds_bucket[5m]))`
-- アクティブ接続数: `maharit_active_connections`
-- グラフサイズ: `maharit_node_count`, `maharit_edge_count`
-- メモリ使用量: `maharit_memory_bytes`
-
-## Kubernetes での設定例
+## Kubernetes のプローブ
 
 ```yaml
 livenessProbe:
   httpGet:
     path: /health/live
     port: 9090
-  initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
     path: /health/ready
     port: 9090
-  initialDelaySeconds: 5
   periodSeconds: 5
 ```
+
+Pod の外からプローブするので、`--metrics-bind 0.0.0.0:9090` で起動してください。

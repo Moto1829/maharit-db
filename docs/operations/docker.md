@@ -6,147 +6,92 @@ nav_order: 8
 
 # Docker での使用方法
 
-MaharitDB は Docker を使用して簡単に実行できます。
+リポジトリの `Dockerfile` から、`maharit` を含むイメージを作れます。
 
-## クイックスタート
-
-### イメージのビルド
+## イメージを作る
 
 ```bash
 docker build -t maharit-db .
 ```
 
-### REPL モードで起動
+イメージの中身:
 
-対話的なREPLモードでMaharitDBを起動します：
+- `/app/maharit`: バイナリ
+- `/data`: データ用のボリューム（データファイルは `/data/maharit.db`、WAL は `/data/maharit.db.wal`）
+- 既定のコマンド: `maharit server --host 0.0.0.0 --metrics-bind 0.0.0.0:9090`
+- ポート: 7687（クライアント）、9090（[メトリクス・ヘルスチェック](metrics.md)）
+- `HEALTHCHECK`: `http://localhost:9090/health` を 30 秒ごとに確認
+- 実行ユーザー: `maharit`（root ではない）
 
-```bash
-docker run -it maharit-db
-```
-
-### サーバーモードで起動
-
-TCPサーバーとして起動し、クライアントからの接続を受け付けます：
-
-```bash
-docker run -p 7687:7687 maharit-db server --host 0.0.0.0 --port 7687
-```
-
-## docker-compose での使用
-
-### REPL モード
+## サーバーを起動する
 
 ```bash
-docker-compose run maharit
+docker run -d --name maharit \
+  -p 7687:7687 -p 127.0.0.1:9090:9090 \
+  -v maharit-data:/data \
+  -e MAHARIT_ADMIN_PASSWORD="$MAHARIT_ADMIN_PASSWORD" \
+  maharit-db server --host 0.0.0.0 --metrics-bind 0.0.0.0:9090 --require-auth
 ```
 
-### サーバーモード
+- `-v maharit-data:/data` を付けないと、コンテナを削除したときにデータも消えます
+- コマンドを指定すると既定のコマンドは置き換わるので、`--host 0.0.0.0` と `--metrics-bind 0.0.0.0:9090` も書いてください。コンテナの中で `127.0.0.1` に bind すると、外から接続できません
+- 認証や TLS などのオプションは [サーバー設定](server-config.md) を参照してください。パスワードはコマンドライン引数ではなく環境変数で渡すと、`docker inspect` やプロセス一覧に残りにくくなります
+
+停止するときは `docker stop` を使ってください。SIGTERM を受け取ったサーバーはデータファイルを保存してから終了します。既定の猶予（10 秒）で保存が終わらない大きなデータでは、`docker stop -t 60 maharit` のように延ばしてください。
+
+## REPL を使う
 
 ```bash
-docker-compose up maharit-server
+docker run -it --rm maharit-db /app/maharit
 ```
 
-サーバーはポート 7687 でリッスンします。
+REPL のデータはメモリ上にだけあり、終了すると消えます。
 
-## 設定オプション
+## docker-compose
 
-### 環境変数
+`docker-compose.yml` には次のサービスがあります。
 
-| 変数名 | 説明 | デフォルト値 |
-|--------|------|-------------|
-| `MAHARIT_DATA_DIR` | データディレクトリのパス | `/data` |
-
-### サーバーオプション
-
-| オプション | 短縮形 | 説明 | デフォルト値 |
-|-----------|--------|------|-------------|
-| `--host` | `-h` | バインドするホスト | `127.0.0.1` |
-| `--port` | `-p` | リッスンするポート | `7687` |
-| `--max-connections` | `-c` | 最大同時接続数 | `100` |
-
-### 使用例
+| サービス | 内容 |
+|---|---|
+| `maharit-server` | サーバー（7687 / 9090 を公開、ボリューム `maharit-data` を `/data` に） |
+| `maharit` | REPL（`docker-compose run maharit`） |
+| `maharit-viz` | 可視化 Web アプリ（8080、`maharit-server` に接続） |
 
 ```bash
-# カスタムポートで起動
-docker run -p 8888:8888 maharit-db server --host 0.0.0.0 --port 8888
-
-# 最大接続数を制限
-docker run -p 7687:7687 maharit-db server --host 0.0.0.0 --max-connections 50
+docker-compose up -d maharit-server
+docker-compose run --rm maharit
 ```
 
-## データの永続化
+リーダー 1 台・フォロワー 2 台のレプリケーション構成は `docker-compose.replication.yml` にあります（[レプリケーション](../advanced/replication.md)）。
 
-ボリュームをマウントしてデータを永続化できます：
+## 環境変数
+
+`maharit server` の環境変数はそのまま使えます（[サーバー設定](server-config.md)）。
+
+| 変数 | イメージでの既定値 | 説明 |
+|---|---|---|
+| `MAHARIT_DATA` | `/data/maharit.db` | データファイルのパス |
+| `MAHARIT_WAL` | （`fsync`） | WAL のモード |
+| `MAHARIT_ADMIN_PASSWORD` | なし | `--require-auth` の admin パスワード |
+| `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` | なし | TLS の証明書と秘密鍵（ボリュームでマウントしたファイルのパス） |
+| `RUST_LOG` | （`info`） | [ログ](tracing.md)のレベル |
+
+## バックアップ
+
+サーバーのコンテナを止めてから、同じボリュームをマウントした別のコンテナで `maharit backup` を実行します（[バックアップ・リストア](backup.md)）。
 
 ```bash
-docker run -v maharit-data:/data -p 7687:7687 maharit-db server --host 0.0.0.0
+docker stop maharit
+docker run --rm -v maharit-data:/data -v "$PWD/backup:/backup" maharit-db \
+  /app/maharit backup --source /data/maharit.db --output /backup/maharit.bak.gz --compress
+docker start maharit
 ```
 
-docker-compose を使用する場合は、自動的に `maharit-data` ボリュームが作成されます。
+`/backup` にマウントするホストのディレクトリは、コンテナの `maharit` ユーザーが書き込めるようにしておいてください。
 
-## クライアントからの接続
+## 接続できないとき
 
-### Rust クライアント
-
-```rust
-use maharit_client::Client;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Client::connect("localhost:7687").await?;
-
-    // ノードを作成
-    client.execute("CREATE (n:Person {name: \"Alice\"})").await?;
-
-    // クエリを実行
-    let result = client.query("MATCH (n:Person) RETURN n.name").await?;
-    for row in &result.rows {
-        println!("{:?}", row);
-    }
-
-    Ok(())
-}
-```
-
-### 同期クライアント
-
-```rust
-use maharit_client::sync::SyncClient;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = SyncClient::connect("localhost:7687")?;
-
-    client.execute("CREATE (n:Person {name: \"Bob\"})")?;
-
-    let result = client.query("MATCH (n:Person) RETURN n.name")?;
-    println!("Found {} persons", result.row_count());
-
-    Ok(())
-}
-```
-
-## トラブルシューティング
-
-### 接続できない場合
-
-1. サーバーが起動しているか確認：
-   ```bash
-   docker ps
-   ```
-
-2. ポートマッピングを確認：
-   ```bash
-   docker port <container_id>
-   ```
-
-3. サーバーログを確認：
-   ```bash
-   docker logs <container_id>
-   ```
-
-### メモリ使用量が多い場合
-
-メモリ制限を設定：
-```bash
-docker run -m 512m -p 7687:7687 maharit-db server --host 0.0.0.0
-```
+1. コンテナが動いているか: `docker ps`
+2. ポートの対応: `docker port maharit`
+3. ログ: `docker logs maharit`（`Server listening on 0.0.0.0:7687` が出ているか）
+4. `--host 0.0.0.0` を付けずにコマンドを上書きしていないか

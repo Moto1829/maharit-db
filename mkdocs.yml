@@ -72,7 +72,7 @@ plugins:
             認証・ロール管理: Authentication and roles
             アクセス制御（ACL）: Access control (ACL)
             メトリクス・ヘルスチェック: Metrics and health checks
-            OpenTelemetry トレーシング: OpenTelemetry tracing
+            ログ: Logging
             バックアップ・リストア: Backup and restore
             Docker での使用: Docker
             高度なトピック: Advanced topics
@@ -144,7 +144,7 @@ nav:
     - 認証・ロール管理: operations/auth.md
     - アクセス制御（ACL）: operations/acl.md
     - メトリクス・ヘルスチェック: operations/metrics.md
-    - OpenTelemetry トレーシング: operations/tracing.md
+    - ログ: operations/tracing.md
     - バックアップ・リストア: operations/backup.md
     - Docker での使用: operations/docker.md
   - 高度なトピック:

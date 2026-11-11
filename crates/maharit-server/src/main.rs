@@ -1380,6 +1380,7 @@ fn print_backup_help() {
     println!("    -s, --source <DB_PATH>       Database file to backup");
     println!("    -o, --output <BACKUP_PATH>   Output backup file (default: maharit_backup.db)");
     println!("    -z, --compress               Compress backup with gzip");
+    println!("    --compress-zstd              Compress backup with zstd");
     println!("    -d, --description <TEXT>      Add a description to the backup");
     println!("    -l, --list                   Show metadata for a backup file");
     println!("    --help                       Print this help message");

@@ -89,9 +89,8 @@ Handles the network layer and server management.
 
 - **TCP server**: tokio async I/O, TLS support (rustls)
 - **Authentication and RBAC**: user management, role-based access control
-- **Fine-grained ACL**: access control per label and property
 - **HTTP server**: `/metrics`, `/health`, `/health/live`, `/health/ready`
-- **OpenTelemetry**: distributed tracing
+- **Logging**: structured JSON logs via tracing
 - **WAL**: appends each write query's changes (`WalEntryData`) to `<data>.wal` and replays them at startup; group commit, checkpoints
 - **Replication**: WAL streaming, leader/follower setup
 
@@ -136,7 +135,7 @@ Provides graph visualization and a web frontend.
 Client (TCP/TLS)
         ↓
     maharit-server
-     ├── Authentication and ACL checks
+     ├── Authentication and role permission checks
      ├── Receive query
      └── Forward to maharit-query
               ↓

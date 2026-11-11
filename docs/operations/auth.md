@@ -6,156 +6,114 @@ nav_order: 3
 
 # 認証・ロール管理
 
-MaharitDB はロールベースアクセス制御（RBAC）を実装しており、ユーザーの作成・管理とロールへの権限付与が可能です。
+MaharitDB のサーバーは、ユーザー名とパスワードによるログインと、3 つのロールによるアクセス制御（RBAC）を備えています。
+
+## 認証を有効にする
+
+認証は既定で**無効**です。無効のサーバーは、ログインなしですべてのリクエストを受け付けます（起動時に警告を出します）。ネットワークに公開するときは必ず有効にしてください。
+
+```bash
+maharit server --host 0.0.0.0 --port 7687 \
+  --require-auth --admin-password "$MAHARIT_ADMIN_PASSWORD"
+```
+
+- `--require-auth`: すべてのリクエストにセッショントークンを要求し、ロールの権限を検査する
+- `--admin-password <PW>`（環境変数 `MAHARIT_ADMIN_PASSWORD`）: 起動時に作る `admin` ユーザーのパスワード。`--require-auth` のときは必須で、指定が無いと起動しない
+
+!!! warning "ユーザーはサーバーの再起動で消える"
+    ユーザーとパスワードはメモリ上にだけあり、データファイルにもバックアップにも保存されません。再起動すると `admin` だけに戻るので、`CREATE USER` で作ったユーザーは起動後に作り直してください。
+
+## ログインとセッション
+
+クライアントは `login` リクエストでログインし、返ってきたセッショントークンを以降のリクエストの `sessionToken` に付けます（[プロトコル](../api/protocol.md)）。
+
+```json
+{"type": "login", "username": "alice", "password": "s3cret-pass"}
+```
+
+```json
+{"type": "loggedIn", "sessionToken": "9f1c…", "role": "read_only", "expiresAt": 1767225600}
+```
+
+- トークンは 256 ビットの乱数です
+- セッションは、最後のリクエストから **30 分**使われないと失効します（使うたびに延長されます）。失効すると `authError` が返るので、ログインし直してください
+- ログアウトのリクエストはありません。接続を閉じてもセッションは失効まで残ります
+
+Rust クライアントでは `login` を呼ぶと、以降のクエリにトークンが自動で付きます。
+
+```rust
+use maharit_client::Client;
+
+let mut client = Client::connect("127.0.0.1:7687").await?;
+client.login("alice", "s3cret-pass").await?;
+let result = client.query("MATCH (n:Person) RETURN n.name").await?;
+```
+
+Python クライアントには、まだログインの API がありません。
+
+## ロール
+
+| ロール | 別名 | できること |
+|---|---|---|
+| `reader` | `read_only` | 読み取りクエリ（`MATCH … RETURN`、`SHOW CONSTRAINTS` / `SHOW INDEXES`、プロシージャ呼び出しなど） |
+| `writer` | `read_write` | 読み取りに加えて、書き込み（`CREATE` / `MERGE` / `SET` / `DELETE` / `REMOVE` など）とインデックス・制約の作成・削除 |
+| `admin` | | すべての操作。ユーザー管理（`CREATE USER` など、`SHOW USERS` を含む）は admin だけ |
+
+書き込みかどうかはクエリの文の種類で決まります。権限が無いと `authError`（`permission denied: …`）が返ります。
+
+ロールより細かい、ラベルやプロパティ単位の制御はまだありません（[アクセス制御（ACL）](acl.md)）。
 
 ## ユーザー管理
 
+ユーザー管理の文は、認証を有効にしたサーバーで admin としてログインして実行します。ロールは文字列でも識別子でも書けます。
+
 ### CREATE USER
 
-新しいユーザーを作成します。
-
 ```cypher
-// 基本的なユーザー作成
-CREATE USER alice WITH PASSWORD "securepassword"
-
-// ロールを指定してユーザーを作成
-CREATE USER bob WITH PASSWORD "password123" ROLE reader
-
-// 管理者ユーザーを作成
-CREATE USER admin_user WITH PASSWORD "adminpass" ROLE admin
+CREATE USER alice SET PASSWORD 's3cret-pass' SET ROLE reader
 ```
 
-パスワードは内部でハッシュ化（bcrypt または Argon2）されて保存されます。平文パスワードは保持されません。
+`SET ROLE` の `SET` は省略できます（`CREATE USER bob SET PASSWORD 'pw' ROLE writer`）。ロールの指定は必須です。
 
 ### ALTER USER
 
-既存のユーザーのパスワードやロールを変更します。
+```cypher
+ALTER USER alice SET PASSWORD 'new-pass'
+```
 
 ```cypher
-// パスワードを変更
-ALTER USER alice SET PASSWORD "newpassword"
-
-// ロールを変更
 ALTER USER alice SET ROLE writer
+```
 
-// 複数の変更を同時に行う
-ALTER USER alice SET PASSWORD "newpass" SET ROLE admin
+```cypher
+ALTER USER alice SET PASSWORD 'new-pass' SET ROLE admin
 ```
 
 ### DROP USER
-
-ユーザーを削除します。
 
 ```cypher
 DROP USER alice
 ```
 
-削除されたユーザーのセッションは次のリクエスト時に無効化されます。
-
 ### SHOW USERS
-
-登録されているユーザーの一覧を表示します。
 
 ```cypher
 SHOW USERS
 ```
 
-出力例：
+各行は `username`・`role`（`admin` / `read_write` / `read_only`）・`active` を持ちます。
 
-```
-+------------+--------+------------------+
-| username   | role   | created_at       |
-+------------+--------+------------------+
-| alice      | reader | 2024-01-01       |
-| bob        | writer | 2024-01-02       |
-| admin_user | admin  | 2024-01-01       |
-+------------+--------+------------------+
+```text
+username | role       | active
+---------+------------+-------
+admin    | admin      | true
+alice    | read_only  | true
 ```
 
-## ロール（RBAC）
+## パスワードの保存
 
-### ビルトインロール
-
-| ロール | 説明 | 権限 |
-|--------|------|------|
-| `admin` | 管理者 | すべての操作（ユーザー管理含む） |
-| `writer` | 書き込みユーザー | クエリ実行、データ書き込み |
-| `reader` | 読み取りユーザー | MATCH と RETURN のみ |
-
-### ロールの権限詳細
-
-**admin ロール**:
-- すべてのクエリ操作
-- ユーザーの作成・変更・削除
-- インデックス・制約の管理
-- バックアップ・リストア
-- サーバー設定の変更
-
-**writer ロール**:
-- MATCH、CREATE、SET、DELETE、MERGE、REMOVE
-- UNWIND、WITH、UNION
-- インデックスの作成（制約の管理は不可）
-
-**reader ロール**:
-- MATCH と RETURN のみ
-- WHERE によるフィルタリング
-- ORDER BY、LIMIT、SKIP
-
-## 認証の設定
-
-### サーバー起動時の認証有効化
-
-```bash
-maharit server \
-  --host 0.0.0.0 \
-  --port 7687 \
-  --enable-auth \
-  --default-admin-password "initialadminpass"
-```
-
-初回起動時に `admin` ユーザーが自動的に作成されます。
-
-> **セキュリティ上の重要事項**: 起動直後に `ALTER USER admin SET PASSWORD "新しいパスワード"` コマンドでパスワードを変更してください。
-
-### クライアントからの認証
-
-```rust
-use maharit_client::ClientBuilder;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ClientBuilder::new("localhost:7687")
-        .with_auth("alice", "securepassword")
-        .build()
-        .await?;
-
-    let result = client.query("MATCH (n:Person) RETURN n.name").await?;
-    Ok(())
-}
-```
-
-## セッション管理
-
-- ログイン成功後、セッショントークンが発行されます
-- セッションは一定時間（デフォルト 24 時間）後に自動的に失効します
-- `LOGOUT` コマンドで明示的にセッションを終了できます
-
-```cypher
-LOGOUT
-```
-
-## パスワードポリシー
-
-デフォルトのパスワードポリシー：
-- 最低 8 文字以上
-- 大文字・小文字・数字を含むことを推奨
+パスワードはユーザーごとのソルトと PBKDF2-HMAC-SHA256（10 万回）でハッシュ化して保持し、平文は保持しません。パスワードの長さや文字種の制限はありません。
 
 ## 監査ログ
 
-認証イベントは構造化ログとして記録されます。
-
-```json
-{"level":"INFO","event":"user_login","username":"alice","peer":"192.168.1.100","success":true,"timestamp":"2024-01-01T10:00:00Z"}
-{"level":"WARN","event":"user_login","username":"alice","peer":"192.168.1.100","success":false,"reason":"invalid_password","timestamp":"2024-01-01T10:01:00Z"}
-{"level":"INFO","event":"user_created","username":"carol","created_by":"admin","role":"reader","timestamp":"2024-01-01T10:05:00Z"}
-```
+ログインやユーザー管理の操作を記録する監査ログは、まだサーバーに組み込まれていません。
