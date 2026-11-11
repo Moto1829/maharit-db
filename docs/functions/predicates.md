@@ -78,7 +78,7 @@ RETURN single(x IN [1, 2, 3] WHERE x > 1)
 
 // 管理者が一人だけかを確認
 MATCH (dept:Department {name: "Engineering"})
-WITH [(dept)-[:HAS_MEMBER]->(m:Person) | m] AS members
+WITH dept, [(dept)-[:HAS_MEMBER]->(m:Person) | m] AS members
 WHERE single(m IN members WHERE m.role = "admin")
 RETURN dept.name
 ```
