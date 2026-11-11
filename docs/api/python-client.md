@@ -6,15 +6,19 @@ nav_order: 2
 
 # Python クライアント
 
-maharit の Python クライアントライブラリは、MaharitDB に接続して Cypher クエリを実行するための純粋 Python 実装です。
+maharit の Python クライアントライブラリは、MaharitDB に接続して Cypher クエリを実行するための純粋 Python 実装です。クライアントの [README](https://github.com/Moto1829/maharit-db/tree/main/clients/python)（英語）にも同じ内容があります。
 
 ## インストール
 
+PyPI にはまだ公開していないので、Git リポジトリからインストールします。
+
 ```bash
-pip install maharit
+pip install "git+https://github.com/Moto1829/maharit-db#subdirectory=clients/python"
 # pandas 連携も使用する場合:
-pip install maharit[pandas]
+pip install "maharit[pandas] @ git+https://github.com/Moto1829/maharit-db#subdirectory=clients/python"
 ```
+
+ログイン（`--require-auth` のサーバーへの接続）の API はまだありません。
 
 ## 同期 API
 
@@ -153,6 +157,21 @@ with Client.connect("localhost:7687") as client:
     print(df[df["age"] > 25])
     print(df.groupby("name").mean())
 ```
+
+## コネクションプール
+
+複数のスレッドやタスクから使うときは、コネクションプールを使います。
+
+```python
+from maharit import ConnectionPool
+
+pool = ConnectionPool("localhost:7687", max_size=10)
+with pool.connection() as client:
+    client.query("MATCH (n) RETURN count(n)")
+pool.close_all()
+```
+
+非同期版は `AsyncConnectionPool`（`async with pool.connection() as client:`）です。
 
 ## API リファレンス
 

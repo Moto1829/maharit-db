@@ -87,7 +87,7 @@ Rayon はデフォルトで論理 CPU 数に等しいスレッド数のグロー
 
 ```bash
 # スレッド数を 4 に制限する
-RAYON_NUM_THREADS=4 maharit-server --config config.toml
+RAYON_NUM_THREADS=4 maharit server
 ```
 
 Rayon のグローバルスレッドプールをプログラムから設定する場合:

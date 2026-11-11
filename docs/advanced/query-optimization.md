@@ -6,79 +6,76 @@ nav_order: 4
 
 # クエリ最適化（EXPLAIN / PROFILE）
 
-MaharitDB はクエリの実行計画を確認するための `EXPLAIN` および `PROFILE` をサポートしています。
+`EXPLAIN` と `PROFILE` で、クエリの実行計画（クエリプラン）を確認できます。
 
 ## EXPLAIN
 
-クエリを実際に実行せずに、実行計画（クエリプラン）を表示します。
+クエリを実行せずに、実行計画を表示します。各行が 1 つの処理（オペレーター）で、上から順に実行されます。
 
 ```cypher
 EXPLAIN MATCH (p:Person {name: "Alice"})-[:KNOWS]->(f:Person)
 RETURN p.name, f.name
 ```
 
-出力例：
+出力例:
 
+```text
+Operator                    Est. Rows     Cost Details
+------------------------------------------------------------------------
+NodeByLabelScan                     1        1
+Expand                              2        1 :KNOWS
+Projection                          2        1
 ```
-Query Plan:
-  NodeIndexSeek[p:Person(name="Alice")]
-    └── Expand[p-[:KNOWS]->f]
-          └── Filter[f:Person]
-                └── Return[p.name, f.name]
 
-Estimated rows: 5
-```
+- `Est. Rows`: そのオペレーターが出すと見積もった行数
+- `Cost`: 見積もりの処理量（相対値）
+- `Details`: 対象のラベル・リレーションシップの型・集計のキーなど
+
+!!! warning "既知の不具合"
+    現在、`EXPLAIN` / `PROFILE` はインデックスを反映せず、インデックスがあっても `IndexSeek` ではなく `NodeByLabelScan` と表示します（bug/167）。
 
 ## PROFILE
 
-クエリを実際に実行し、各ステップの実測値を表示します。
+クエリを実際に実行し、実行計画とあわせて結果の行数と実行時間を表示します。
 
 ```cypher
 PROFILE MATCH (p:Person {name: "Alice"})-[:KNOWS]->(f:Person)
 RETURN p.name, f.name
 ```
 
-出力例：
+出力例:
 
-```
-Query Plan (Actual):
-  NodeIndexSeek[p:Person(name="Alice")]       rows=1  time=0.2ms
-    └── Expand[p-[:KNOWS]->f]                rows=3  time=0.5ms
-          └── Filter[f:Person]               rows=3  time=0.1ms
-                └── Return[p.name, f.name]   rows=3  time=0.1ms
-
-Total time: 0.9ms
-Rows returned: 3
+```text
+Operator                    Est. Rows     Cost  Actual Rows    Time (us)
+------------------------------------------------------------------------
+NodeByLabelScan                     1        1            -            -
+Expand                              2        1            -            -
+Projection                          2        1            2          133
+Rows: 2, Time: 133 us
 ```
 
-## クエリプランのノード
+実際の行数と時間は、クエリ全体の値を最後のオペレーターに表示します（オペレーターごとの実測はありません）。
 
-| プランノード | 説明 |
+## オペレーター
+
+| オペレーター | 説明 |
 |------------|------|
-| `NodeScan` | すべてのノードをスキャン（最も遅い） |
-| `NodeByLabelScan` | ラベルでノードをスキャン |
-| `NodeByLabelScan+Filter` | ラベルスキャン + フィルタのプッシュダウン |
-| `IndexSeek` | プロパティインデックスで等値検索（最も速い） |
-| `IndexRangeScan` | プロパティインデックスで範囲検索 |
-| `ExpandAll` | エッジをたどって隣接ノードを展開 |
-| `Filter` | フィルタ条件を適用 |
-| `EagerAggregation` | 集計を実行 |
-| `Sort` | 結果をソート |
-| `Limit` | 結果数を制限 |
-| `ProduceResults` | 結果を返す |
+| `NodeByLabelScan` | ラベルを持つノードを走査 |
+| `NodeByLabelScan+Filter` | ラベルで走査しながら条件で絞り込む（フィルタのプッシュダウン） |
+| `IndexSeek` | プロパティインデックスで等価条件を検索 |
+| `IndexRangeScan` | プロパティインデックスで範囲条件を検索 |
+| `Expand` / `ExpandReverse` | リレーションシップを辿って隣のノードへ（順方向 / 逆方向） |
+| `Filter` | 条件で絞り込む |
+| `HashAggregation` / `EagerAggregation` | 集計 |
+| `Sort` | 並べ替え |
+| `Limit` | 行数を制限 |
+| `Projection` | 返す列を作る |
+| `Unwind` / `Union` / `CallSubquery` / `ProcedureCall` | `UNWIND` / `UNION` / `CALL { … }` / `CALL proc()` |
+| `CreateNode` / `SetProperty` / `RemoveProperty` / `Delete` / `Merge` / `Foreach` | 書き込みの各処理 |
 
-## クエリキャッシュ
+## クエリのキャッシュ
 
-MaharitDB はパースされたクエリプランをキャッシュします。同じクエリが繰り返し実行される場合、パース処理をスキップして高速化されます。
-
-```cypher
-// キャッシュ統計の確認
-CALL db.cache.stats()
-YIELD hit_count, miss_count, eviction_count, cache_size
-RETURN hit_count, miss_count, hit_count * 1.0 / (hit_count + miss_count) AS hit_ratio
-```
-
-キャッシュはグラフの統計（ノード数・エッジ数）が大きく変化した場合に無効化されます。
+サーバーは、パースしたクエリ（構文木）を、クエリ文字列ごとに最大 512 件キャッシュします（古いものから捨てる LRU）。同じ文字列のクエリを繰り返すと、パースを省けます。値はパラメータ（`$name`）で渡すと、値が変わっても同じ文字列になり、キャッシュが効きます。キャッシュの状態を見たり消したりする手段はありません。
 
 ## 最適化の手法
 
@@ -87,13 +84,13 @@ RETURN hit_count, miss_count, hit_count * 1.0 / (hit_count + miss_count) AS hit_
 最も効果的な最適化はインデックスの適切な使用です。
 
 ```cypher
-// インデックスなし（AllNodesScan）
+// インデックスなし（NodeByLabelScan + Filter）
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 
 // インデックスを作成
 CREATE INDEX FOR (n:Person) ON (n.email)
 
-// インデックスあり（NodeIndexSeek）→ 速い
+// インデックスあり（IndexSeek）→ 速い
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 ```
 
@@ -153,16 +150,4 @@ RETURN b.name
 // 推奨: ホップ数を制限する
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
 RETURN b.name
-```
-
-## クエリプランキャッシュの管理
-
-```cypher
-// クエリプランキャッシュをクリア
-CALL db.cache.clear()
-
-// キャッシュサイズを確認
-CALL db.cache.info()
-YIELD max_size, current_size, hit_count, miss_count
-RETURN max_size, current_size, hit_count, miss_count
 ```

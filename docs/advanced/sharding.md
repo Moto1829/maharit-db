@@ -4,142 +4,18 @@ parent: 高度なトピック
 nav_order: 3
 ---
 
-# シャーディング（maharit-cluster）
+# シャーディング
 
-maharit-cluster クレートは、グラフデータを複数のシャード（ノード）に分散して管理するシャーディング機能を提供します。
+1 台に収まらないグラフを、複数のサーバー（シャード）に分けて置く仕組みです。次の 2 つの部品があります。
 
-## 概要
+- **コーディネーターサーバー**（`maharit server --coordinator`）: クライアントからの読み取りクエリを全シャードに送り、結果を 1 つにまとめて返す
+- **`maharit-cluster` クレート**（Rust API）: ノードをどのシャードに置くかを決める戦略と、シャードの一覧の管理
 
-シャーディングにより、1 台のサーバーに収まらない大規模グラフを複数のサーバーに分散できます。
+シャード自体は通常の `maharit server` です。どのデータをどのシャードに置くかはアプリケーションが決め、シャードに直接書き込みます（`maharit-cluster` の戦略で置き先を計算できます）。
 
 ```
-クライアント
-    │
-    ▼
-QueryRouter（クエリをどのシャードに送るか決定）
-    │
-    ├── Shard 0 (例: NodeId 0–999)
-    ├── Shard 1 (例: NodeId 1000–1999)
-    └── Shard 2 (例: NodeId 2000–2999)
-```
-
-## シャーディング戦略
-
-`ShardingStrategy` トレイトを実装した 3 つの戦略が用意されています。
-
-### HashSharding（ハッシュシャーディング）
-
-NodeId のハッシュ値を使ってシャードを決定します。データを均等に分散させるのに適しています。
-
-```rust
-use maharit_cluster::HashSharding;
-
-let strategy = HashSharding::new(3); // シャード数 = 3
-let shard_id = strategy.shard_for_node(node_id);
-```
-
-### RangeSharding（レンジシャーディング）
-
-NodeId の範囲に基づいてシャードを決定します。連続した ID を持つノードを同じシャードにまとめたい場合に適しています。
-
-```rust
-use maharit_cluster::RangeSharding;
-
-let strategy = RangeSharding::new(vec![0, 1000, 2000]); // 各シャードの開始 ID
-let shard_id = strategy.shard_for_node(node_id);
-```
-
-### LabelSharding（ラベルシャーディング）
-
-ノードのラベルに基づいてシャードを決定します。ラベル単位でデータを分離したい場合に適しています。
-
-```rust
-use maharit_cluster::LabelSharding;
-use std::collections::HashMap;
-
-let mut label_map = HashMap::new();
-label_map.insert("Person".to_string(), 0);
-label_map.insert("Product".to_string(), 1);
-label_map.insert("Order".to_string(), 2);
-
-let strategy = LabelSharding::new(label_map, 0); // デフォルトシャード = 0
-```
-
-## シャードマップ
-
-`ShardMap` はクラスター内のすべてのシャード情報を管理します。
-
-```rust
-use maharit_cluster::{ShardMap, ShardInfo, ShardStatus};
-
-let mut map = ShardMap::new();
-
-// シャードを追加
-map.add_shard(ShardInfo {
-    id: 0,
-    address: "127.0.0.1:7687".to_string(),
-    status: ShardStatus::Active,
-    node_count: 0,
-    edge_count: 0,
-});
-
-// シャードの取得
-let shard = map.get_shard(0).unwrap();
-println!("Shard 0 address: {}", shard.address);
-
-// アクティブなシャード一覧
-let active = map.active_shards();
-```
-
-### シャードステータス
-
-| ステータス | 説明 |
-|-----------|------|
-| `Active` | 通常稼働中 |
-| `Inactive` | 停止中 |
-| `Rebalancing` | データ移動中 |
-
-## クエリルーティング
-
-`QueryRouter` はクエリをどのシャードに転送するかを決定します。
-
-```rust
-use maharit_cluster::{QueryRouter, HashSharding, ShardMap};
-
-let strategy = HashSharding::new(3);
-let router = QueryRouter::new(strategy, shard_map);
-
-// ノード ID に基づいてルーティング先を決定
-let decision = router.route_for_node(node_id);
-```
-
-### RoutingDecision
-
-| バリアント | 説明 |
-|-----------|------|
-| `SingleShard(id)` | 特定のシャードのみに送る |
-| `AllShards` | 全シャードにブロードキャスト（例: MATCH (n) RETURN n） |
-| `MultiShard(ids)` | 複数のシャードに送る |
-
-## クラスターコーディネーター
-
-`ClusterCoordinator` は複数のシャードへのクエリ実行と結果のマージを担当します。
-
-```rust
-use maharit_cluster::{ClusterCoordinator, ClusterConfig};
-
-let config = ClusterConfig {
-    shards: vec![
-        ShardConfig { id: 0, address: "127.0.0.1:7687".to_string() },
-        ShardConfig { id: 1, address: "127.0.0.1:7688".to_string() },
-    ],
-    replication_factor: 1,
-};
-
-let coordinator = ClusterCoordinator::new(config);
-
-// 全シャードに対してクエリを実行し、結果をマージ
-let rows = coordinator.execute_all("MATCH (n:Person) RETURN n.name").await?;
+クライアント ──読み取り──▶ コーディネーター ──▶ Shard 0, Shard 1, …（全シャードに同じクエリ）
+アプリケーション ──書き込み──▶ 置き先のシャード（戦略で決める）
 ```
 
 ## コーディネーターサーバー（`maharit server --coordinator`）
@@ -183,43 +59,99 @@ maharit server --coordinator --host 0.0.0.0 --coordinator-port 7690 \
 
 - `avg` / `stDev` / `percentileCont` などの集計と、`count(DISTINCT …)` などの `DISTINCT` 付き集計
 - `WITH` での集計・`DISTINCT`・`SKIP`・`LIMIT`、`CALL { … }` サブクエリ、`RETURN *`、`PROFILE`
-- `SKIP` / `LIMIT` にパラメータを使うもの（コーディネーターはパラメータを受け取りません）
+- `SKIP` / `LIMIT` に整数リテラル以外（パラメータや式）を使うもの（コーディネーターはパラメータを受け取りません）
 
 !!! warning "シャードをまたぐパターン"
     各シャードは自分のデータだけでパターンを照合します。両端が別のシャードにあるリレーションシップは作れず、辿ることもできません。
 
-## リバランス（データ移動）
+## Rust API（`maharit-cluster`）
 
-シャード間のデータ偏りを解消するためにリバランスを実行できます。
+### シャーディング戦略
+
+`ShardingStrategy` トレイトの `shard_for_node(node_id, label)` が、ノードを置くシャードの ID を返します。3 つの戦略があります。
 
 ```rust
-use maharit_cluster::{ShardMap, RebalancePlan};
+use maharit_cluster::{HashSharding, LabelSharding, RangeSharding, ShardingStrategy};
 
-let plan = shard_map.plan_rebalance();
-for mv in &plan.moves {
-    println!(
-        "Node {} を Shard {} → Shard {} に移動",
-        mv.node_id, mv.from_shard, mv.to_shard
-    );
+// ノード ID のハッシュで均等に分ける（シャード数 = 3）
+let hash = HashSharding::new(3);
+let shard = hash.shard_for_node(42, "Person");
+
+// ノード ID の範囲で分ける（範囲は両端を含む。どれにも入らなければ既定のシャード 0）
+let mut range = RangeSharding::new(0);
+range.add_range(0, 999, 0);
+range.add_range(1000, 1999, 1);
+let shard = range.shard_for_node(1500, "Person"); // 1
+
+// ラベルで分ける（登録の無いラベルは既定のシャード 0）
+let mut label = LabelSharding::new(0);
+label.add_label("Person", 0);
+label.add_label("Product", 1);
+let shard = label.shard_for_node(42, "Product"); // 1
+```
+
+### シャードマップとルーティング
+
+`ShardMap` はシャードの一覧（ID・アドレス・状態・ノード数）を持ち、`QueryRouter` は戦略とシャードマップから問い合わせ先を決めます。
+
+```rust
+use std::sync::{Arc, RwLock};
+use maharit_cluster::{
+    HashSharding, QueryRouter, RoutingDecision, ShardInfo, ShardMap, ShardStatus,
+};
+
+let mut map = ShardMap::new();
+for (id, address) in [(0, "10.0.0.1:7687"), (1, "10.0.0.2:7687")] {
+    map.add_shard(ShardInfo {
+        id,
+        address: address.to_string(),
+        status: ShardStatus::Active,
+        node_count: 0,
+    })?;
+}
+
+let router = QueryRouter::new(Arc::new(RwLock::new(map)), Box::new(HashSharding::new(2)));
+let shard = router.route_node_query(42, "Person");   // ノードを置くシャード
+let all = router.route_all();                        // 稼働中の全シャード
+match router.decide_for_label("Person") {
+    RoutingDecision::SingleShard(id) => println!("shard {id} だけに問い合わせる"),
+    RoutingDecision::MultiShard(ids) => println!("{ids:?} に問い合わせる"),
+    RoutingDecision::Broadcast => println!("全シャードに問い合わせる"),
 }
 ```
 
-## エッジのルーティング
+| シャードの状態（`ShardStatus`） | 説明 |
+|-----------|------|
+| `Active` | 稼働中 |
+| `Inactive` | 停止中 |
+| `Rebalancing` | データ移動中 |
 
-クロスシャードエッジ（異なるシャードにまたがるエッジ）の扱いには注意が必要です。
+### リバランスの計画
+
+`ShardMap::rebalance_plan()` は、各シャードの `node_count` から、ノード数を均すための移動の一覧を作ります。計画を作るだけで、データは移動しません。
 
 ```rust
-use maharit_cluster::classify_edge;
-
-let location = classify_edge(from_shard_id, to_shard_id);
-// EdgeLocation::Local   – 同じシャード内
-// EdgeLocation::Remote  – 異なるシャードにまたがる
+let plan = map.rebalance_plan();
+for mv in &plan.moves {
+    println!("ノード {} を shard {} → shard {} に移す", mv.node_id, mv.from_shard, mv.to_shard);
+}
 ```
 
-クロスシャードエッジは両側のシャードに参照を保持し、整合性を維持します。
+### リレーションシップの両端の位置
+
+`classify_edge` は、リレーションシップの両端のノードが同じシャードに置かれるかを判定します。
+
+```rust
+use maharit_cluster::{EdgeLocation, classify_edge};
+
+match classify_edge(1, 2, &router, "Person", "Company") {
+    EdgeLocation::Local(shard) => println!("両端が shard {shard}"),
+    EdgeLocation::Remote { src, dst } => println!("shard {src} と shard {dst} にまたがる"),
+}
+```
 
 ## 設計上の注意
 
-- **トランザクション境界**: 現在、分散トランザクション（2フェーズコミット）はサポートしていません。単一シャード内のトランザクションのみ保証されます。
-- **クロスシャードクエリ**: `MATCH` + `JOIN` 相当のクエリは全シャードに問い合わせて結果をマージします。
-- **シャード数の変更**: シャード数を変更する場合はリバランスが必要です。
+- **シャードをまたぐリレーションシップ**: シャードは他のシャードのノードを知らないため、両端が別のシャードにあるリレーションシップは作れません。一緒に辿るデータは、同じシャードに置くようにしてください（`LabelSharding` などで置き先をそろえる）
+- **トランザクション**: 複数のシャードにまたがるトランザクション（2 フェーズコミット）はありません。トランザクションは 1 つのシャードの中だけです
+- **シャード数の変更**: 置き先の計算が変わるため、データを移し直す必要があります（移動の計画は `rebalance_plan()`、移動は手作業）
