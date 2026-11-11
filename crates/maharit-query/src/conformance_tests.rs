@@ -60,6 +60,11 @@ fn cases() -> Vec<Case> {
             [["Alice"], ["Bob"], ["Carol"]]
         ),
         case!(
+            "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n.name",
+            Any,
+            [["Alice"]]
+        ),
+        case!(
             "MATCH (n:Person) WHERE n.age > 28 RETURN n.name",
             Any,
             [["Alice"], ["Carol"]]
@@ -424,7 +429,6 @@ fn cases() -> Vec<Case> {
 /// Queries that are standard Cypher but not supported yet. Each must still
 /// fail; move it to `cases()` once it works.
 const KNOWN_UNSUPPORTED: &[&str] = &[
-    "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n.name",
     "MATCH (n:Person) RETURN count(n) + 1",
     // Neo4j 3.x syntax; deliberately unsupported (use FOR … REQUIRE).
     "CREATE CONSTRAINT ON (n:Person) ASSERT n.name IS UNIQUE",
