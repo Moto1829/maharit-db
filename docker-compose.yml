@@ -7,9 +7,8 @@ services:
     container_name: maharit-db
     volumes:
       - maharit-data:/data
-    environment:
-      - MAHARIT_DATA_DIR=/data
-    # Interactive mode for REPL
+    # Interactive mode for REPL (data is kept in memory only)
+    command: ["/app/maharit"]
     stdin_open: true
     tty: true
 
@@ -19,7 +18,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: maharit-db-server
-    command: ["/app/maharit", "server", "--host", "0.0.0.0", "--port", "7687", "--data", "/data/maharit.db"]
+    command: ["/app/maharit", "server", "--host", "0.0.0.0", "--port", "7687", "--data", "/data/maharit.db", "--metrics-bind", "0.0.0.0:9090"]
     volumes:
       - maharit-data:/data
     environment:

@@ -48,13 +48,13 @@ VOLUME ["/data"]
 EXPOSE 7687
 EXPOSE 9090
 
-# Environment variables
-ENV MAHARIT_DATA_DIR=/data
+# Data file inside the volume (read by `maharit server`; --data overrides it)
+ENV MAHARIT_DATA=/data/maharit.db
 
-# ヘルスチェック: /health エンドポイントに HTTP GET
-# /health エンドポイントは Task 25 (metrics) で実装済み (port 9090)
+# ヘルスチェック: 監視用 HTTP（port 9090）の /health に GET
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:9090/health || exit 1
 
-# Default command (server mode)
-CMD ["/app/maharit", "server"]
+# Default command (server mode). Bind to all interfaces: 127.0.0.1 inside a
+# container is unreachable from outside it.
+CMD ["/app/maharit", "server", "--host", "0.0.0.0", "--metrics-bind", "0.0.0.0:9090"]
