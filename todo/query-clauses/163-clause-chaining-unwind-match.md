@@ -1,0 +1,21 @@
+# タスク 163: UNWIND / MATCH / WITH を自由な順序でつなげられるようにする
+
+## 現状（2026-11-12、task124 で確認）
+文は決まった形（`MATCH … WITH … RETURN`、`UNWIND … CREATE … RETURN` など）ごとに実装されていて、
+次の組み合わせがパースできない。
+
+- `MATCH (a:Article) UNWIND a.tags AS tag RETURN a.title, tag`（MATCH の後の UNWIND）
+- `UNWIND [1, 2, 3] AS id MATCH (n:Product) WHERE n.id = id RETURN n`（UNWIND の後の MATCH）
+- `UNWIND [[1, 2], [3, 4]] AS sub UNWIND sub AS num RETURN num`（UNWIND の連続）
+- `MATCH … WITH … UNWIND stats AS stat WITH stat, avg WHERE … RETURN …`（WITH の後の UNWIND）
+- トップレベルの `MATCH … MATCH …`、`WITH 1 AS x RETURN x`、`OPTIONAL MATCH` で始まる文
+- `MATCH … CREATE … SET` など、書き込みの後の SET
+
+docs/cypher/unwind-with-union.md・functions/aggregation.md・functions/string.md の例が
+`docs_cypher_known_failures.txt` に残っている。
+
+## 方針（案）
+- 読み取りの文を「句の列」（MATCH / OPTIONAL MATCH / UNWIND / WITH / WHERE）として持ち、
+  バインディングの列に順に適用するパイプラインにする（`QuerySegment` の一般化）
+- まず読み取りの組み合わせから。書き込み句の自由な連結はその後
+- planner（EXPLAIN）・is_read_only・コーディネーター（coordinator_plan）の対応も必要

@@ -174,6 +174,7 @@ WITH p.category AS category, sum(p.sales) AS total_sales
 WITH collect({category: category, sales: total_sales}) AS stats,
      avg(total_sales) AS avg_sales
 UNWIND stats AS stat
+WITH stat, avg_sales
 WHERE stat.sales >= avg_sales
 RETURN stat.category, stat.sales
 ORDER BY stat.sales DESC

@@ -35,3 +35,9 @@ task 123 で docs の ```cypher ブロックをパース検査するテスト
 - docs 側で直したもの: transactions.md（BEGIN/COMMIT ではなくプロトコルの begin/commit/rollback。実際の動作に合わせて全面的に書き直し、bug/159・bug/160 を起票）、
   export.md（存在しない db.export プロシージャ）、string.md（startsWith() などは演算子 STARTS WITH / ENDS WITH / CONTAINS、length(文字列) は size）、
   predicates.md（変数名 end → dest、WHERE だけの断片を完全な文に）、acl.md・auth.md（task148）
+- エンジンに実装したもの（2026-11-12）: `%` 演算子、リストリテラルの添字・スライス（開始・終わりの省略を含む）、WHERE だけのリスト内包、
+  三角関数・exp・pow など、`CREATE INDEX FOR … ON …`、ラベル述語 `n:Label`、`SET n:A:B` / `REMOVE n:A:B`、
+  SKIP / LIMIT の式、連続比較 `a <= x <= b`、パターン内包 `[(a)-->(b) | b.name]`
+- 実装中に見つけて直したもの: 整数の 0 除算でサーバーが落ちる（bug/161）
+- 残り 6 件は大きいエンジン作業として分けた: 句の自由な連結（query-clauses/163、5 件）、複数のリレーションシップ型（query-clauses/164、1 件）。
+  この 2 つが終われば known-failures は空になる
