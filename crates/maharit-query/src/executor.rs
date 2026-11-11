@@ -6203,9 +6203,34 @@ impl<'a> Executor<'a> {
                 Ok(Value::List(values))
             }
             Expression::IndexAccess(list_expr, index_expr) => {
+                // `r[key]`: リレーションシップは値にすると ID になるので、変数のまま扱う
+                if let Expression::Variable(var) = list_expr.as_ref()
+                    && let Some(BindingValue::Edge(id)) = bindings.get(var.as_str())
+                {
+                    return match self.evaluate_expression(index_expr, bindings)? {
+                        Value::String(key) => Ok(self
+                            .graph_ref()
+                            .get_edge(*id)
+                            .and_then(|e| e.properties.get(&key).map(Value::from))
+                            .unwrap_or(Value::Null)),
+                        Value::Null => Ok(Value::Null),
+                        _ => Err(ExecuteError::TypeError(
+                            "a relationship property key must be a string".to_string(),
+                        )),
+                    };
+                }
                 let list_val = self.evaluate_expression(list_expr, bindings)?;
                 let idx_val = self.evaluate_expression(index_expr, bindings)?;
                 match (list_val, idx_val) {
+                    // 動的なプロパティ参照: `n["name"]`、`n[$key]`
+                    (Value::Node(id), Value::String(key)) => Ok(self
+                        .graph_ref()
+                        .get_node_property(id, &key)
+                        .map(|v| Value::from(&v))
+                        .unwrap_or(Value::Null)),
+                    (Value::NodeData { properties, .. }, Value::String(key)) => {
+                        Ok(properties.get(&key).map(Value::from).unwrap_or(Value::Null))
+                    }
                     (Value::List(items), Value::Int(i)) => {
                         let idx = if i < 0 { items.len() as i64 + i } else { i };
                         if idx >= 0 {
@@ -12492,6 +12517,39 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_dynamic_property_access() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (:User {name: 'a', email: 'e', created_at: 1})-[:R {w: 5}]->(:User {name: 'b'})",
+        )
+        .unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (u:User) WHERE all(f IN ['name', 'email', 'created_at'] WHERE exists(u[f])) \
+             RETURN u.name, u['email'] AS e, u['missing'] AS m",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 1);
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::String("a".into()),
+                Value::String("e".into()),
+                Value::Null
+            ]
+        );
+        let r = execute(&mut graph, "MATCH ()-[r:R]->() RETURN r['w'], r['x']").unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(5), Value::Null]);
+        let r = execute(
+            &mut graph,
+            "MATCH (u:User) WITH collect(u) AS us RETURN us[0]['name'] IN ['a', 'b'] AS ok",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Bool(true));
     }
 
     #[test]
