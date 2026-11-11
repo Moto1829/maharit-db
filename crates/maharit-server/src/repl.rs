@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
 use colored::Colorize;
-use maharit_core::Graph;
+use maharit_core::{ConstraintManager, FulltextManager, Graph, PropertyIndex};
+use maharit_query::Executor;
 use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -59,6 +60,10 @@ impl Validator for ReplHelper {
 pub struct Repl {
     editor: Editor<ReplHelper, DefaultHistory>,
     graph: Graph,
+    // インデックス・制約・全文検索インデックスは文をまたいで保持する
+    constraints: ConstraintManager,
+    fulltext: FulltextManager,
+    property_index: PropertyIndex,
 }
 
 impl Repl {
@@ -73,6 +78,9 @@ impl Repl {
         Ok(Self {
             editor,
             graph: Graph::new(),
+            constraints: ConstraintManager::new(),
+            fulltext: FulltextManager::new(),
+            property_index: PropertyIndex::new(),
         })
     }
 
@@ -265,7 +273,7 @@ impl Repl {
     }
 
     fn handle_query(&mut self, line: &str) {
-        use maharit_query::{Executor, Parser};
+        use maharit_query::Parser;
 
         // パース
         let stmt = match Parser::new(line) {
@@ -283,8 +291,7 @@ impl Repl {
         };
 
         // 実行
-        let mut executor = Executor::new(&mut self.graph);
-        match executor.execute(stmt) {
+        match self.execute(stmt) {
             Ok(result) => {
                 self.print_result(&result);
             }
@@ -292,6 +299,20 @@ impl Repl {
                 println!("{}: {}", "Execution error".red().bold(), e);
             }
         }
+    }
+
+    /// 1 文を実行する。インデックス・制約は REPL が持つものを使い、次の文に引き継ぐ。
+    fn execute(
+        &mut self,
+        stmt: maharit_query::ast::Statement,
+    ) -> Result<maharit_query::ResultSet, maharit_query::ExecuteError> {
+        Executor::new_with_backend_exclusive(
+            &mut self.graph,
+            &mut self.constraints,
+            &mut self.fulltext,
+            &mut self.property_index,
+        )
+        .execute(stmt)
     }
 
     fn print_result(&self, result: &maharit_query::ResultSet) {
@@ -314,5 +335,34 @@ impl Repl {
         }
 
         println!("\n{} row(s) returned", result.rows.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maharit_query::Parser;
+
+    fn run(
+        repl: &mut Repl,
+        q: &str,
+    ) -> Result<maharit_query::ResultSet, maharit_query::ExecuteError> {
+        repl.execute(Parser::new(q).unwrap().parse().unwrap())
+    }
+
+    /// bug/166: インデックス・制約が文ごとに捨てられ、REPL では効いていなかった
+    #[test]
+    fn schema_survives_between_statements() {
+        let mut repl = Repl::new().unwrap();
+        run(
+            &mut repl,
+            "CREATE CONSTRAINT u FOR (n:U) REQUIRE n.k IS UNIQUE",
+        )
+        .unwrap();
+        run(&mut repl, "CREATE INDEX ON :U(k)").unwrap();
+        run(&mut repl, "CREATE (:U {k: 1})").unwrap();
+        assert!(run(&mut repl, "CREATE (:U {k: 1})").is_err());
+        assert_eq!(run(&mut repl, "SHOW INDEXES").unwrap().row_count(), 1);
+        assert_eq!(run(&mut repl, "SHOW CONSTRAINTS").unwrap().row_count(), 1);
     }
 }
