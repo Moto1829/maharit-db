@@ -73,6 +73,15 @@ class TestAsyncClient:
             assert result is True
 
     @pytest.mark.asyncio
+    async def test_connect_as_async_context_manager(self):
+        # The documented form: `async with AsyncClient.connect(...) as client:`
+        server, port = await _start_fake_server([{"type": "pong"}])
+        async with server:
+            async with AsyncClient.connect(f"127.0.0.1:{port}") as client:
+                assert await client.ping() is True
+            assert client._writer is None or client._writer.is_closing()
+
+    @pytest.mark.asyncio
     async def test_execute_success(self):
         rows = [{"n.name": "Alice"}, {"n.name": "Bob"}]
         server, port = await _start_fake_server([{"type": "result", "rows": rows}])

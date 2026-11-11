@@ -145,14 +145,18 @@ class AsyncClient:
         self._writer: Optional[asyncio.StreamWriter] = None
 
     @classmethod
-    async def connect(
+    def connect(
         cls,
         address: str,
         timeout: float = 30.0,
         ssl: SslOption = None,
         ca_file: Optional[str] = None,
-    ) -> "AsyncClient":
+    ) -> "_Connecting":
         """Connect to a MaharitDB server asynchronously.
+
+        Use either ``client = await AsyncClient.connect(...)`` or
+        ``async with AsyncClient.connect(...) as client:`` (the connection is
+        closed when the block ends).
 
         Args:
             address: Server address in the form ``host:port``.
@@ -166,6 +170,16 @@ class AsyncClient:
         Returns:
             A connected :class:`AsyncClient` instance.
         """
+        return _Connecting(cls._open(address, timeout, ssl, ca_file))
+
+    @classmethod
+    async def _open(
+        cls,
+        address: str,
+        timeout: float,
+        ssl: SslOption,
+        ca_file: Optional[str],
+    ) -> "AsyncClient":
         host, _, port_str = address.rpartition(":")
         if not host:
             host = "localhost"
@@ -358,3 +372,22 @@ class AsyncClient:
     def __repr__(self) -> str:
         connected = self._writer is not None
         return f"AsyncClient({self._host}:{self._port}, connected={connected})"
+
+
+class _Connecting:
+    """Result of :meth:`AsyncClient.connect`: awaitable, or usable with ``async with``."""
+
+    def __init__(self, opening) -> None:
+        self._opening = opening
+        self._client: Optional[AsyncClient] = None
+
+    def __await__(self):
+        return self._opening.__await__()
+
+    async def __aenter__(self) -> AsyncClient:
+        self._client = await self._opening
+        return self._client
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._client is not None:
+            await self._client.close()
