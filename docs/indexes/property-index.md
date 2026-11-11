@@ -17,7 +17,11 @@ CREATE INDEX ON :Person(name)
 CREATE INDEX ON :User(email)
 ```
 
-構文: `CREATE INDEX ON :Label(property)`
+構文: `CREATE INDEX ON :Label(property)`。Neo4j 4.x 以降と同じ `CREATE INDEX FOR (n:Label) ON (n.property)` の形でも書けます（インデックス名と複数プロパティの指定には対応していません）。
+
+```cypher
+CREATE INDEX FOR (n:Person) ON (n.email)
+```
 
 > **注意**: 既存ノードにインデックスを作成した場合、作成時点で対象ラベルを持つ全ノードが自動的にインデックス登録されます。インデックス作成後に追加されたノードも自動的にインデックスに登録されます。
 

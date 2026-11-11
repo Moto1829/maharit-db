@@ -2,8 +2,6 @@
 # One entry per statement: `docs/<file>: <first non-comment line>`.
 # Follow-up work: todo/docs/124-docs-unsupported-syntax-backlog.md
 
-docs/advanced/query-optimization.md: CREATE INDEX FOR (n:Person) ON (n.email)
-docs/advanced/query-optimization.md: MATCH (p:Person {name: "Alice"})  // 1 件に絞り込み
 docs/algorithms/all-paths.md: MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
 docs/cypher/order-limit-skip.md: MATCH (n:Person)
 docs/cypher/set-remove-merge.md: MATCH (n)

@@ -90,8 +90,10 @@ RETURN hit_count, miss_count, hit_count * 1.0 / (hit_count + miss_count) AS hit_
 // インデックスなし（AllNodesScan）
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 
-// インデックスあり（NodeIndexSeek）→ 速い
+// インデックスを作成
 CREATE INDEX FOR (n:Person) ON (n.email)
+
+// インデックスあり（NodeIndexSeek）→ 速い
 MATCH (n:Person) WHERE n.email = "alice@example.com" RETURN n
 ```
 
@@ -110,19 +112,17 @@ WHERE p.age = 30
 RETURN f.name
 ```
 
-### 3. 選択性の高いフィルタを先に書く
+### 3. 可変長パスは絞り込んだ側から辿る
 
-より多くのノードを絞り込むフィルタを先に記述すると効率的です。
+パターンは左端のノードから辿ります。可変長パスでは、条件で少数に絞り込めるノードを左端に置くと、辿る経路が少なくなります。
 
 ```cypher
-// 推奨: 絞り込みが多いフィルタを先に
-MATCH (p:Person {name: "Alice"})  // 1 件に絞り込み
-MATCH (p)-[:KNOWS*1..5]->(f:Person)  // その後に可変長パス
+// 推奨: 1 件に絞り込める Alice から辿る
+MATCH (p:Person {name: "Alice"})-[:KNOWS*1..5]->(f:Person)
 RETURN f.name
 
-// 非推奨: 可変長パスを先に（中間結果が大きくなる）
-MATCH (p:Person)-[:KNOWS*1..5]->(f:Person)
-WHERE p.name = "Alice"
+// 非推奨: すべての Person から辿ってから、終点で Alice に絞り込む
+MATCH (f:Person)-[:KNOWS*1..5]->(p:Person {name: "Alice"})
 RETURN f.name
 ```
 

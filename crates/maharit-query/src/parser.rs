@@ -2110,9 +2110,39 @@ impl Parser {
     // ========== Property Index ==========
 
     /// CREATE INDEX ON :Label(property)
+    /// CREATE INDEX ON :Label(property)
+    /// CREATE INDEX FOR (n:Label) ON (n.property)（Neo4j 4.x 以降の形）
     fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
         self.expect(TokenKind::Create)?;
         self.expect(TokenKind::Index)?;
+        if self.check(TokenKind::For) {
+            self.advance();
+            self.expect(TokenKind::LParen)?;
+            let var = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let label = self.expect_ident_or_keyword()?;
+            self.expect(TokenKind::RParen)?;
+            self.expect(TokenKind::On)?;
+            self.expect(TokenKind::LParen)?;
+            let span = self.current_span();
+            let owner = self.expect_ident()?;
+            if owner != var {
+                return Err(ParseError::UnexpectedToken {
+                    expected: format!("{var}.<property>"),
+                    found: owner,
+                    span,
+                });
+            }
+            let property = self.expect_dot_property()?;
+            if self.check(TokenKind::Comma) {
+                return Err(self.unexpected_token(") (composite indexes are not supported)"));
+            }
+            self.expect(TokenKind::RParen)?;
+            return Ok(Statement::CreateIndex(CreateIndexStatement {
+                label,
+                property,
+            }));
+        }
         self.expect(TokenKind::On)?;
         self.expect(TokenKind::Colon)?;
         let label = self.expect_ident_or_keyword()?;
@@ -3434,6 +3464,22 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn create_index_for_on_syntax() {
+        let parse = |q: &str| Parser::new(q).unwrap().parse();
+        let expected = Statement::CreateIndex(CreateIndexStatement {
+            label: "Person".into(),
+            property: "email".into(),
+        });
+        assert_eq!(
+            parse("CREATE INDEX FOR (n:Person) ON (n.email)").unwrap(),
+            expected
+        );
+        assert_eq!(parse("CREATE INDEX ON :Person(email)").unwrap(), expected);
+        assert!(parse("CREATE INDEX FOR (n:Person) ON (m.email)").is_err());
+        assert!(parse("CREATE INDEX FOR (n:Person) ON (n.a, n.b)").is_err());
+    }
+
     use super::*;
 
     fn parse(input: &str) -> Result<Statement, ParseError> {
