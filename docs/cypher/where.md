@@ -16,7 +16,7 @@ WHERE n.age > 25
 RETURN n.name, n.age
 ```
 
-`WHERE` は `MATCH` の直後に記述します。複数の `MATCH` 句がある場合は、最後の `MATCH` の後に一度まとめて書くことが多いです。
+`WHERE` は `MATCH` または `WITH` の直後に記述します。
 
 ## 比較演算子
 
@@ -70,7 +70,14 @@ RETURN n.name
 MATCH (n:Person)
 WHERE (n.age > 30 OR n.role = "admin") AND NOT n.deleted = true
 RETURN n.name
+
+// XOR の使用（どちらか一方だけが成り立つ）
+MATCH (n:Person)
+WHERE n.city = "Tokyo" XOR n.age > 30
+RETURN n.name
 ```
+
+優先順位は高い順に `NOT`、`AND`、`XOR`、`OR` です。
 
 ## 文字列述語
 

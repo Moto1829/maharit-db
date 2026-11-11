@@ -6484,6 +6484,13 @@ impl<'a> Executor<'a> {
                 (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
                 _ => Err(ExecuteError::TypeError("OR requires booleans".to_string())),
             },
+            BinaryOp::Xor => match (left, right) {
+                (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a ^ b)),
+                (Value::Null, Value::Bool(_) | Value::Null) | (Value::Bool(_), Value::Null) => {
+                    Ok(Value::Null)
+                }
+                _ => Err(ExecuteError::TypeError("XOR requires booleans".to_string())),
+            },
             BinaryOp::Add => {
                 if let (Value::List(a), Value::List(b)) = (left, right) {
                     let mut result = a.clone();
@@ -12481,6 +12488,34 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_xor_operator() {
+        let mut graph = Graph::new();
+        let r = execute(
+            &mut graph,
+            "RETURN true XOR false, true XOR true, false XOR true AND false, \
+             true OR true XOR true, null XOR true",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Null
+            ]
+        );
+        execute(
+            &mut graph,
+            "CREATE (:P {a: true, b: false}), (:P {a: true, b: true})",
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (p:P) WHERE p.a XOR p.b RETURN p").unwrap();
+        assert_eq!(r.row_count(), 1);
     }
 
     #[test]

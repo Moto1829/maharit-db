@@ -749,6 +749,8 @@ pub enum BinaryOp {
     Gte,
     And,
     Or,
+    /// 排他的論理和 XOR
+    Xor,
     Add,
     Sub,
     Mul,

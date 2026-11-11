@@ -989,6 +989,7 @@ impl Parser {
                     | TokenKind::Is
                     | TokenKind::And
                     | TokenKind::Or
+                    | TokenKind::Xor
                     | TokenKind::LBracket
             )
         )
@@ -2894,12 +2895,25 @@ impl Parser {
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
-        let mut left = self.parse_and_expression()?;
+        let mut left = self.parse_xor_expression()?;
 
         while self.check(TokenKind::Or) {
             self.advance();
-            let right = self.parse_and_expression()?;
+            let right = self.parse_xor_expression()?;
             left = Expression::BinaryOp(Box::new(left), BinaryOp::Or, Box::new(right));
+        }
+
+        Ok(left)
+    }
+
+    /// 優先順位は OR < XOR < AND（openCypher と同じ）
+    fn parse_xor_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut left = self.parse_and_expression()?;
+
+        while self.check(TokenKind::Xor) {
+            self.advance();
+            let right = self.parse_and_expression()?;
+            left = Expression::BinaryOp(Box::new(left), BinaryOp::Xor, Box::new(right));
         }
 
         Ok(left)
