@@ -161,12 +161,15 @@ MATCH (n:Person) WHERE n.city = "Kyoto" RETURN n.name AS name, n.city AS locatio
 
 ### UNION と ORDER BY
 
-`ORDER BY` は `UNION` の後（最後のクエリの後）に記述します。
+最後のクエリの後に書いた `ORDER BY` / `LIMIT` は、そのクエリ（最後の `RETURN`）にだけ効きます（Cypher の仕様）。結合した結果全体を並べ替えるには、`UNION` を `CALL { … }` で囲み、その外側で `ORDER BY` を書きます。
 
 ```cypher
-MATCH (n:Person) RETURN n.name AS name
-UNION
-MATCH (n:Company) RETURN n.name AS name
+CALL {
+  MATCH (n:Person) RETURN n.name AS name
+  UNION
+  MATCH (n:Company) RETURN n.name AS name
+}
+RETURN name
 ORDER BY name ASC
 LIMIT 20
 ```

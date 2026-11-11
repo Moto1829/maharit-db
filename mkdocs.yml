@@ -54,15 +54,15 @@ plugins:
             アーキテクチャ: Architecture
             Cypher クエリ言語: Cypher query language
             基本構文: Basic syntax
-            WHERE 句・フィルタリング: WHERE and filtering
-            FOREACH / サブクエリ: FOREACH and subqueries
+            WHERE 句・フィルタリング: WHERE clause and filtering
+            FOREACH / サブクエリ: FOREACH / subqueries
             パラメータ（$param 構文）: Parameters ($param syntax)
             関数リファレンス: Function reference
             文字列関数: String functions
             数学関数: Math functions
             リスト操作: List operations
             述語関数: Predicate functions
-            集計関数: Aggregation functions
+            集計関数: Aggregate functions
             全文検索関数: Full-text search functions
             テンポラル型関数: Temporal functions
             インデックス・制約: Indexes and constraints

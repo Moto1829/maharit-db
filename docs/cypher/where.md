@@ -129,12 +129,12 @@ RETURN n.name, n.email
 `WHERE` 句でパターンの存在確認ができます。
 
 ```cypher
-// フォロワーが存在するユーザー
+// 誰かをフォローしているユーザー
 MATCH (n:Person)
 WHERE (n)-[:FOLLOWS]->(:Person)
 RETURN n.name
 
-// 特定のラベルを持つノードと接続しているもの
+// 誰もブロックしていないユーザー
 MATCH (n:Person)
 WHERE NOT (n)-[:BLOCKED]->(:Person)
 RETURN n.name

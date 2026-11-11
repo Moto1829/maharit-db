@@ -22,7 +22,7 @@ FOREACH (name IN ["Alice", "Bob", "Charlie"] |
 ### パスのすべてのノードを更新
 
 ```cypher
-// パス上のすべてのノードにラベルを追加
+// パス上のすべてのノードにプロパティを設定
 MATCH p = (start:Person {name: "Alice"})-[:KNOWS*]->(target:Person)
 FOREACH (n IN nodes(p) |
   SET n.visited = true

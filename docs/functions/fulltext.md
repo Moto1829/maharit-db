@@ -195,9 +195,9 @@ score(q, d) = Σ IDF(qi) * (f(qi,d) * (k1+1)) / (f(qi,d) + k1 * (1 - b + b * |d|
 // インデックスの削除
 DROP FULLTEXT INDEX articleIndex
 
-// 全インデックスの一覧（プロパティインデックスを参照）
-SHOW INDEXES
 ```
+
+`SHOW INDEXES` はプロパティインデックスだけを表示し、全文検索インデックスは含みません。
 
 ## 実用的な例
 

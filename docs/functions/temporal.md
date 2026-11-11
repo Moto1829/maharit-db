@@ -76,7 +76,7 @@ RETURN date("2024-01-01") + duration("P1M")  // 2024-02-01
 RETURN datetime("2024-01-01T00:00:00Z") + duration("PT1H")
 
 // date - date → duration
-RETURN date("2024-01-10") - date("2024-01-01")  // P0Y0M9D
+RETURN date("2024-01-10") - date("2024-01-01")  // P9D
 
 // datetime - datetime → duration
 RETURN datetime("2024-01-02T00:00:00Z") - datetime("2024-01-01T00:00:00Z")
