@@ -444,6 +444,94 @@ pub enum AggregateFunction {
     CollectDistinct(Box<ReturnItem>),
 }
 
+/// 1 引数の数学関数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFunction {
+    Sin,
+    Cos,
+    Tan,
+    Cot,
+    Asin,
+    Acos,
+    Atan,
+    Exp,
+    Degrees,
+    Radians,
+}
+
+impl MathFunction {
+    pub fn name(self) -> &'static str {
+        match self {
+            MathFunction::Sin => "sin",
+            MathFunction::Cos => "cos",
+            MathFunction::Tan => "tan",
+            MathFunction::Cot => "cot",
+            MathFunction::Asin => "asin",
+            MathFunction::Acos => "acos",
+            MathFunction::Atan => "atan",
+            MathFunction::Exp => "exp",
+            MathFunction::Degrees => "degrees",
+            MathFunction::Radians => "radians",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "sin" => MathFunction::Sin,
+            "cos" => MathFunction::Cos,
+            "tan" => MathFunction::Tan,
+            "cot" => MathFunction::Cot,
+            "asin" => MathFunction::Asin,
+            "acos" => MathFunction::Acos,
+            "atan" => MathFunction::Atan,
+            "exp" => MathFunction::Exp,
+            "degrees" => MathFunction::Degrees,
+            "radians" => MathFunction::Radians,
+            _ => return None,
+        })
+    }
+
+    pub fn apply(self, x: f64) -> f64 {
+        match self {
+            MathFunction::Sin => x.sin(),
+            MathFunction::Cos => x.cos(),
+            MathFunction::Tan => x.tan(),
+            MathFunction::Cot => 1.0 / x.tan(),
+            MathFunction::Asin => x.asin(),
+            MathFunction::Acos => x.acos(),
+            MathFunction::Atan => x.atan(),
+            MathFunction::Exp => x.exp(),
+            MathFunction::Degrees => x.to_degrees(),
+            MathFunction::Radians => x.to_radians(),
+        }
+    }
+}
+
+/// 2 引数の数学関数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFunction2 {
+    /// pow(base, exponent)
+    Pow,
+    /// atan2(y, x)
+    Atan2,
+}
+
+impl MathFunction2 {
+    pub fn name(self) -> &'static str {
+        match self {
+            MathFunction2::Pow => "pow",
+            MathFunction2::Atan2 => "atan2",
+        }
+    }
+
+    pub fn apply(self, a: f64, b: f64) -> f64 {
+        match self {
+            MathFunction2::Pow => a.powf(b),
+            MathFunction2::Atan2 => a.atan2(b),
+        }
+    }
+}
+
 /// スカラー関数（パス操作用）
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarFunction {
@@ -503,6 +591,10 @@ pub enum ScalarFunction {
     Log10(Box<Expression>),
     /// sqrt(v) - 平方根
     Sqrt(Box<Expression>),
+    /// 1 引数の数学関数（三角関数・exp・角度変換）。結果は浮動小数点数
+    Math(MathFunction, Box<Expression>),
+    /// 2 引数の数学関数（pow / atan2）。結果は浮動小数点数
+    Math2(MathFunction2, Box<Expression>, Box<Expression>),
     /// e() - ネイピア数
     E,
     /// pi() - 円周率

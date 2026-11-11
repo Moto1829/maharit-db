@@ -15,12 +15,5 @@ docs/cypher/where.md: MATCH (n)
 docs/cypher/where.md: MATCH (p:Product)
 docs/functions/aggregation.md: MATCH (p:Product)
 docs/functions/list.md: MATCH (p:Person {name: "Alice"})
-docs/functions/math.md: MATCH (a:Location), (b:Location)
-docs/functions/math.md: RETURN asin(1.0)  // 結果: 1.5707963267948966 (π/2)
-docs/functions/math.md: RETURN atan2(1.0, 1.0)  // 結果: 0.7853981633974483
-docs/functions/math.md: RETURN exp(1)
-docs/functions/math.md: RETURN pow(2, 10)
-docs/functions/math.md: RETURN pow(3.0, 0.5)
-docs/functions/math.md: RETURN sin(0)    // 結果: 0.0
 docs/functions/predicates.md: MATCH (dept:Department {name: "Engineering"})
 docs/functions/string.md: MATCH (a:Article)

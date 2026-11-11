@@ -153,19 +153,33 @@ RETURN exp(1)
 
 ## 三角関数
 
+角度はラジアンで指定します。結果は浮動小数点数で、引数が `null` なら `null` を返します。
+
+| 関数 | 説明 |
+|---|---|
+| `sin(x)` / `cos(x)` / `tan(x)` / `cot(x)` | 正弦・余弦・正接・余接 |
+| `asin(x)` / `acos(x)` / `atan(x)` | 逆正弦・逆余弦・逆正接 |
+| `atan2(y, x)` | 点 (x, y) の偏角（-π〜π） |
+| `degrees(x)` / `radians(x)` | ラジアン → 度 / 度 → ラジアン |
+
 ```cypher
-// sin, cos, tan
-RETURN sin(0)    // 結果: 0.0
-RETURN cos(0)    // 結果: 1.0
-RETURN tan(0)    // 結果: 0.0
+RETURN sin(0), cos(0), tan(0)
+// 結果: 0.0, 1.0, 0.0
+```
 
-// asin, acos, atan
-RETURN asin(1.0)  // 結果: 1.5707963267948966 (π/2)
-RETURN acos(1.0)  // 結果: 0.0
-RETURN atan(1.0)  // 結果: 0.7853981633974483 (π/4)
+```cypher
+RETURN asin(1.0), acos(1.0), atan(1.0)
+// 結果: 1.5707963267948966 (π/2), 0.0, 0.7853981633974483 (π/4)
+```
 
-// atan2(y, x)
-RETURN atan2(1.0, 1.0)  // 結果: 0.7853981633974483
+```cypher
+RETURN atan2(1.0, 1.0)
+// 結果: 0.7853981633974483
+```
+
+```cypher
+RETURN degrees(pi()), radians(180)
+// 結果: 180.0, 3.141592653589793
 ```
 
 ## 定数

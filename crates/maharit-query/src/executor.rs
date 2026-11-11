@@ -3063,6 +3063,8 @@ impl<'a> Executor<'a> {
             ScalarFunction::Log(_) => "log".to_string(),
             ScalarFunction::Log10(_) => "log10".to_string(),
             ScalarFunction::Sqrt(_) => "sqrt".to_string(),
+            ScalarFunction::Math(f, _) => f.name().to_string(),
+            ScalarFunction::Math2(f, ..) => f.name().to_string(),
             ScalarFunction::E => "e".to_string(),
             ScalarFunction::Pi => "pi".to_string(),
             ScalarFunction::Id(_) => "id".to_string(),
@@ -4334,6 +4336,15 @@ impl<'a> Executor<'a> {
                 ScalarFunction::Log(e) => format!("log({})", Self::expression_to_display(e)),
                 ScalarFunction::Log10(e) => format!("log10({})", Self::expression_to_display(e)),
                 ScalarFunction::Sqrt(e) => format!("sqrt({})", Self::expression_to_display(e)),
+                ScalarFunction::Math(f, e) => {
+                    format!("{}({})", f.name(), Self::expression_to_display(e))
+                }
+                ScalarFunction::Math2(f, a, b) => format!(
+                    "{}({}, {})",
+                    f.name(),
+                    Self::expression_to_display(a),
+                    Self::expression_to_display(b)
+                ),
                 ScalarFunction::E => "e()".to_string(),
                 ScalarFunction::Pi => "pi()".to_string(),
                 ScalarFunction::Id(var) => format!("id({})", var),
@@ -4910,6 +4921,32 @@ impl<'a> Executor<'a> {
                     _ => Err(ExecuteError::TypeError(
                         "sqrt() requires a numeric value".to_string(),
                     )),
+                }
+            }
+            ScalarFunction::Math(f, expr) => match self.evaluate_expression(expr, bindings)? {
+                Value::Int(n) => Ok(Value::Float(f.apply(n as f64))),
+                Value::Float(n) => Ok(Value::Float(f.apply(n))),
+                Value::Null => Ok(Value::Null),
+                _ => Err(ExecuteError::TypeError(format!(
+                    "{}() requires a numeric value",
+                    f.name()
+                ))),
+            },
+            ScalarFunction::Math2(f, a, b) => {
+                let as_f64 = |v: Value| match v {
+                    Value::Int(n) => Ok(Some(n as f64)),
+                    Value::Float(n) => Ok(Some(n)),
+                    Value::Null => Ok(None),
+                    _ => Err(ExecuteError::TypeError(format!(
+                        "{}() requires numeric values",
+                        f.name()
+                    ))),
+                };
+                let a = as_f64(self.evaluate_expression(a, bindings)?)?;
+                let b = as_f64(self.evaluate_expression(b, bindings)?)?;
+                match (a, b) {
+                    (Some(a), Some(b)) => Ok(Value::Float(f.apply(a, b))),
+                    _ => Ok(Value::Null),
                 }
             }
             ScalarFunction::E => Ok(Value::Float(std::f64::consts::E)),
@@ -12425,6 +12462,43 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_math_functions() {
+        let mut graph = Graph::new();
+        let r = execute(
+            &mut graph,
+            "RETURN sin(0), cos(0), atan2(1.0, 1.0), exp(0), pow(2, 10), pow(4, 0.5), \
+             degrees(pi()), radians(180), pow(null, 2), sin(null)",
+        )
+        .unwrap();
+        let pi = std::f64::consts::PI;
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::Float(0.0),
+                Value::Float(1.0),
+                Value::Float(pi / 4.0),
+                Value::Float(1.0),
+                Value::Float(1024.0),
+                Value::Float(2.0),
+                Value::Float(180.0),
+                Value::Float(pi),
+                Value::Null,
+                Value::Null,
+            ]
+        );
+        // 式の中・WHERE でも使える
+        execute(&mut graph, "CREATE (:L {x: 0, y: 0}), (:L {x: 3, y: 4})").unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (a:L), (b:L) WHERE a.x = 0 AND b.x = 3 \
+             RETURN sqrt(pow(b.x - a.x, 2) + pow(b.y - a.y, 2)) AS d",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Float(5.0));
+        assert!(execute(&mut graph, "RETURN sin('x')").is_err());
     }
 
     #[test]

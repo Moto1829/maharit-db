@@ -1146,6 +1146,29 @@ impl Parser {
                 };
                 return Ok(ReturnItem::Function(scalar));
             }
+            // 数学関数: sin(x) など 1 引数 / pow(a, b)・atan2(y, x)
+            name if MathFunction::from_name(name).is_some() => {
+                let arg = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let f = MathFunction::from_name(name).expect("checked above");
+                return Ok(ReturnItem::Function(ScalarFunction::Math(f, Box::new(arg))));
+            }
+            "pow" | "atan2" => {
+                let arg1 = self.parse_expression()?;
+                self.expect(TokenKind::Comma)?;
+                let arg2 = self.parse_expression()?;
+                self.expect(TokenKind::RParen)?;
+                let f = if func_name.eq_ignore_ascii_case("pow") {
+                    MathFunction2::Pow
+                } else {
+                    MathFunction2::Atan2
+                };
+                return Ok(ReturnItem::Function(ScalarFunction::Math2(
+                    f,
+                    Box::new(arg1),
+                    Box::new(arg2),
+                )));
+            }
             // 2-3引数: substring(s, start, len?)
             "substring" => {
                 let arg1 = self.parse_expression()?;
@@ -1490,7 +1513,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, percentileCont, percentileDisc, stDev, stDevP, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, e, pi, id, elementId, type, startNode, endNode, labels, properties, keys, coalesce, nullIf, toBoolean, toFloat, toInteger, timestamp, randomUUID)".to_string(),
+                    expected: "function (COUNT, SUM, AVG, MIN, MAX, COLLECT, percentileCont, percentileDisc, stDev, stDevP, nodes, relationships, length, shortestPath, allShortestPaths, trim, ltrim, rtrim, toLower, toUpper, reverse, toString, size, left, right, substring, split, replace, abs, ceil, floor, round, sign, rand, isNaN, log, log10, sqrt, exp, pow, sin, cos, tan, cot, asin, acos, atan, atan2, degrees, radians, e, pi, id, elementId, type, startNode, endNode, labels, properties, keys, coalesce, nullIf, toBoolean, toFloat, toInteger, timestamp, randomUUID)".to_string(),
                     found: func_name.to_string(),
                     span: self.current_span(),
                 });
