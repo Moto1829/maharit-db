@@ -12484,6 +12484,43 @@ mod tests {
     }
 
     #[test]
+    fn test_pattern_comprehension() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob', age: 30}), \
+             (a)-[:KNOWS]->(:Person {name: 'Carol', age: 20})",
+        )
+        .unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (p:Person {name: 'Alice'}) \
+             RETURN [(p)-[:KNOWS]->(f) WHERE f.age > 25 | f.name] AS older, \
+                    size([(p)-[:KNOWS]->(f) | f]) AS n",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::List(vec![Value::String("Bob".into())]),
+                Value::Int(2)
+            ]
+        );
+        let r = execute(
+            &mut graph,
+            "MATCH (p:Person {name: 'Bob'}) RETURN [(p)-->(x) | x] AS l",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::List(vec![]));
+        // 括弧で始まる普通のリストはそのまま
+        let r = execute(&mut graph, "RETURN [(1 + 2), 3] AS l").unwrap();
+        assert_eq!(
+            r.rows[0].columns[0],
+            Value::List(vec![Value::Int(3), Value::Int(3)])
+        );
+    }
+
+    #[test]
     fn test_chained_comparison_and_skip_limit_expressions() {
         let mut graph = Graph::new();
         execute(&mut graph, "UNWIND range(1, 10) AS i CREATE (:P {n: i})").unwrap();

@@ -7,6 +7,4 @@ docs/cypher/unwind-with-union.md: MATCH (a:Article)
 docs/cypher/unwind-with-union.md: UNWIND [1, 2, 3] AS id
 docs/cypher/unwind-with-union.md: UNWIND [[1, 2], [3, 4], [5, 6]] AS sublist
 docs/functions/aggregation.md: MATCH (p:Product)
-docs/functions/list.md: MATCH (p:Person {name: "Alice"})
-docs/functions/predicates.md: MATCH (dept:Department {name: "Engineering"})
 docs/functions/string.md: MATCH (a:Article)

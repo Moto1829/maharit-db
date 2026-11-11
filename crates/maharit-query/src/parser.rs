@@ -3353,6 +3353,31 @@ impl Parser {
             (Some(TokenKind::Ident(_)), Some(TokenKind::In))
         );
 
+        // パターン内包 `[(a)-[:R]->(b) WHERE cond | expr]` は
+        // `COLLECT { MATCH (a)-[:R]->(b) WHERE cond RETURN expr }` と同じ
+        if self.check(TokenKind::LParen) {
+            let saved = self.pos;
+            if let Ok(Pattern::Path(path)) = self.parse_pattern()
+                && (self.check(TokenKind::Where) || self.check(TokenKind::Pipe))
+            {
+                let where_clause = if self.check(TokenKind::Where) {
+                    self.advance();
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                self.expect(TokenKind::Pipe)?;
+                let projection = self.parse_expression()?;
+                self.expect(TokenKind::RBracket)?;
+                return Ok(Expression::CollectSubquery(Box::new(CollectSubqueryBody {
+                    patterns: vec![Pattern::Path(path)],
+                    where_clause,
+                    return_item: ReturnItem::Expr(projection),
+                })));
+            }
+            self.pos = saved;
+        }
+
         if is_comprehension {
             let variable = self.expect_ident()?;
             self.advance(); // consume IN
