@@ -7,17 +7,22 @@
 人の注意に頼らず、ずれを検出して見えるようにする。
 
 ## 作業内容
-- [ ] `scripts/check_docs_i18n.py` を作成する
+- [x] `scripts/check_docs_i18n.py` を作成する
   - `docs/**/*.en.md` ごとに、front matter の `source_commit` と、対応する日本語ファイルの最新コミット（`git log -1 --format=%H -- <ja>`）を比べる
   - 日本語側に `source_commit` より新しいコミットがあれば「古い」と判定し（ただし同じコミットで `.en.md` も変更しているものは反映済みとして除く。日英を同時に直したコミットは自分のハッシュを `source_commit` に書けないため）、`git diff <source_commit>..HEAD -- <ja>` の変更行数を表示する
   - `source_commit` が無い・不正な場合はエラーにする
   - 英語版がない日本語ページの一覧（翻訳率）も出す
-- [ ] `.github/workflows/docs.yml`（PR でも動くようにする）または `test.yml` にジョブを追加する
+- [x] `.github/workflows/docs.yml`（PR でも動くようにする）または `test.yml` にジョブを追加する
   - 最初は **警告のみ**（`::warning file=...::`）で失敗させない。全ページ翻訳が揃ったら（タスク 140 の後）失敗扱いにするか判断する
   - `fetch-depth: 0` が必要
-- [ ] 古い英語ページには、ビルド時に「この翻訳は最新の日本語版より古い可能性があります」と表示する（mkdocs のフック `hooks:` で front matter を見て admonition を差し込む、または手動で付ける運用にするかを決める）
-- [ ] CLAUDE.md の「docs の英語版」節に、ローカルでの実行方法を追記する
+- [x] 古い英語ページには、ビルド時に「この翻訳は最新の日本語版より古い可能性があります」と表示する（mkdocs のフック `hooks:` で front matter を見て admonition を差し込む、または手動で付ける運用にするかを決める）
+- [x] CLAUDE.md の「docs の英語版」節に、ローカルでの実行方法を追記する
 
 ## 完了条件
 - 日本語ファイルだけを変えた PR で、CI に該当する英語ページの警告が出る
 - 翻訳率と古いページの一覧がワークフローのサマリーに出る
+
+## 結果（2026-11-12）
+- docs.yml にステップを追加（警告のみ、`fetch-depth: 0`）。古い英語ページの注意書きは mkdocs フック `overrides/hooks/i18n_freshness.py` で自動挿入
+- 初回実行で `indexes/index.en.md` の追従漏れ（task149 の追記）を検出し、同じコミットで訳した
+- 失敗扱いへの切り替えは task140（全ページ翻訳）の後に判断

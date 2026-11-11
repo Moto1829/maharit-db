@@ -54,9 +54,10 @@ Linux 専用コード（`cfg(target_os = "linux")`）は macOS の clippy では
 
 - 日本語 `docs/foo.md` が正本。英語は同じフォルダの `docs/foo.en.md`（mkdocs-static-i18n の suffix 構成）。サイトは日本語が `/`、英語が `/en/`。英語版が無いページは英語サイトでも日本語版が表示される。README は `README.md`（英語）/ `README.ja.md`（日本語）。
 - 訳語・書式は `docs/_i18n/GLOSSARY.md` に従う（サイトには出ない）。英語ファイルの先頭に `source_commit: <翻訳元の日本語ファイルの最新コミット>` を書く。
-- 日本語ページを変更したら、対応する `.en.md` も同じコミットで直す（日英を同じコミットで直した場合、そのコミットは反映済みとみなすので `source_commit` は変えなくてよい。英語だけを後から追従させるときは `source_commit` をその時点の日本語の最新コミットに上げる）。その場で訳せないときは `.en.md` の冒頭に `!!! warning "This translation may be outdated"` を付ける。
+- 日本語ページを変更したら、対応する `.en.md` も同じコミットで直す（日英を同じコミットで直した場合、そのコミットは反映済みとみなすので `source_commit` は変えなくてよい。英語だけを後から追従させるときは `source_commit` をその時点の日本語の最新コミットに上げる）。訳せずに残した古い英語ページには、ビルド時にフック（`overrides/hooks/i18n_freshness.py`）が `!!! warning "This translation may be outdated"` を自動で付ける（手で付けなくてよい）。
 - `.en.md` の ```cypher ブロックはコメント（`//`・`/* */`）以外を日本語版と完全に一致させる（`docs_cypher_examples` テストが検査。known-failures は日本語ファイル名のキーで共有）。
 - `mkdocs.yml` の nav に見出しを追加・変更したら、`plugins.i18n` の `nav_translations` も更新する。
+- 翻訳の鮮度: `python3 scripts/check_docs_i18n.py`（翻訳率と、日本語だけ更新された英語ページの一覧。`source_commit` が無い・不正なら失敗、`--strict` で古いページも失敗）。CI では `docs.yml` が警告とジョブサマリーを出す（要 `fetch-depth: 0`）。
 - ローカル確認: `python3 -m venv .venv-docs && .venv-docs/bin/pip install -r requirements-docs.txt && .venv-docs/bin/mkdocs build --strict`（CI と同じ。PR でも `docs.yml` が `--strict` ビルドする）。
 
 ### E2E テスト（Python スクリプト）

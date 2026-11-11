@@ -11,6 +11,7 @@ on:
       - 'overrides/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - 'scripts/check_docs_i18n.py'
       - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - 'overrides/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - 'scripts/check_docs_i18n.py'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -34,6 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 翻訳の鮮度チェックと「古い翻訳」の注意書きに git の履歴が要る
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -43,6 +48,11 @@ jobs:
 
       - name: Install MkDocs (pinned)
         run: pip install -r requirements-docs.txt
+
+      - name: Check translation freshness
+        # 日本語だけが更新された英語ページを警告する（まだ失敗にはしない。
+        # source_commit が無い・不正なときだけ失敗）。結果はジョブのサマリーに出る。
+        run: python3 scripts/check_docs_i18n.py --github
 
       - name: Build MkDocs (ja + en)
         # --strict: 壊れたリンクや設定の誤りを警告ではなく失敗にする

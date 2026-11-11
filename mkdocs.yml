@@ -27,6 +27,9 @@ theme:
 # 英語版: mkdocs-static-i18n の suffix 構成。foo.md（日本語・正本）の隣に foo.en.md を置く。
 # 日本語は従来どおり /、英語は /en/ に出力。英語版が無いページは日本語版を表示する。
 # nav の見出しを追加・変更したら nav_translations も更新すること。
+hooks:
+  - overrides/hooks/i18n_freshness.py
+
 plugins:
   - search:
       lang: [ja, en]
