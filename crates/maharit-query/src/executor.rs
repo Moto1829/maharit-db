@@ -4780,7 +4780,10 @@ impl<'a> Executor<'a> {
             ScalarFunction::Abs(expr) => {
                 let val = self.evaluate_expression(expr, bindings)?;
                 match val {
-                    Value::Int(n) => Ok(Value::Int(n.abs())),
+                    Value::Int(n) => n
+                        .checked_abs()
+                        .map(Value::Int)
+                        .ok_or_else(|| ExecuteError::TypeError("integer overflow".to_string())),
                     Value::Float(n) => Ok(Value::Float(n.abs())),
                     Value::Null => Ok(Value::Null),
                     _ => Err(ExecuteError::TypeError(
@@ -6477,7 +6480,7 @@ impl<'a> Executor<'a> {
                     }
                     _ => {}
                 }
-                self.arithmetic_op(left, right, |a, b| a + b, |a, b| a + b)
+                self.arithmetic_op(left, right, i64::checked_add, |a, b| a + b)
             }
             BinaryOp::Sub => {
                 // テンポラル演算: Date - Date = Duration, DateTime - DateTime = Duration
@@ -6531,10 +6534,15 @@ impl<'a> Executor<'a> {
                     }
                     _ => {}
                 }
-                self.arithmetic_op(left, right, |a, b| a - b, |a, b| a - b)
+                self.arithmetic_op(left, right, i64::checked_sub, |a, b| a - b)
             }
-            BinaryOp::Mul => self.arithmetic_op(left, right, |a, b| a * b, |a, b| a * b),
-            BinaryOp::Div => self.arithmetic_op(left, right, |a, b| a / b, |a, b| a / b),
+            BinaryOp::Mul => self.arithmetic_op(left, right, i64::checked_mul, |a, b| a * b),
+            BinaryOp::Div => {
+                if matches!(right, Value::Int(0)) && matches!(left, Value::Int(_)) {
+                    return Err(ExecuteError::TypeError("division by zero".to_string()));
+                }
+                self.arithmetic_op(left, right, i64::checked_div, |a, b| a / b)
+            }
             BinaryOp::Regex => match (left, right) {
                 (Value::String(s), Value::String(pattern)) => {
                     // Cypher =~ is full-match, so anchor the pattern
@@ -6643,11 +6651,15 @@ impl<'a> Executor<'a> {
         float_op: G,
     ) -> Result<Value, ExecuteError>
     where
-        F: Fn(i64, i64) -> i64,
+        F: Fn(i64, i64) -> Option<i64>,
         G: Fn(f64, f64) -> f64,
     {
         match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(*a, *b))),
+            // 整数演算は checked: オーバーフローや 0 除算で panic させない
+            // （リリースビルドは panic=abort なので、サーバー全体が落ちる）
+            (Value::Int(a), Value::Int(b)) => int_op(*a, *b)
+                .map(Value::Int)
+                .ok_or_else(|| ExecuteError::TypeError("integer overflow".to_string())),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(*a, *b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(*a as f64, *b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(*a, *b as f64))),
@@ -6664,7 +6676,10 @@ impl<'a> Executor<'a> {
                 _ => Err(ExecuteError::TypeError("NOT requires boolean".to_string())),
             },
             UnaryOp::Neg => match val {
-                Value::Int(n) => Ok(Value::Int(-n)),
+                Value::Int(n) => n
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| ExecuteError::TypeError("integer overflow".to_string())),
                 Value::Float(n) => Ok(Value::Float(-n)),
                 _ => Err(ExecuteError::TypeError(
                     "negation requires number".to_string(),
@@ -12361,6 +12376,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.row_count(), 0);
+    }
+
+    #[test]
+    fn test_integer_division_by_zero_and_overflow_are_errors() {
+        // bug/161: 0 除算・オーバーフローで panic していた（panic=abort でサーバーごと落ちる）
+        let mut graph = Graph::new();
+        for q in [
+            "RETURN 1 / 0",
+            "RETURN 9223372036854775807 + 1",
+            "RETURN -9223372036854775807 - 2",
+            "RETURN 4611686018427387904 * 2",
+            "RETURN (-9223372036854775807 - 1) / -1",
+            "RETURN -(-9223372036854775807 - 1)",
+            "RETURN abs(-9223372036854775807 - 1)",
+            "UNWIND [0] AS z RETURN 10 / z",
+        ] {
+            let err = execute(&mut graph, q).unwrap_err().to_string();
+            assert!(
+                err.contains("division by zero") || err.contains("integer overflow"),
+                "{q}: {err}"
+            );
+        }
+        // 浮動小数点の 0 除算は Infinity
+        let r = execute(&mut graph, "RETURN 1.0 / 0 AS x").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Float(f64::INFINITY));
+        let r = execute(
+            &mut graph,
+            "RETURN 7 / 2 AS x, 9223372036854775806 + 1 AS y",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(3), Value::Int(i64::MAX)]);
     }
 
     #[test]
