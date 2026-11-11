@@ -672,6 +672,8 @@ pub enum Expression {
     Literal(Literal),
     Variable(String),
     Property(String, String), // variable.property
+    /// ラベル述語 `n:Label1:Label2`（すべて持てば true）
+    HasLabels(String, Vec<String>),
     BinaryOp(Box<Expression>, BinaryOp, Box<Expression>),
     UnaryOp(UnaryOp, Box<Expression>),
     /// CASE式

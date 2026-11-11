@@ -678,11 +678,26 @@ impl Parser {
         self.expect(TokenKind::Set)?;
 
         let mut items = Vec::new();
-        items.push(self.parse_set_item()?);
-
-        while self.check(TokenKind::Comma) {
+        loop {
+            let item = self.parse_set_item()?;
+            // `SET n:A:B` は AddLabel を 2 つに分ける
+            if let SetItem::AddLabel(var, _) = &item {
+                let var = var.clone();
+                items.push(item);
+                while self.check(TokenKind::Colon) {
+                    self.advance();
+                    items.push(SetItem::AddLabel(
+                        var.clone(),
+                        self.expect_ident_or_keyword()?,
+                    ));
+                }
+            } else {
+                items.push(item);
+            }
+            if !self.check(TokenKind::Comma) {
+                break;
+            }
             self.advance();
-            items.push(self.parse_set_item()?);
         }
 
         Ok(SetClause { items })
@@ -965,6 +980,7 @@ impl Parser {
                     | TokenKind::Star
                     | TokenKind::Slash
                     | TokenKind::Percent
+                    | TokenKind::Colon
                     | TokenKind::Eq
                     | TokenKind::Neq
                     | TokenKind::Lt
@@ -1559,11 +1575,26 @@ impl Parser {
         self.expect(TokenKind::Remove)?;
 
         let mut items = Vec::new();
-        items.push(self.parse_remove_item()?);
-
-        while self.check(TokenKind::Comma) {
+        loop {
+            let item = self.parse_remove_item()?;
+            // `REMOVE n:A:B` は Label を 2 つに分ける
+            if let RemoveItem::Label(var, _) = &item {
+                let var = var.clone();
+                items.push(item);
+                while self.check(TokenKind::Colon) {
+                    self.advance();
+                    items.push(RemoveItem::Label(
+                        var.clone(),
+                        self.expect_ident_or_keyword()?,
+                    ));
+                }
+            } else {
+                items.push(item);
+            }
+            if !self.check(TokenKind::Comma) {
+                break;
+            }
             self.advance();
-            items.push(self.parse_remove_item()?);
         }
 
         Ok(RemoveClause { items })
@@ -3240,6 +3271,15 @@ impl Parser {
                         }
                         _ => {}
                     }
+                }
+                // ラベル述語: `n:Person`、`n:Person:Admin`
+                if self.check(TokenKind::Colon) && self.next_is_ident_or_keyword() {
+                    let mut labels = Vec::new();
+                    while self.check(TokenKind::Colon) {
+                        self.advance();
+                        labels.push(self.expect_ident_or_keyword()?);
+                    }
+                    return Ok(Expression::HasLabels(var, labels));
                 }
                 match self.try_consume_dot_property()? {
                     Some(prop) => Ok(Expression::Property(var, prop)),

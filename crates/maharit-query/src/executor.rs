@@ -6272,6 +6272,25 @@ impl<'a> Executor<'a> {
                 }
                 Ok(Value::List(output))
             }
+            Expression::HasLabels(var, labels) => match bindings.get(var.as_str()) {
+                Some(BindingValue::Node(id)) => Ok(Value::Bool(
+                    self.graph_ref().node_has_all_labels(*id, labels),
+                )),
+                // `r:KNOWS`: リレーションシップは型が一致するか
+                Some(BindingValue::Edge(id)) => Ok(Value::Bool(
+                    labels.len() == 1
+                        && self
+                            .graph_ref()
+                            .get_edge(*id)
+                            .is_some_and(|e| e.label == labels[0]),
+                )),
+                Some(BindingValue::Scalar(Value::Null)) => Ok(Value::Null),
+                Some(_) => Err(ExecuteError::TypeError(format!(
+                    "{var}:{} requires a node or relationship",
+                    labels.join(":")
+                ))),
+                None => Err(ExecuteError::UndefinedVariable(var.clone())),
+            },
             Expression::Parameter(name) => self
                 .params
                 .get(name)
@@ -12461,6 +12480,44 @@ mod tests {
                 .unwrap()
                 .parse()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_label_predicates_and_multiple_labels() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (:Person {name: 'A'})-[:KNOWS]->(:Company {name: 'B'}), (:Draft:Review {name: 'D'})",
+        )
+        .unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (n) WHERE n:Person OR n:Company RETURN n.name",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 2);
+        let r = execute(&mut graph, "MATCH (n) WHERE n:Draft:Review RETURN n.name").unwrap();
+        assert_eq!(r.row_count(), 1);
+        execute(&mut graph, "MATCH (n {name: 'A'}) SET n:Admin:Moderator").unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH (n {name: 'A'}) RETURN labels(n), n:Admin AS a",
+        )
+        .unwrap();
+        let labels =
+            |v: &[&str]| Value::List(v.iter().map(|l| Value::String(l.to_string())).collect());
+        assert_eq!(
+            r.rows[0].columns,
+            vec![labels(&["Person", "Admin", "Moderator"]), Value::Bool(true)]
+        );
+        execute(&mut graph, "MATCH (n) WHERE n:Draft REMOVE n:Draft:Review").unwrap();
+        let r = execute(&mut graph, "MATCH (n {name: 'D'}) RETURN labels(n)").unwrap();
+        assert_eq!(r.rows[0].columns[0], labels(&[]));
+        let r = execute(&mut graph, "MATCH ()-[r]->() RETURN r:KNOWS, r:OTHER").unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![Value::Bool(true), Value::Bool(false)]
         );
     }
 
