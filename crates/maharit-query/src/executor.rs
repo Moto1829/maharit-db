@@ -1551,6 +1551,10 @@ impl<'a> Executor<'a> {
                     for (key, prop_val) in edge_props {
                         self.graph_mut().set_edge_property(edge_id, &key, prop_val);
                     }
+                    // MERGE の ON CREATE SET / RETURN から `r` を参照できるように束縛する
+                    if let Some(var) = &segment.edge.variable {
+                        bindings.insert(Arc::from(var.as_str()), BindingValue::Edge(edge_id));
+                    }
 
                     current_id = end_id;
                 }
@@ -12488,6 +12492,22 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_merge_relationship_binds_variable_on_create() {
+        // bug/165: ON CREATE SET r.x で `undefined variable: r` になり、作成だけが残っていた
+        let mut graph = Graph::new();
+        execute(&mut graph, "CREATE (:P {name: 'A'}), (:P {name: 'B'})").unwrap();
+        let q = "MATCH (a:P {name: 'A'}), (b:P {name: 'B'}) \
+                 MERGE (a)-[r:KNOWS]->(b) \
+                 ON CREATE SET r.since = 2024 ON MATCH SET r.seen = 2025 \
+                 RETURN r.since, r.seen";
+        let r = execute(&mut graph, q).unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(2024), Value::Null]);
+        let r = execute(&mut graph, q).unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(2024), Value::Int(2025)]);
+        assert_eq!(graph.edge_count(), 1);
     }
 
     #[test]
