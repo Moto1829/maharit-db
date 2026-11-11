@@ -21,7 +21,7 @@ nav_order: 2
 ## render — グラフ全体の表示
 
 ```rust
-use maharit_viz::ascii::AsciiRenderer;
+use maharit_viz::AsciiRenderer;
 use maharit_core::Graph;
 
 fn main() {
@@ -62,7 +62,7 @@ Graph: 3 nodes, 3 edges
 `max_depth` でどこまで展開するかを制御できます。
 
 ```rust
-use maharit_viz::ascii::AsciiRenderer;
+use maharit_viz::AsciiRenderer;
 use maharit_core::Graph;
 
 fn main() {
@@ -125,7 +125,7 @@ print!("{}", output);
 指定したルートノードから BFS で探索し、ルートからの距離（ホップ数）ごとにレイヤーを分けて表示します。
 
 ```rust
-use maharit_viz::ascii::AsciiRenderer;
+use maharit_viz::AsciiRenderer;
 use maharit_core::Graph;
 
 fn main() {

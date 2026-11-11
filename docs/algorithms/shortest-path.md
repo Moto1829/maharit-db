@@ -6,122 +6,83 @@ nav_order: 1
 
 # 最短経路
 
-MaharitDB は BFS（幅優先探索）による重みなし最短経路と、Dijkstra 法による重み付き最短経路の両方をサポートしています。
+ホップ数が最小の経路は Cypher の `shortestPath` / `allShortestPaths` で、リレーションシップのプロパティを重みにした最短経路は Rust API（`maharit-core` の `Dijkstra` / `AStar`）で求めます。
 
-## BFS による最短経路
+## Cypher: shortestPath / allShortestPaths
 
-重みを考慮しない（ホップ数最小の）経路を返します。
-
-### Cypher での使用
+幅優先探索（BFS）で、ホップ数が最小の経路を返します。
 
 ```cypher
-// 最短経路を取得
+// 最短経路を 1 つ
 MATCH p = shortestPath((a:Person {name: "Alice"})-[:KNOWS*]-(b:Person {name: "Charlie"}))
-RETURN p, length(p) AS hops
+RETURN [n IN nodes(p) | n.name] AS names, length(p) AS hops
 ```
 
-### 複数の最短経路
-
 ```cypher
-// すべての最短経路を取得
+// ホップ数が最小の経路をすべて
 MATCH p = allShortestPaths((a:Person {name: "Alice"})-[:KNOWS*]-(b:Person {name: "Charlie"}))
-RETURN p
+RETURN [n IN nodes(p) | n.name] AS names
 ```
-
-### 方向の指定
 
 ```cypher
-// 有向グラフでの最短経路
-MATCH p = shortestPath((a:City {name: "Tokyo"})-[:ROAD*]->(b:City {name: "Osaka"}))
-RETURN p, length(p) AS hops
-
-// 無向グラフとして扱う（どちらの方向でも可）
-MATCH p = shortestPath((a:Person)-[:KNOWS*]-(b:Person))
-WHERE a.name = "Alice" AND b.name = "Eve"
-RETURN p
+// 向きを指定し、最大 5 ホップまで
+MATCH p = shortestPath((a:City {name: "Tokyo"})-[:ROAD*..5]->(b:City {name: "Osaka"}))
+RETURN [c IN nodes(p) | c.name] AS cities, length(p) AS hops
 ```
 
-## Dijkstra 法による重み付き最短経路
+- `-[:KNOWS*]-` は向きを問わず、`-[:ROAD*]->` は矢印の向きだけを辿ります
+- 最小のホップ数は 0 または 1 にしてください（`*2..` のような下限は使えません）
+- 経路が無ければ行を返しません
 
-エッジのプロパティを重みとして使用します。
+## Rust API: 重み付き最短経路（Dijkstra）
 
-### CALL db.shortestPath.dijkstra()
-
-```cypher
-CALL db.shortestPath.dijkstra(
-  "Alice",        // 始点ノードの名前または ID
-  "Osaka",        // 終点ノードの名前または ID
-  "ROAD",         // エッジタイプ
-  "distance"      // 重みプロパティ名
-)
-YIELD path, total_weight
-RETURN path, total_weight
-```
-
-### 経路の情報を取得
-
-```cypher
-MATCH p = shortestPath((a:City {name: "Tokyo"})-[:ROAD*]->(b:City {name: "Fukuoka"}))
-RETURN
-  [city IN nodes(p) | city.name] AS cities,
-  length(p) AS hops,
-  reduce(total = 0, r IN relationships(p) | total + r.distance) AS total_distance
-```
-
-## Rust API での使用
+リレーションシップのプロパティ（例: `distance`）を重みにした最短経路は、Cypher では求められません。Rust API の `Dijkstra` を使います。重みは 0 以上である必要があります（負の重みには対応していません）。
 
 ```rust
-use maharit_core::{Graph, traversal};
+use maharit_core::{Dijkstra, Graph, NodeId};
+
+fn city(graph: &mut Graph, name: &str) -> NodeId {
+    let id = graph.create_node("City");
+    graph.get_node_mut(id).unwrap().set_property("name", name);
+    id
+}
+
+fn road(graph: &mut Graph, from: NodeId, to: NodeId, km: f64) {
+    let id = graph.create_edge(from, to, "ROAD").unwrap();
+    graph.get_edge_mut(id).unwrap().set_property("distance", km);
+}
 
 fn main() {
     let mut graph = Graph::new();
+    let tokyo = city(&mut graph, "Tokyo");
+    let nagoya = city(&mut graph, "Nagoya");
+    let osaka = city(&mut graph, "Osaka");
+    road(&mut graph, tokyo, nagoya, 350.0);
+    road(&mut graph, nagoya, osaka, 190.0);
+    road(&mut graph, tokyo, osaka, 600.0);
 
-    // ノードを追加
-    let tokyo = graph.add_node("City", [("name", "Tokyo")]);
-    let nagoya = graph.add_node("City", [("name", "Nagoya")]);
-    let osaka = graph.add_node("City", [("name", "Osaka")]);
+    // ホップ数が最小の経路（BFS）: Tokyo → Osaka
+    let path = maharit_core::shortest_path(&graph, tokyo, osaka).unwrap();
+    println!("hops: {}", path.len() - 1); // 1
 
-    // エッジを追加（距離付き）
-    graph.add_edge(tokyo, nagoya, "ROAD", [("distance", 350.0)]);
-    graph.add_edge(nagoya, osaka, "ROAD", [("distance", 190.0)]);
-    graph.add_edge(tokyo, osaka, "ROAD", [("distance", 500.0)]);
+    // distance の合計が最小の経路: Tokyo → Nagoya → Osaka（540）
+    let dijkstra = Dijkstra::with_weight_property(&graph, "distance");
+    let best = dijkstra.find_path(tokyo, osaka).unwrap();
+    println!("nodes: {:?}, total: {}", best.nodes, best.total_weight);
 
-    // BFS 最短経路
-    if let Some(path) = traversal::shortest_path(&graph, tokyo, osaka) {
-        println!("Shortest path: {:?}", path);
-        println!("Hops: {}", path.len() - 1);
-    }
-
-    // Dijkstra 最短経路
-    if let Some((path, cost)) = traversal::dijkstra(&graph, tokyo, osaka, "distance") {
-        println!("Optimal path: {:?}", path);
-        println!("Total distance: {}", cost);
-    }
+    // 1 つの始点から全ノードへの距離
+    let distances = dijkstra.distances_from(tokyo);
+    println!("{:?}", distances.get(&osaka)); // Some(540.0)
 }
 ```
 
-## ホップ数の制限
+- `Dijkstra::new(&graph)` はすべての重みを 1 として扱います。重みのプロパティが無いリレーションシップも 1 になります
+- `Dijkstra::with_weight_fn(&graph, |edge| …)` で重みを計算する関数を渡せます
+- 目的地までの距離の見積もり（ヒューリスティック）がある場合は `AStar::new(&graph, |from, to| …)` を使うと、探索するノードが減ります
+- 結果の `WeightedPath` は `nodes`（ノード ID の列）・`edges`（リレーションシップ ID の列）・`total_weight` を持ちます
 
-```cypher
-// 最大 5 ホップ以内の最短経路
-MATCH p = shortestPath((a:Person {name: "Alice"})-[:KNOWS*..5]-(b:Person {name: "Bob"}))
-RETURN p, length(p) AS hops
-```
+## 性能の目安
 
-## 経路の条件付き検索
-
-```cypher
-// 特定の条件を満たすノードを通る最短経路
-MATCH p = shortestPath(
-  (a:City {name: "Tokyo"})-[:ROAD*]->(b:City {name: "Osaka"})
-)
-WHERE all(city IN nodes(p) WHERE city.accessible = true)
-RETURN p
-```
-
-## パフォーマンスの考慮事項
-
-- BFS は重みなしグラフでは最も効率的です
-- Dijkstra は重み付きグラフに適していますが、負の重みには対応していません（Bellman-Ford を使用してください）
-- ホップ数の制限（`*..N`）を設定することで処理時間を制限できます
-- 大規模グラフでの長い経路探索には時間がかかる場合があります
+- 重みの無い最短経路は BFS で、辿るリレーションシップの数に比例した時間で求まります
+- 可変長パターンのホップ数に上限（`*..N`）を付けると、探索の範囲を抑えられます
+- `allShortestPaths` は最短経路が多いグラフでは結果が大きくなります

@@ -6,7 +6,7 @@ nav_order: 5
 
 # サイクル検出
 
-MaharitDB はグラフ内のサイクル（閉路）を検出するための 3 つの関数を提供しています。依存関係グラフの検証や有向非巡回グラフ（DAG）の確認、トポロジカル順序の取得などに活用できます。
+MaharitDB はグラフ内のサイクル（閉路）を検出するための 3 つの関数を提供しています。依存関係グラフの検証や有向非巡回グラフ（DAG）の確認、トポロジカル順序の取得などに活用できます。`maharit-core` の Rust API で、リレーションシップの向きに沿って判定します。
 
 ## 概要
 
@@ -34,23 +34,29 @@ pub fn has_cycle(graph: &Graph) -> bool
 ### Rust での使用例
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, NodeId, algorithms};
+
+fn node(graph: &mut Graph, label: &str, name: &str) -> NodeId {
+    let id = graph.create_node(label);
+    graph.get_node_mut(id).unwrap().set_property("name", name);
+    id
+}
 
 fn main() {
     let mut graph = Graph::new();
 
-    let a = graph.add_node("Task", [("name", "A")]);
-    let b = graph.add_node("Task", [("name", "B")]);
-    let c = graph.add_node("Task", [("name", "C")]);
+    let a = node(&mut graph, "Task", "A");
+    let b = node(&mut graph, "Task", "B");
+    let c = node(&mut graph, "Task", "C");
 
     // A -> B -> C（サイクルなし）
-    graph.add_edge(a, b, "DEPENDS_ON", []);
-    graph.add_edge(b, c, "DEPENDS_ON", []);
+    graph.create_edge(a, b, "DEPENDS_ON").unwrap();
+    graph.create_edge(b, c, "DEPENDS_ON").unwrap();
 
     println!("DAG: {}", !algorithms::has_cycle(&graph)); // DAG: true
 
     // C -> A を追加してサイクルを作る
-    graph.add_edge(c, a, "DEPENDS_ON", []);
+    graph.create_edge(c, a, "DEPENDS_ON").unwrap();
 
     println!("DAG: {}", !algorithms::has_cycle(&graph)); // DAG: false
 }
@@ -77,22 +83,35 @@ pub fn find_cycles(graph: &Graph) -> Vec<Vec<NodeId>>
 ### Rust での使用例
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, NodeId, PropertyValue, algorithms};
+
+fn node(graph: &mut Graph, label: &str, name: &str) -> NodeId {
+    let id = graph.create_node(label);
+    graph.get_node_mut(id).unwrap().set_property("name", name);
+    id
+}
+
+fn name(graph: &Graph, id: NodeId) -> String {
+    match graph.get_node(id).and_then(|n| n.get_property("name")) {
+        Some(PropertyValue::String(s)) => s.clone(),
+        _ => id.to_string(),
+    }
+}
 
 fn main() {
     let mut graph = Graph::new();
 
-    let pkg_a = graph.add_node("Package", [("name", "pkg-a")]);
-    let pkg_b = graph.add_node("Package", [("name", "pkg-b")]);
-    let pkg_c = graph.add_node("Package", [("name", "pkg-c")]);
-    let pkg_d = graph.add_node("Package", [("name", "pkg-d")]);
+    let pkg_a = node(&mut graph, "Package", "pkg-a");
+    let pkg_b = node(&mut graph, "Package", "pkg-b");
+    let pkg_c = node(&mut graph, "Package", "pkg-c");
+    let pkg_d = node(&mut graph, "Package", "pkg-d");
 
     // pkg-a -> pkg-b -> pkg-c -> pkg-b（循環依存）
-    graph.add_edge(pkg_a, pkg_b, "REQUIRES", []);
-    graph.add_edge(pkg_b, pkg_c, "REQUIRES", []);
-    graph.add_edge(pkg_c, pkg_b, "REQUIRES", []);
+    graph.create_edge(pkg_a, pkg_b, "REQUIRES").unwrap();
+    graph.create_edge(pkg_b, pkg_c, "REQUIRES").unwrap();
+    graph.create_edge(pkg_c, pkg_b, "REQUIRES").unwrap();
     // pkg-a -> pkg-d（正常な依存）
-    graph.add_edge(pkg_a, pkg_d, "REQUIRES", []);
+    graph.create_edge(pkg_a, pkg_d, "REQUIRES").unwrap();
 
     let cycles = algorithms::find_cycles(&graph);
 
@@ -104,11 +123,7 @@ fn main() {
             let names: Vec<String> = cycle
                 .iter()
                 .map(|&node_id| {
-                    graph
-                        .get_node(node_id)
-                        .unwrap()
-                        .property("name")
-                        .to_string()
+                    name(&graph, node_id)
                 })
                 .collect();
             println!("  サイクル {}: {}", i + 1, names.join(" -> "));
@@ -134,39 +149,48 @@ pub fn topological_sort(graph: &Graph) -> Option<Vec<NodeId>>
 
 ### 返り値の意味
 
-- `Some(Vec<NodeId>)`: グラフにサイクルがなく、トポロジカル順序でノード ID を並べたリストを返します。依存先が依存元より先に来る順序です。
+- `Some(Vec<NodeId>)`: グラフにサイクルがなく、トポロジカル順序でノード ID を並べたリストを返します。各リレーションシップの始点が終点より先に来る順序です。
 - `None`: グラフにサイクルが存在するため、トポロジカル順序を定義できません。
 
 ### Rust での使用例
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, NodeId, PropertyValue, algorithms};
+
+fn node(graph: &mut Graph, label: &str, name: &str) -> NodeId {
+    let id = graph.create_node(label);
+    graph.get_node_mut(id).unwrap().set_property("name", name);
+    id
+}
+
+fn name(graph: &Graph, id: NodeId) -> String {
+    match graph.get_node(id).and_then(|n| n.get_property("name")) {
+        Some(PropertyValue::String(s)) => s.clone(),
+        _ => id.to_string(),
+    }
+}
 
 fn main() {
     let mut graph = Graph::new();
 
     // ビルドタスクの依存グラフ
-    let install_deps = graph.add_node("Task", [("name", "install_deps")]);
-    let compile     = graph.add_node("Task", [("name", "compile")]);
-    let test        = graph.add_node("Task", [("name", "test")]);
-    let package     = graph.add_node("Task", [("name", "package")]);
-    let deploy      = graph.add_node("Task", [("name", "deploy")]);
+    let install_deps = node(&mut graph, "Task", "install_deps");
+    let compile     = node(&mut graph, "Task", "compile");
+    let test        = node(&mut graph, "Task", "test");
+    let package     = node(&mut graph, "Task", "package");
+    let deploy      = node(&mut graph, "Task", "deploy");
 
-    graph.add_edge(install_deps, compile, "BEFORE", []);
-    graph.add_edge(compile,      test,    "BEFORE", []);
-    graph.add_edge(test,         package, "BEFORE", []);
-    graph.add_edge(package,      deploy,  "BEFORE", []);
+    graph.create_edge(install_deps, compile, "BEFORE").unwrap();
+    graph.create_edge(compile, test, "BEFORE").unwrap();
+    graph.create_edge(test, package, "BEFORE").unwrap();
+    graph.create_edge(package, deploy, "BEFORE").unwrap();
 
     match algorithms::topological_sort(&graph) {
         Some(order) => {
             let names: Vec<String> = order
                 .iter()
                 .map(|&node_id| {
-                    graph
-                        .get_node(node_id)
-                        .unwrap()
-                        .property("name")
-                        .to_string()
+                    name(&graph, node_id)
                 })
                 .collect();
             println!("実行順序: {}", names.join(" -> "));
@@ -188,7 +212,7 @@ fn main() {
 
 ```rust
 // サイクルを追加
-graph.add_edge(deploy, compile, "BEFORE", []);
+graph.create_edge(deploy, compile, "BEFORE").unwrap();
 
 match algorithms::topological_sort(&graph) {
     Some(_) => println!("DAGです"),
@@ -201,7 +225,7 @@ match algorithms::topological_sort(&graph) {
 ### パッケージ依存解決
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, NodeId, algorithms};
 
 fn resolve_install_order(graph: &Graph) -> Result<Vec<NodeId>, String> {
     algorithms::topological_sort(graph)
@@ -212,9 +236,9 @@ fn resolve_install_order(graph: &Graph) -> Result<Vec<NodeId>, String> {
 ### タスク依存グラフの検証
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, NodeId, algorithms};
 
-fn validate_pipeline(graph: &Graph) -> Result<(), Vec<Vec<u64>>> {
+fn validate_pipeline(graph: &Graph) -> Result<(), Vec<Vec<NodeId>>> {
     let cycles = algorithms::find_cycles(graph);
     if cycles.is_empty() {
         Ok(())

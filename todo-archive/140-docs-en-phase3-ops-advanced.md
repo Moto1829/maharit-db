@@ -6,8 +6,8 @@
 - [x] `operations/`: server-config / tls / auth / acl / metrics / tracing / backup / docker
 - [x] `advanced/`: transactions / replication / sharding / query-optimization / parallelization
 - [x] `api/`: rust-client / python-client / protocol
-- [ ] `algorithms/`: shortest-path / all-paths / centrality / connected-components / cycle-detection
-- [ ] `visualization/`: export / ascii / web-app
+- [x] `algorithms/`: shortest-path / all-paths / centrality / connected-components / cycle-detection
+- [x] `visualization/`: export / ascii / web-app
 
 ## 注意
 - `api/protocol.md` は他言語でクライアントを書く人が読む仕様なので、JSON のフィールド名・型・例は原文と完全に一致させる
@@ -26,3 +26,9 @@
   rust-client（pool::Pool・ClientBuilder・ClientError::QueryError・row.get_string は無い → 実際の API に、コンパイル確認）、
   python-client（PyPI 未公開、async with AsyncClient.connect が動かなかった → クライアント側を修正 435b1f2c）、parallelization（コマンド名）
 - 残り: algorithms（5 ページ。CALL db.pageRank などのプロシージャも graph.add_node などの Rust API も実在しないため全面的に書き直しが必要）、visualization（3 ページ）
+- algorithms・visualization を英訳（2026-11-12）。algorithms は Cypher のプロシージャ（CALL db.pageRank など）も
+  Rust API（graph.add_node / add_edge）も実在しなかったため、日本語版を実際の API（maharit-core の関数、shortestPath /
+  allShortestPaths / 可変長パターン）で書き直し、Rust の例はすべてコンパイル・実行して出力を確認。
+  visualization は private なモジュールのパス（maharit_viz::dot::…）をクレート直下の型に直した
+- 全 52 ページに英語版が揃った。英語をデフォルトにするか・鮮度チェックを失敗扱いにするかは docs/170 で判断する
+- 見つけて起票: relationships(p) の要素のプロパティを参照できない（bug/169）

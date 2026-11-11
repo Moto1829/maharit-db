@@ -6,95 +6,83 @@ nav_order: 2
 
 # 全経路探索
 
-`all_paths` は指定した 2 ノード間の、最大ホップ数以内のすべての経路を DFS（深さ優先探索）バックトラッキングで列挙します。
+2 つのノードの間の経路を、ホップ数の上限までですべて列挙します。Cypher では可変長パターンで、Rust API では `all_paths` で求めます。どちらも同じノードを 2 度通らない経路（シンプルパス）だけを返します。
 
-## Cypher での使用
+## Cypher: 可変長パターン
 
 ```cypher
-// Alice から Bob への最大 4 ホップ以内のすべての経路
+// Alice から Bob への 4 ホップ以内の経路をすべて
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person {name: "Bob"})
-RETURN p, length(p) AS hops
+RETURN [n IN nodes(p) | n.name] AS names, length(p) AS hops
 ORDER BY hops ASC
+```
 
-// すべての経路の長さを確認
+```cypher
+// ホップ数ごとの経路の数
 MATCH p = (a:Person {name: "Alice"})-[:KNOWS*1..4]->(b:Person {name: "Bob"})
 RETURN length(p) AS hops, count(*) AS path_count
 ORDER BY hops
 ```
 
-## CALL db.allPaths()
-
-組み込みのプロシージャで全経路を取得します。
-
 ```cypher
-CALL db.allPaths(
-  "Alice",    // 始点ノードの識別子
-  "Bob",      // 終点ノードの識別子
-  "KNOWS",    // エッジタイプ
-  4           // 最大ホップ数
-)
-YIELD path, length
-RETURN path, length
-ORDER BY length ASC
-```
-
-## Rust API での使用
-
-```rust
-use maharit_core::{Graph, traversal};
-
-fn main() {
-    let mut graph = Graph::new();
-
-    // グラフを構築
-    let alice = graph.add_node("Person", [("name", "Alice")]);
-    let bob = graph.add_node("Person", [("name", "Bob")]);
-    let charlie = graph.add_node("Person", [("name", "Charlie")]);
-    let dave = graph.add_node("Person", [("name", "Dave")]);
-
-    graph.add_edge(alice, bob, "KNOWS", []);
-    graph.add_edge(alice, charlie, "KNOWS", []);
-    graph.add_edge(charlie, bob, "KNOWS", []);
-    graph.add_edge(bob, dave, "KNOWS", []);
-    graph.add_edge(charlie, dave, "KNOWS", []);
-
-    // alice から dave への最大 3 ホップの全経路
-    let paths = traversal::all_paths(&graph, alice, dave, 3);
-
-    println!("Found {} paths:", paths.len());
-    for (i, path) in paths.iter().enumerate() {
-        let names: Vec<String> = path.iter()
-            .map(|&node_id| graph.get_node(node_id).unwrap().property("name").to_string())
-            .collect();
-        println!("  Path {}: {} (hops: {})", i + 1, names.join(" -> "), path.len() - 1);
-    }
-}
-```
-
-出力例：
-
-```
-Found 3 paths:
-  Path 1: Alice -> Bob -> Dave (hops: 2)
-  Path 2: Alice -> Charlie -> Bob -> Dave (hops: 3)
-  Path 3: Alice -> Charlie -> Dave (hops: 2)
-```
-
-## エッジタイプのフィルタリング
-
-```cypher
-// 特定のエッジタイプのみを使用した経路
-MATCH p = (a:Location {name: "A"})-[:ROAD|FERRY*1..5]->(b:Location {name: "B"})
-RETURN p, length(p) AS hops
-
-// エッジタイプを問わない全経路
+// リレーションシップの型を問わない
 MATCH p = (a:Node {id: 1})-[*1..3]->(b:Node {id: 10})
 RETURN p, length(p)
 ```
 
+リレーションシップの型を複数指定する書き方（`[:ROAD|FERRY*]`）にはまだ対応していません（query-clauses/164）。
+
+## Rust API: all_paths
+
+`maharit_core::all_paths(&graph, from, to, max_depth)` は、深さ優先探索（DFS）とバックトラックで経路を列挙します。リレーションシップの向きに沿って辿り、型は区別しません。`max_depth` が `None` なら上限なしです。
+
+```rust
+use maharit_core::{Graph, NodeId, PropertyValue, all_paths};
+
+fn person(graph: &mut Graph, name: &str) -> NodeId {
+    let id = graph.create_node("Person");
+    graph.get_node_mut(id).unwrap().set_property("name", name);
+    id
+}
+
+fn main() {
+    let mut graph = Graph::new();
+    let alice = person(&mut graph, "Alice");
+    let bob = person(&mut graph, "Bob");
+    let charlie = person(&mut graph, "Charlie");
+    let dave = person(&mut graph, "Dave");
+    for (from, to) in [(alice, bob), (alice, charlie), (charlie, bob), (bob, dave), (charlie, dave)] {
+        graph.create_edge(from, to, "KNOWS").unwrap();
+    }
+
+    let paths = all_paths(&graph, alice, dave, Some(3));
+    println!("Found {} paths:", paths.len());
+    for path in &paths {
+        let names: Vec<String> = path
+            .nodes
+            .iter()
+            .map(|id| match graph.get_node(*id).and_then(|n| n.get_property("name")) {
+                Some(PropertyValue::String(s)) => s.clone(),
+                _ => id.to_string(),
+            })
+            .collect();
+        println!("  {} (hops: {})", names.join(" -> "), path.len() - 1);
+    }
+}
+```
+
+出力例（経路の順序は実行ごとに変わることがあります）:
+
+```text
+Found 3 paths:
+  Alice -> Bob -> Dave (hops: 2)
+  Alice -> Charlie -> Bob -> Dave (hops: 3)
+  Alice -> Charlie -> Dave (hops: 2)
+```
+
 ## サイクル検出への注意
 
-`all_paths` はシンプルパス（同じノードを 2 度通らない経路）のみを返します。循環経路は含まれません。
+可変長パターンも `all_paths` も、シンプルパス（同じノードを 2 度通らない経路）だけを返します。始点に戻る経路は含まれません。
 
 ```cypher
 // シンプルパスのみ（デフォルト動作）

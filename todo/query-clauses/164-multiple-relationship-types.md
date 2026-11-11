@@ -2,7 +2,7 @@
 
 ## 現状（2026-11-12）
 `MATCH p = (a)-[:ROAD|FERRY*1..5]->(b)` がパースできない（`EdgePattern.edge_type` が `Option<String>`）。
-docs/algorithms/all-paths.md の例が known-failures に残っている。
+docs/algorithms/all-paths.md には「未対応」と書いてある（実装したら例を戻す）。
 
 ## 作業
 - [ ] `edge_type` を型のリストにし、1 ホップ・可変長・shortestPath の照合で「いずれかに一致」にする

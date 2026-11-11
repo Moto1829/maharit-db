@@ -6,150 +6,98 @@ nav_order: 3
 
 # PageRank / 中心性指標
 
-グラフ中心性指標はノードの重要度や影響力を定量的に評価します。MaharitDB は PageRank、媒介中心性（Betweenness）、近接中心性（Closeness）を内蔵しています。
+ノードの重要度を測る指標です。`maharit-core` クレートの Rust API で、`Graph` 全体に対して計算します。
+
+!!! note "Cypher からは使えません"
+    中心性の計算は Rust API だけです。Cypher のプロシージャ（`CALL …`）としては用意していません。どの指標も、リレーションシップの型は区別せず、グラフ全体を対象にします。
 
 ## PageRank
 
-PageRank はウェブページのランキングアルゴリズムとして有名ですが、ソーシャルグラフや知識グラフにも広く応用されます。多くのリンク（エッジ）を受け取るノード、特に重要なノードから多くのリンクを受け取るノードほど高いスコアを持ちます。
-
-### Cypher での使用
-
-```cypher
-// PageRank を計算してスコアの高いノードを返す
-CALL db.pageRank(
-  "FOLLOWS",   // エッジタイプ
-  0.85,        // ダンピングファクター（通常 0.85）
-  20           // 反復回数
-)
-YIELD node, score
-RETURN node.name, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-### Rust API での使用
+リンクを多く受けるノード、重要なノードからリンクされるノードほど高いスコアになります。リレーションシップの向き（`(a)-->(b)` は a から b へのリンク）を使います。
 
 ```rust
-use maharit_core::{Graph, algorithms};
+use maharit_core::{Graph, PageRankConfig, pagerank};
 
 fn main() {
     let mut graph = Graph::new();
-    // グラフを構築...
+    let pages: Vec<_> = (0..4).map(|_| graph.create_node("Page")).collect();
+    for (from, to) in [(0, 1), (0, 2), (1, 2), (2, 0), (3, 2)] {
+        graph.create_edge(pages[from], pages[to], "LINKS").unwrap();
+    }
 
-    let scores = algorithms::page_rank(&graph, "FOLLOWS", 0.85, 20);
-    let mut ranked: Vec<_> = scores.iter().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    let result = pagerank(&graph, &PageRankConfig::default());
+    println!("iterations: {}, converged: {}", result.iterations, result.converged);
 
-    for (node_id, score) in ranked.iter().take(10) {
-        let node = graph.get_node(**node_id).unwrap();
-        println!("{}: {:.4}", node.property("name"), score);
+    let mut ranked: Vec<_> = result.scores.iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+    for (node, score) in ranked {
+        println!("{node}: {score:.4}");
     }
 }
 ```
 
-### ダンピングファクター
+`PageRankConfig` の項目:
 
-ダンピングファクター（d）は、ランダムサーファーがリンクをたどる確率を表します。`1 - d` の確率でランダムなノードに移動します。通常は `0.85` を使用します。
+| 項目 | 既定値 | 説明 |
+|---|---|---|
+| `damping` | `0.85` | ダンピングファクター。リンクを辿り続ける確率 |
+| `max_iterations` | `100` | 反復の上限 |
+| `tolerance` | `1e-6` | スコアの変化がこれ未満になったら収束とみなす |
 
-```cypher
-// 収束しやすいダンピングファクターと反復回数
-CALL db.pageRank("LINKS", 0.85, 50)
-YIELD node, score
-RETURN node.name, score
-ORDER BY score DESC
-```
+出リンクの無いノード（ダングリングノード）のスコアは、全ノードに均等に配ります。
 
 ## 媒介中心性（Betweenness Centrality）
 
-最短経路上に多く登場するノードが高いスコアを持ちます。情報の「橋渡し」となるノードを特定するのに有用です。
+ほかのノードどうしを結ぶ最短経路の上に、そのノードがどれだけ現れるかを表します。値が大きいノードは、グループの間をつなぐ「橋渡し役」です。Brandes のアルゴリズムで、リレーションシップの向きに沿った最短経路を数えます。
 
-### 計算式
-
+```rust
+let scores = maharit_core::betweenness_centrality(&graph);
 ```
-BC(v) = Σ_{s≠v≠t} (σ_st(v) / σ_st)
-```
-
-- `σ_st`: s から t への最短経路の数
-- `σ_st(v)`: s から t への最短経路のうち、v を通る経路の数
-
-### Cypher での使用
-
-```cypher
-CALL db.betweennessCentrality("KNOWS")
-YIELD node, score
-RETURN node.name, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-### ユースケース
-
-- ソーシャルグラフでインフルエンサーの特定
-- ネットワークのボトルネックの検出
-- 情報の伝播経路の分析
 
 ## 近接中心性（Closeness Centrality）
 
-他のすべてのノードへの平均距離が短いノードが高いスコアを持ちます。情報をすばやく全体に広める能力を表します。
+そのノードからほかのノードへの距離（ホップ数）が短いほど大きくなります。到達できるノードの数を `r`、それらへの距離の合計を `d` として `(r - 1) / d` で、リレーションシップの向きに沿って辿ります。どこにも到達できないノードは 0 です。
 
-### 計算式
-
+```rust
+let scores = maharit_core::closeness_centrality(&graph);
 ```
-CC(v) = (n - 1) / Σ_{u≠v} d(u, v)
-```
-
-- `n`: ノード数
-- `d(u, v)`: u と v の間の最短距離
-
-### Cypher での使用
-
-```cypher
-CALL db.closenessCentrality("ROAD")
-YIELD node, score
-RETURN node.name, score
-ORDER BY score DESC
-LIMIT 10
-```
-
-### ユースケース
-
-- 施設配置の最適化（倉庫、病院の立地）
-- ネットワークの中心的なハブの特定
-- 伝染病のシードノード選定
 
 ## 次数中心性（Degree Centrality）
 
-最も単純な中心性指標で、接続するエッジ数（次数）を使用します。
+ノードにつながるリレーションシップの数です。
 
-```cypher
-// 出次数（FOLLOWS 先の数）
-MATCH (n:Person)
-RETURN n.name, count { (n)-[:FOLLOWS]->(:Person) } AS out_degree
-ORDER BY out_degree DESC
-LIMIT 10
+```rust
+use maharit_core::DegreeCentrality;
 
-// 入次数（フォロワー数）
-MATCH (n:Person)
-RETURN n.name, count { (:Person)-[:FOLLOWS]->(n) } AS in_degree
-ORDER BY in_degree DESC
-LIMIT 10
+let degree = DegreeCentrality::compute(&graph);
+let in_degree = &degree.in_degree;       // 入ってくる数
+let out_degree = &degree.out_degree;     // 出ていく数
+let total = &degree.total_degree;        // 合計
+let normalized = degree.normalized(&graph); // 合計を 2(n-1) で割った値
 ```
 
-## 中心性指標の比較
+## 指標の比較
 
-| 指標 | 計算量 | 適したユースケース |
+| 指標 | 計算量 | 向いている用途 |
 |------|--------|-----------------|
-| PageRank | O(k × E)（k は反復回数） | ウェブランキング、ソーシャル影響力 |
-| 媒介中心性 | O(V × E) | ブリッジノードの特定 |
-| 近接中心性 | O(V × (V + E)) | 最も中心的なノードの特定 |
-| 次数中心性 | O(E) | 人気度、活動量の評価 |
+| PageRank | O(k × E)（k は反復回数） | ウェブページのランキング、影響力 |
+| 媒介中心性 | O(V × E) | 橋渡し役のノードの発見 |
+| 近接中心性 | O(V × (V + E)) | 全体の中心にいるノードの発見 |
+| 次数中心性 | O(E) | 人気度・活動量 |
 
-## 全中心性指標の一括計算
+ノード数が 500 以上のグラフでは、媒介中心性と近接中心性を並列に計算します（[並列化とパフォーマンス](../advanced/parallelization.md)）。
 
-```cypher
-CALL db.centrality.all("KNOWS")
-YIELD node, pagerank, betweenness, closeness, degree
-RETURN node.name, pagerank, betweenness, closeness, degree
-ORDER BY pagerank DESC
-LIMIT 20
+## 結果をグラフに書き戻す
+
+計算結果は `HashMap<NodeId, f64>` で返ります。Cypher から使うには、プロパティとして書き戻します。
+
+```rust
+let scores = maharit_core::betweenness_centrality(&graph);
+for (id, score) in scores {
+    if let Some(node) = graph.get_node_mut(id) {
+        node.set_property("betweenness", score);
+    }
+}
 ```
+
+サーバーのデータに対して計算したい場合は、サーバーを停止してから、データファイルを `maharit_storage::PersistentStorage::load_with_schema` で読み込み、計算・書き戻して `save_with_schema` で保存してください（`load` / `save` だとインデックス・制約の定義が失われます）。WAL（`<data>.wal`）が残っていると起動時に再適用されるので、停止時に空になっていることを確認してください。

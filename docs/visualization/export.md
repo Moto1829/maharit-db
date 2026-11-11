@@ -17,7 +17,7 @@ DOT 形式は Graphviz で可視化できる標準的なグラフ記述言語で
 ### Rust API からのエクスポート
 
 ```rust
-use maharit_viz::dot::{DotExporter, DotStyle};
+use maharit_viz::{DotExporter, DotStyle};
 use maharit_core::Graph;
 use std::fs;
 
@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
 スタイルをカスタマイズする場合は `DotStyle` を構築して `export_with_style` を使用します：
 
 ```rust
-use maharit_viz::dot::{DotExporter, DotStyle};
+use maharit_viz::{DotExporter, DotStyle};
 use maharit_core::Graph;
 
 fn main() -> std::io::Result<()> {
@@ -101,7 +101,7 @@ MaharitDB は Graphviz なしで直接 SVG を生成できます。力学モデ�
 ### Rust API からの SVG エクスポート
 
 ```rust
-use maharit_viz::svg::{SvgExporter, ForceDirectedLayout};
+use maharit_viz::{SvgExporter, ForceDirectedLayout};
 use maharit_core::Graph;
 
 fn main() -> std::io::Result<()> {
@@ -123,7 +123,7 @@ fn main() -> std::io::Result<()> {
 `SvgExporter` と `ForceDirectedLayout` のフィールドを直接設定してカスタマイズします：
 
 ```rust
-use maharit_viz::svg::{SvgExporter, ForceDirectedLayout};
+use maharit_viz::{SvgExporter, ForceDirectedLayout};
 use maharit_core::Graph;
 
 fn main() -> std::io::Result<()> {
