@@ -747,6 +747,15 @@ impl<'a> Executor<'a> {
     /// `(プライマリラベル, property)` に索引がある場合のみ旧値を除去し新値を登録する。
     /// これがないと、永続化された索引が SET 後に陳腐化し、索引ベースの候補絞り込みが
     /// 偽陰性（本来一致するノードを取りこぼす）を起こして誤結果になる。
+    /// ノードの全文検索インデックスを今のプロパティで作り直す。
+    fn refresh_fulltext(&mut self, node_id: NodeId) {
+        self.fulltext.remove_node(node_id);
+        if let Some(node) = self.graph_ref().get_node(node_id) {
+            let label = node.primary_label().to_string();
+            self.fulltext.index_node(node_id, &label, &node.properties);
+        }
+    }
+
     fn reindex_node_property(
         &mut self,
         node_id: NodeId,
@@ -754,6 +763,7 @@ impl<'a> Executor<'a> {
         old: Option<PropertyValue>,
         new: Option<&PropertyValue>,
     ) {
+        self.refresh_fulltext(node_id);
         // 索引定義は (label, property) 単位。プライマリラベルで判定する。
         let label = match self.graph_ref().get_node(node_id) {
             Some(n) => n.primary_label().to_string(),
@@ -1016,6 +1026,7 @@ impl<'a> Executor<'a> {
                 let incident = self.incident_edge_count(node_id);
                 if self.graph_mut().delete_node(node_id).is_some() {
                     self.property_index.remove_node(node_id);
+                    self.fulltext.remove_node(node_id);
                     deleted_nodes += 1;
                     deleted_edges += incident;
                 }
@@ -1031,6 +1042,7 @@ impl<'a> Executor<'a> {
 
                 if self.graph_mut().delete_node(node_id).is_some() {
                     self.property_index.remove_node(node_id);
+                    self.fulltext.remove_node(node_id);
                     deleted_nodes += 1;
                 }
             }
@@ -1396,7 +1408,9 @@ impl<'a> Executor<'a> {
 
                         match binding_value {
                             BindingValue::Node(node_id) => {
-                                self.graph_mut().add_node_label(*node_id, new_label.clone());
+                                let node_id = *node_id;
+                                self.graph_mut().add_node_label(node_id, new_label.clone());
+                                self.refresh_fulltext(node_id);
                             }
                             _ => {
                                 return Err(ExecuteError::TypeError(
@@ -1813,6 +1827,7 @@ impl<'a> Executor<'a> {
                 RemoveItem::Label(var, label) => {
                     if let Some(node_id) = bindings.get(var.as_str()).and_then(|v| v.as_node()) {
                         self.graph_mut().remove_node_label(node_id, label);
+                        self.refresh_fulltext(node_id);
                     } else {
                         return Err(ExecuteError::UndefinedVariable(var.clone()));
                     }
@@ -1853,13 +1868,12 @@ impl<'a> Executor<'a> {
         }
 
         for node_id in nodes_to_delete {
-            if delete.detach {
-                self.graph_mut().delete_node(node_id);
-            } else {
-                let has_edges = self.graph_ref().has_incident_edges(node_id);
-                if !has_edges {
-                    self.graph_mut().delete_node(node_id);
-                }
+            if !delete.detach && self.graph_ref().has_incident_edges(node_id) {
+                continue;
+            }
+            if self.graph_mut().delete_node(node_id).is_some() {
+                self.property_index.remove_node(node_id);
+                self.fulltext.remove_node(node_id);
             }
         }
 
@@ -12517,6 +12531,37 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_fulltext_index_follows_set_remove_and_delete() {
+        // bug/168: SET / DELETE が全文検索インデックスに反映されず、
+        // 削除したノードや古い本文が検索に残っていた
+        let mut graph = Graph::new();
+        let mut ex = Executor::new(&mut graph);
+        let mut run = |q: &str| {
+            ex.execute(Parser::new(q).unwrap().parse().unwrap())
+                .unwrap()
+        };
+        let hits = |r: ResultSet| r.rows[0].columns[0].clone();
+        run("CREATE FULLTEXT INDEX ft FOR (a:Article) ON EACH [a.body]");
+        run(
+            "CREATE (:Article {id: 1, body: 'rust graph'}), (:Article {id: 2, body: 'rust async'})",
+        );
+        let count =
+            "CALL db.index.fulltext.search('ft', 'rust') YIELD node, score RETURN count(node)";
+        assert_eq!(hits(run(count)), Value::Int(2));
+        run("MATCH (a:Article {id: 2}) SET a.body = 'nothing here'");
+        assert_eq!(hits(run(count)), Value::Int(1));
+        run("MATCH (a:Article {id: 2}) SET a.body = 'rust again'");
+        assert_eq!(hits(run(count)), Value::Int(2));
+        run("MATCH (a:Article {id: 2}) REMOVE a.body");
+        assert_eq!(hits(run(count)), Value::Int(1));
+        run("MATCH (a:Article {id: 1}) DETACH DELETE a");
+        assert_eq!(hits(run(count)), Value::Int(0));
+        run("CREATE (:Article {id: 3, body: 'rust'})");
+        run("MATCH (a:Article {id: 3}) FOREACH (x IN [1] | DELETE a)");
+        assert_eq!(hits(run(count)), Value::Int(0));
     }
 
     #[test]
