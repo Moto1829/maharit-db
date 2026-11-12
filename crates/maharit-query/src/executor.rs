@@ -3146,7 +3146,15 @@ impl<'a> Executor<'a> {
                 }
 
                 if matches.is_empty() {
-                    // No matches found - keep original bindings (variables from this clause will be NULL/unbound)
+                    // No matches found - keep the original bindings and bind the
+                    // clause's new variables to null.
+                    let mut bindings = bindings;
+                    for var in pattern_variables(&clause.patterns) {
+                        if !bindings.contains_key(var.as_str()) {
+                            bindings
+                                .insert(Arc::from(var.as_str()), BindingValue::Scalar(Value::Null));
+                        }
+                    }
                     result.push(bindings);
                 } else {
                     // Found matches - use them
@@ -4471,7 +4479,8 @@ impl<'a> Executor<'a> {
                         BindingValue::Scalar(value) => Ok(value.clone()),
                     }
                 } else {
-                    Ok(Value::Null)
+                    // Not in scope (e.g. dropped by WITH): an error, not null (bug/162)
+                    Err(ExecuteError::UndefinedVariable(var.clone()))
                 }
             }
             ReturnItem::Property(var, prop) => {
@@ -4503,7 +4512,7 @@ impl<'a> Executor<'a> {
                         _ => Ok(Value::Null),
                     }
                 } else {
-                    Ok(Value::Null)
+                    Err(ExecuteError::UndefinedVariable(var.clone()))
                 }
             }
             ReturnItem::All => {
@@ -6911,6 +6920,25 @@ impl<'a> Executor<'a> {
             .filter(|s| !s.is_empty())
             .any(|token| levenshtein_distance(token, &term_lower) <= max_distance)
     }
+}
+
+/// Variables introduced by the patterns (node, relationship and path variables).
+fn pattern_variables(patterns: &[Pattern]) -> Vec<String> {
+    let mut vars = Vec::new();
+    for pattern in patterns {
+        match pattern {
+            Pattern::Node(np) => vars.extend(np.variable.clone()),
+            Pattern::Path(pp) => {
+                vars.extend(pp.variable.clone());
+                vars.extend(pp.start.variable.clone());
+                for seg in &pp.segments {
+                    vars.extend(seg.edge.variable.clone());
+                    vars.extend(seg.node.variable.clone());
+                }
+            }
+        }
+    }
+    vars
 }
 
 #[cfg(test)]
@@ -10609,13 +10637,14 @@ mod tests {
             ]
         );
 
-        // The original column name is not bound once aliased.
-        let result = run_query(
-            &mut executor,
-            "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node AS article RETURN node",
-        )
-        .unwrap();
-        assert!(result.rows.iter().all(|r| r.columns == vec![Value::Null]));
+        // The original column name is not bound once aliased (bug/162: an error, not null).
+        assert!(
+            run_query(
+                &mut executor,
+                "CALL db.index.fulltext.search('articleIndex', 'rust') YIELD node AS article RETURN node",
+            )
+            .is_err()
+        );
         // Unknown YIELD columns are rejected.
         assert!(
             run_query(
@@ -12550,6 +12579,49 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_out_of_scope_variable_is_an_error() {
+        // bug/162: WITH で引き継がなかった変数は null ではなくエラー
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (:Person {name: 'A', role: 'x'})-[:K]->(:Person {name: 'B'})",
+        )
+        .unwrap();
+        for q in [
+            "MATCH (n:Person) WITH n.role AS r RETURN n.role",
+            "MATCH (n:Person) WITH n.role AS r RETURN n",
+            "MATCH (n:Person) RETURN m.name",
+        ] {
+            let err = execute(&mut graph, q).unwrap_err();
+            assert!(
+                matches!(err, ExecuteError::UndefinedVariable(_)),
+                "{q}: {err}"
+            );
+        }
+        // OPTIONAL MATCH without a match still gives null
+        let r = execute(
+            &mut graph,
+            "MATCH (n:Person {name: 'B'}) OPTIONAL MATCH (n)-[r:K]->(m) RETURN n.name, m.name, m, r",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                Value::String("B".into()),
+                Value::Null,
+                Value::Null,
+                Value::Null
+            ]
+        );
+        let r = execute(
+            &mut graph,
+            "MATCH (n:Person) WITH n.role AS r RETURN r ORDER BY r",
+        )
+        .unwrap();
+        assert_eq!(r.row_count(), 2);
     }
 
     #[test]
