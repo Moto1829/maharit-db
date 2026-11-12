@@ -116,6 +116,9 @@ pub enum Value {
     Float(f64),
     String(String),
     Node(NodeId),
+    /// リレーションシップの値（`relationships(p)` の要素、`collect(r)` など）。
+    /// 出力（JSON）は従来どおり ID の整数。
+    Edge(u64),
     NodeData {
         id: NodeId,
         /// ノードが保持するラベルのリスト（複数ラベル対応）
@@ -152,6 +155,7 @@ impl std::fmt::Display for Value {
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Node(id) => write!(f, "Node({})", id),
+            Value::Edge(id) => write!(f, "{}", id),
             Value::NodeData { id, labels, .. } => {
                 write!(f, "({}", id)?;
                 for lbl in labels {
@@ -221,6 +225,8 @@ impl Value {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Int(n) => serde_json::Value::Number((*n).into()),
+            // 従来どおり ID の整数
+            Value::Edge(id) => serde_json::Value::Number((*id).into()),
             Value::Float(n) => serde_json::Number::from_f64(*n)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
@@ -747,6 +753,14 @@ impl<'a> Executor<'a> {
     /// `(プライマリラベル, property)` に索引がある場合のみ旧値を除去し新値を登録する。
     /// これがないと、永続化された索引が SET 後に陳腐化し、索引ベースの候補絞り込みが
     /// 偽陰性（本来一致するノードを取りこぼす）を起こして誤結果になる。
+    /// リレーションシップのプロパティ（無ければ null）。
+    fn edge_property(&self, edge_id: u64, key: &str) -> Value {
+        self.graph_ref()
+            .get_edge(edge_id)
+            .and_then(|e| e.properties.get(key).map(Value::from))
+            .unwrap_or(Value::Null)
+    }
+
     /// ノードの全文検索インデックスを今のプロパティで作り直す。
     fn refresh_fulltext(&mut self, node_id: NodeId) {
         self.fulltext.remove_node(node_id);
@@ -2205,7 +2219,7 @@ impl<'a> Executor<'a> {
                     .map(|c| match b.get(c.as_str()) {
                         Some(BindingValue::Node(id)) => Value::Node(*id),
                         Some(BindingValue::Scalar(v)) => v.clone(),
-                        Some(BindingValue::Edge(id)) => Value::Int(*id as i64),
+                        Some(BindingValue::Edge(id)) => Value::Edge(*id),
                         Some(BindingValue::Path { nodes, edges }) => Value::Path {
                             nodes: nodes.clone(),
                             edges: edges.clone(),
@@ -4470,7 +4484,7 @@ impl<'a> Executor<'a> {
                         }
                         BindingValue::Edge(edge_id) => {
                             // Return edge as a simple value
-                            Ok(Value::Int(*edge_id as i64))
+                            Ok(Value::Edge(*edge_id))
                         }
                         BindingValue::Path { nodes, edges } => Ok(Value::Path {
                             nodes: nodes.clone(),
@@ -4506,9 +4520,11 @@ impl<'a> Executor<'a> {
                                 Ok(Value::Null)
                             }
                         }
-                        BindingValue::Scalar(scalar_val) => {
-                            Self::access_temporal_field(scalar_val, prop)
-                        }
+                        // Maps, nodes and relationships held as values, temporal fields
+                        BindingValue::Scalar(_) => self.evaluate_expression(
+                            &Expression::Property(var.clone(), prop.clone()),
+                            bindings,
+                        ),
                         _ => Ok(Value::Null),
                     }
                 } else {
@@ -4579,10 +4595,8 @@ impl<'a> Executor<'a> {
                 if let Some(binding_value) = bindings.get(var.as_str()) {
                     if let BindingValue::Path { edges, .. } = binding_value {
                         // Return list of edge IDs (or edge data if available)
-                        let edge_values: Vec<Value> = edges
-                            .iter()
-                            .map(|&edge_id| Value::Int(edge_id as i64))
-                            .collect();
+                        let edge_values: Vec<Value> =
+                            edges.iter().map(|&edge_id| Value::Edge(edge_id)).collect();
                         Ok(Value::List(edge_values))
                     } else {
                         Err(ExecuteError::TypeError(format!(
@@ -6174,7 +6188,7 @@ impl<'a> Executor<'a> {
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
                 match binding_value {
                     BindingValue::Node(id) => Ok(Value::Node(*id)),
-                    BindingValue::Edge(id) => Ok(Value::Int(*id as i64)),
+                    BindingValue::Edge(id) => Ok(Value::Edge(*id)),
                     BindingValue::Path { nodes, edges } => Ok(Value::Path {
                         nodes: nodes.clone(),
                         edges: edges.clone(),
@@ -6219,6 +6233,8 @@ impl<'a> Executor<'a> {
                         Value::NodeData { properties, .. } => {
                             Ok(properties.get(prop).map(Value::from).unwrap_or(Value::Null))
                         }
+                        // Relationships held as values, e.g. `r IN relationships(p) | r.w`
+                        Value::Edge(edge_id) => Ok(self.edge_property(*edge_id, prop)),
                         _ => Self::access_temporal_field(scalar_val, prop),
                     },
                     _ => Err(ExecuteError::TypeError(format!(
@@ -6273,6 +6289,7 @@ impl<'a> Executor<'a> {
                     (Value::NodeData { properties, .. }, Value::String(key)) => {
                         Ok(properties.get(&key).map(Value::from).unwrap_or(Value::Null))
                     }
+                    (Value::Edge(id), Value::String(key)) => Ok(self.edge_property(id, &key)),
                     (Value::List(items), Value::Int(i)) => {
                         let idx = if i < 0 { items.len() as i64 + i } else { i };
                         if idx >= 0 {
@@ -12578,6 +12595,43 @@ mod tests {
                 .unwrap()
                 .parse()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_relationship_values_support_property_access() {
+        // bug/169: relationships(p) / collect(r) の要素から r.prop を参照できなかった
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (t:City {name: 'Tokyo'})-[:ROAD {distance: 350}]->(n:City {name: 'Nagoya'})\
+             -[:ROAD {distance: 190}]->(o:City {name: 'Osaka'}), (t)-[:ROAD {distance: 600}]->(o)",
+        )
+        .unwrap();
+        let r = execute(
+            &mut graph,
+            "MATCH p = (a:City {name: 'Tokyo'})-[:ROAD*1..5]->(b:City {name: 'Osaka'}) \
+             RETURN reduce(total = 0, r IN relationships(p) | total + r.distance) AS km ORDER BY km",
+        )
+        .unwrap();
+        let kms: Vec<Value> = r.rows.iter().map(|row| row.columns[0].clone()).collect();
+        assert_eq!(kms, vec![Value::Int(540), Value::Int(600)]);
+        let r = execute(
+            &mut graph,
+            "MATCH ()-[r:ROAD]->() WITH collect(r) AS rs \
+             RETURN reduce(s = 0, x IN rs | s + x.distance), reduce(s = 0, x IN rs | s + x['distance'])",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns, vec![Value::Int(1140), Value::Int(1140)]);
+        // 出力は従来どおり ID の整数
+        let r = execute(
+            &mut graph,
+            "MATCH ()-[r:ROAD {distance: 350}]->() RETURN r, id(r)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns[0].to_json(),
+            r.rows[0].columns[1].to_json()
         );
     }
 

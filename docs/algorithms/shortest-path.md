@@ -34,9 +34,21 @@ RETURN [c IN nodes(p) | c.name] AS cities, length(p) AS hops
 - 最小のホップ数は 0 または 1 にしてください（`*2..` のような下限は使えません）
 - 経路が無ければ行を返しません
 
+## Cypher: 重みの合計で経路を比べる
+
+`relationships(p)` の各リレーションシップのプロパティを `reduce` で合計すると、可変長パターンで見つけた経路を重みの合計で並べられます。経路をすべて列挙してから比べるので、ホップ数の上限は小さくしてください。
+
+```cypher
+MATCH p = (a:City {name: "Tokyo"})-[:ROAD*1..5]->(b:City {name: "Osaka"})
+RETURN [c IN nodes(p) | c.name] AS cities,
+       reduce(total = 0, r IN relationships(p) | total + r.distance) AS distance
+ORDER BY distance
+LIMIT 1
+```
+
 ## Rust API: 重み付き最短経路（Dijkstra）
 
-リレーションシップのプロパティ（例: `distance`）を重みにした最短経路は、Cypher では求められません。Rust API の `Dijkstra` を使います。重みは 0 以上である必要があります（負の重みには対応していません）。
+大きなグラフで重み付きの最短経路を求めるには、Rust API の `Dijkstra` を使います（経路を列挙せずに求めます）。重みは 0 以上である必要があります（負の重みには対応していません）。
 
 ```rust
 use maharit_core::{Dijkstra, Graph, NodeId};

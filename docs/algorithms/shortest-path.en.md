@@ -35,9 +35,21 @@ RETURN [c IN nodes(p) | c.name] AS cities, length(p) AS hops
 - The minimum number of hops must be 0 or 1 (lower bounds such as `*2..` are not allowed)
 - If there is no path, no row is returned
 
+## Cypher: comparing paths by total weight
+
+Summing a property of each relationship in `relationships(p)` with `reduce` ranks the paths found by a variable-length pattern by their total weight. Every path is listed before they are compared, so keep the upper bound on hops small.
+
+```cypher
+MATCH p = (a:City {name: "Tokyo"})-[:ROAD*1..5]->(b:City {name: "Osaka"})
+RETURN [c IN nodes(p) | c.name] AS cities,
+       reduce(total = 0, r IN relationships(p) | total + r.distance) AS distance
+ORDER BY distance
+LIMIT 1
+```
+
 ## Rust API: weighted shortest paths (Dijkstra)
 
-Shortest paths weighted by a relationship property (such as `distance`) cannot be computed in Cypher. Use `Dijkstra` from the Rust API. Weights must be 0 or more (negative weights are not supported).
+To find weighted shortest paths on large graphs, use `Dijkstra` from the Rust API (it does not list every path). Weights must be 0 or more (negative weights are not supported).
 
 ```rust
 use maharit_core::{Dijkstra, Graph, NodeId};
