@@ -1329,9 +1329,328 @@ where
     } = ctx;
     let mut buffer = BytesMut::with_capacity(4096);
 
-    loop {
-        // Read per request: a promoted follower starts publishing to its own
-        // followers from the next request on.
+    // Transactions begun on this connection and not finished yet: rolled back
+    // when the connection ends (bug/159).
+    let mut open_txs: Vec<u64> = Vec::new();
+    let result: std::io::Result<()> = async {
+        loop {
+            // Read per request: a promoted follower starts publishing to its own
+            // followers from the next request on.
+            let leader = replication
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let sinks = WriteSinks {
+                replication: leader.as_deref(),
+                wal: durability.as_ref().map(|d| &d.wal),
+            };
+
+            if shutdown.load(Ordering::SeqCst) {
+                send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+                break;
+            }
+
+            // Read with timeout
+            let read_result = tokio::select! {
+                result = read_message(&mut socket, &mut buffer, config.read_timeout) => result,
+                _ = shutdown_rx.recv() => {
+                    send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+                    break;
+                }
+            };
+
+            let message = match read_result {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break, // Connection closed
+                Err(e) => {
+                    let response = Response::Error {
+                        message: e.to_string(),
+                    };
+                    send_response(&mut socket, &response, config.write_timeout).await?;
+                    continue;
+                }
+            };
+
+            // Parse request
+            let request: Request = match serde_json::from_slice(&message) {
+                Ok(req) => req,
+                Err(e) => {
+                    let response = Response::Error {
+                        message: format!("Invalid request: {}", e),
+                    };
+                    send_response(&mut socket, &response, config.write_timeout).await?;
+                    continue;
+                }
+            };
+
+            // Handle request
+            // Metrics: classify the query before `request` is consumed.
+            let measured = match &request {
+                Request::Query { query, .. } | Request::StreamQuery { query, .. } => {
+                    Some(crate::metrics::QueryType::of_query(query))
+                }
+                _ => None,
+            };
+            let started = std::time::Instant::now();
+
+            let response = match request {
+                Request::Login { username, password } => {
+                    let mut mgr = auth.lock().unwrap();
+                    match mgr.authenticate(&username, &password) {
+                        Ok(token) => {
+                            let role = mgr
+                                .validate_session(&token)
+                                .map(|s| role_label(&s.role))
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            let expires_at = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0)
+                                + DEFAULT_SESSION_TIMEOUT_SECS;
+                            Response::LoggedIn {
+                                session_token: token,
+                                role,
+                                expires_at,
+                            }
+                        }
+                        Err(e) => Response::AuthError {
+                            message: format!("{}", e),
+                        },
+                    }
+                }
+                Request::Query {
+                    query,
+                    params,
+                    tx_id,
+                    session_token,
+                } => match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(role) => {
+                        if let Some(resp) = try_handle_user_management(
+                            &query,
+                            &auth,
+                            &ast_cache,
+                            role,
+                            config.require_auth,
+                        ) {
+                            resp
+                        } else if let Some(resp) = authorize_query(role, &query) {
+                            resp
+                        } else if let Some(resp) =
+                            reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
+                        {
+                            resp
+                        } else {
+                            stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                            // `.instrument` (not `span.enter()`): the guard of
+                            // `enter` must not be held across `.await`, or the
+                            // span can be closed on another worker thread.
+                            let span = tracing::info_span!("query", query = %query);
+                            let params = params_from_json(&params);
+                            async {
+                                let start = std::time::Instant::now();
+                                let resp = match tx_id {
+                                    Some(id) => {
+                                        execute_query_with_tx(
+                                            &graph,
+                                            &query,
+                                            params,
+                                            id,
+                                            &tx_manager,
+                                            &managers,
+                                            sinks,
+                                            &ast_cache,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        execute_query(
+                                            &graph, &query, params, &managers, sinks, &ast_cache,
+                                        )
+                                        .await
+                                    }
+                                };
+                                tracing::info!(
+                                    duration_us = start.elapsed().as_micros() as u64,
+                                    "query completed"
+                                );
+                                resp
+                            }
+                            .instrument(span)
+                            .await
+                        }
+                    }
+                },
+                Request::StreamQuery {
+                    query,
+                    params,
+                    tx_id: _,
+                    chunk_size,
+                    session_token,
+                } => match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(role) if authorize_query(role, &query).is_some() => {
+                        authorize_query(role, &query).unwrap()
+                    }
+                    Ok(_)
+                        if reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
+                            .is_some() =>
+                    {
+                        reject_write_on_follower(follower.as_deref(), &ast_cache, &query).unwrap()
+                    }
+                    Ok(_) => {
+                        stats.total_queries.fetch_add(1, Ordering::SeqCst);
+                        tracing::info!(query = %query, "streaming query");
+                        // Execute streaming query
+                        if let Err(e) = execute_streaming_query(
+                            &mut socket,
+                            &graph,
+                            &stats,
+                            &query,
+                            params_from_json(&params),
+                            chunk_size,
+                            config.write_timeout,
+                            &managers,
+                            sinks,
+                            &ast_cache,
+                        )
+                        .await
+                        {
+                            Response::Error {
+                                message: format!("Streaming error: {}", e),
+                            }
+                        } else {
+                            // Streaming responses already sent, continue to next request
+                            continue;
+                        }
+                    }
+                },
+                Request::Ping => Response::Pong,
+                Request::Stats => {
+                    // Report replication status (role, node id, current LSN, follower
+                    // count, leader liveness) when this node participates in
+                    // replication as a follower or leader.
+                    let replication_status = match (leader.as_ref(), follower.as_ref()) {
+                        (Some(l), _) => Some(ReplicationStatus::from(l.get_stats())),
+                        (None, Some(f)) if f.is_promoted() => Some(ReplicationStatus {
+                            role: "leader".to_string(),
+                            node_id: f.get_stats().node_id,
+                            current_lsn: 0,
+                            follower_count: 0,
+                            is_leader_alive: true,
+                        }),
+                        (None, Some(f)) => Some(ReplicationStatus::from(f.get_stats())),
+                        (None, None) => None,
+                    };
+                    Response::Stats {
+                        connections: stats.current_connections.load(Ordering::SeqCst),
+                        total_queries: stats.total_queries.load(Ordering::SeqCst),
+                        nodes: graph.node_count(),
+                        edges: graph.edge_count(),
+                        replication: replication_status,
+                    }
+                }
+                Request::Promote { session_token } => {
+                    match check_session(config.require_auth, &auth, &session_token) {
+                        Err(resp) => resp,
+                        Ok(role) if role != crate::auth::Role::Admin => Response::AuthError {
+                            message: "promote requires the admin role".to_string(),
+                        },
+                        Ok(_) => {
+                            promote_to_leader(
+                                follower.as_deref(),
+                                promotion.as_deref(),
+                                &replication,
+                                &graph,
+                                &managers,
+                                durability.as_ref(),
+                            )
+                            .await
+                        }
+                    }
+                }
+                Request::Disconnect => {
+                    send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
+                    break;
+                }
+                Request::BeginTransaction {
+                    read_only,
+                    session_token,
+                } => match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(role) => {
+                        // 書き込みトランザクションの開始には Write 権限を要求する。
+                        if !read_only
+                            && crate::auth::AuthManager::check_role_permission(
+                                role,
+                                crate::auth::Operation::Write,
+                            )
+                            .is_err()
+                        {
+                            Response::AuthError {
+                                message: "permission denied: role cannot begin a write transaction"
+                                    .to_string(),
+                            }
+                        } else {
+                            let tx_id = if read_only {
+                                tx_manager.begin_read_only()
+                            } else {
+                                tx_manager.begin()
+                            };
+                            Response::TransactionBegun { tx_id }
+                        }
+                    }
+                },
+                Request::Commit {
+                    tx_id,
+                    session_token,
+                } => match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(_) => match tx_manager.commit(tx_id) {
+                        Ok(()) => Response::Committed { tx_id },
+                        Err(e) => Response::Error {
+                            message: format!("Commit failed: {}", e),
+                        },
+                    },
+                },
+                Request::Rollback {
+                    tx_id,
+                    session_token,
+                } => match check_session(config.require_auth, &auth, &session_token) {
+                    Err(resp) => resp,
+                    Ok(_) => {
+                        rollback_transaction(&graph, &managers, &tx_manager, sinks, tx_id).await
+                    }
+                },
+            };
+
+            if let Some(query_type) = measured {
+                metrics.record_query(query_type, started.elapsed());
+                if matches!(
+                    response,
+                    Response::Error { .. } | Response::AuthError { .. }
+                ) {
+                    metrics.record_error();
+                }
+                metrics.set_node_count(graph.node_count() as i64);
+                metrics.set_edge_count(graph.edge_count() as i64);
+            }
+
+            match &response {
+                Response::TransactionBegun { tx_id } => open_txs.push(*tx_id),
+                Response::Committed { tx_id } | Response::RolledBack { tx_id } => {
+                    open_txs.retain(|t| t != tx_id)
+                }
+                _ => {}
+            }
+
+            send_response(&mut socket, &response, config.write_timeout).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if !open_txs.is_empty() {
         let leader = replication
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -1340,321 +1659,52 @@ where
             replication: leader.as_deref(),
             wal: durability.as_ref().map(|d| &d.wal),
         };
-
-        if shutdown.load(Ordering::SeqCst) {
-            send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
-            break;
-        }
-
-        // Read with timeout
-        let read_result = tokio::select! {
-            result = read_message(&mut socket, &mut buffer, config.read_timeout) => result,
-            _ = shutdown_rx.recv() => {
-                send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
-                break;
-            }
-        };
-
-        let message = match read_result {
-            Ok(Some(msg)) => msg,
-            Ok(None) => break, // Connection closed
-            Err(e) => {
-                let response = Response::Error {
-                    message: e.to_string(),
-                };
-                send_response(&mut socket, &response, config.write_timeout).await?;
+        for tx_id in open_txs {
+            if !tx_manager.is_active(tx_id) {
                 continue;
             }
-        };
-
-        // Parse request
-        let request: Request = match serde_json::from_slice(&message) {
-            Ok(req) => req,
-            Err(e) => {
-                let response = Response::Error {
-                    message: format!("Invalid request: {}", e),
-                };
-                send_response(&mut socket, &response, config.write_timeout).await?;
-                continue;
+            if let Response::Error { message } =
+                rollback_transaction(&graph, &managers, &tx_manager, sinks, tx_id).await
+            {
+                tracing::warn!(tx_id, error = %message, "failed to roll back on disconnect");
+            } else {
+                tracing::info!(tx_id, "rolled back unfinished transaction on disconnect");
             }
-        };
-
-        // Handle request
-        // Metrics: classify the query before `request` is consumed.
-        let measured = match &request {
-            Request::Query { query, .. } | Request::StreamQuery { query, .. } => {
-                Some(crate::metrics::QueryType::of_query(query))
-            }
-            _ => None,
-        };
-        let started = std::time::Instant::now();
-
-        let response = match request {
-            Request::Login { username, password } => {
-                let mut mgr = auth.lock().unwrap();
-                match mgr.authenticate(&username, &password) {
-                    Ok(token) => {
-                        let role = mgr
-                            .validate_session(&token)
-                            .map(|s| role_label(&s.role))
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        let expires_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0)
-                            + DEFAULT_SESSION_TIMEOUT_SECS;
-                        Response::LoggedIn {
-                            session_token: token,
-                            role,
-                            expires_at,
-                        }
-                    }
-                    Err(e) => Response::AuthError {
-                        message: format!("{}", e),
-                    },
-                }
-            }
-            Request::Query {
-                query,
-                params,
-                tx_id,
-                session_token,
-            } => match check_session(config.require_auth, &auth, &session_token) {
-                Err(resp) => resp,
-                Ok(role) => {
-                    if let Some(resp) = try_handle_user_management(
-                        &query,
-                        &auth,
-                        &ast_cache,
-                        role,
-                        config.require_auth,
-                    ) {
-                        resp
-                    } else if let Some(resp) = authorize_query(role, &query) {
-                        resp
-                    } else if let Some(resp) =
-                        reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
-                    {
-                        resp
-                    } else {
-                        stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                        // `.instrument` (not `span.enter()`): the guard of
-                        // `enter` must not be held across `.await`, or the
-                        // span can be closed on another worker thread.
-                        let span = tracing::info_span!("query", query = %query);
-                        let params = params_from_json(&params);
-                        async {
-                            let start = std::time::Instant::now();
-                            let resp = match tx_id {
-                                Some(id) => {
-                                    execute_query_with_tx(
-                                        &graph,
-                                        &query,
-                                        params,
-                                        id,
-                                        &tx_manager,
-                                        &managers,
-                                        sinks,
-                                        &ast_cache,
-                                    )
-                                    .await
-                                }
-                                None => {
-                                    execute_query(
-                                        &graph, &query, params, &managers, sinks, &ast_cache,
-                                    )
-                                    .await
-                                }
-                            };
-                            tracing::info!(
-                                duration_us = start.elapsed().as_micros() as u64,
-                                "query completed"
-                            );
-                            resp
-                        }
-                        .instrument(span)
-                        .await
-                    }
-                }
-            },
-            Request::StreamQuery {
-                query,
-                params,
-                tx_id: _,
-                chunk_size,
-                session_token,
-            } => match check_session(config.require_auth, &auth, &session_token) {
-                Err(resp) => resp,
-                Ok(role) if authorize_query(role, &query).is_some() => {
-                    authorize_query(role, &query).unwrap()
-                }
-                Ok(_)
-                    if reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
-                        .is_some() =>
-                {
-                    reject_write_on_follower(follower.as_deref(), &ast_cache, &query).unwrap()
-                }
-                Ok(_) => {
-                    stats.total_queries.fetch_add(1, Ordering::SeqCst);
-                    tracing::info!(query = %query, "streaming query");
-                    // Execute streaming query
-                    if let Err(e) = execute_streaming_query(
-                        &mut socket,
-                        &graph,
-                        &stats,
-                        &query,
-                        params_from_json(&params),
-                        chunk_size,
-                        config.write_timeout,
-                        &managers,
-                        sinks,
-                        &ast_cache,
-                    )
-                    .await
-                    {
-                        Response::Error {
-                            message: format!("Streaming error: {}", e),
-                        }
-                    } else {
-                        // Streaming responses already sent, continue to next request
-                        continue;
-                    }
-                }
-            },
-            Request::Ping => Response::Pong,
-            Request::Stats => {
-                // Report replication status (role, node id, current LSN, follower
-                // count, leader liveness) when this node participates in
-                // replication as a follower or leader.
-                let replication_status = match (leader.as_ref(), follower.as_ref()) {
-                    (Some(l), _) => Some(ReplicationStatus::from(l.get_stats())),
-                    (None, Some(f)) if f.is_promoted() => Some(ReplicationStatus {
-                        role: "leader".to_string(),
-                        node_id: f.get_stats().node_id,
-                        current_lsn: 0,
-                        follower_count: 0,
-                        is_leader_alive: true,
-                    }),
-                    (None, Some(f)) => Some(ReplicationStatus::from(f.get_stats())),
-                    (None, None) => None,
-                };
-                Response::Stats {
-                    connections: stats.current_connections.load(Ordering::SeqCst),
-                    total_queries: stats.total_queries.load(Ordering::SeqCst),
-                    nodes: graph.node_count(),
-                    edges: graph.edge_count(),
-                    replication: replication_status,
-                }
-            }
-            Request::Promote { session_token } => {
-                match check_session(config.require_auth, &auth, &session_token) {
-                    Err(resp) => resp,
-                    Ok(role) if role != crate::auth::Role::Admin => Response::AuthError {
-                        message: "promote requires the admin role".to_string(),
-                    },
-                    Ok(_) => {
-                        promote_to_leader(
-                            follower.as_deref(),
-                            promotion.as_deref(),
-                            &replication,
-                            &graph,
-                            &managers,
-                            durability.as_ref(),
-                        )
-                        .await
-                    }
-                }
-            }
-            Request::Disconnect => {
-                send_response(&mut socket, &Response::Goodbye, config.write_timeout).await?;
-                break;
-            }
-            Request::BeginTransaction {
-                read_only,
-                session_token,
-            } => match check_session(config.require_auth, &auth, &session_token) {
-                Err(resp) => resp,
-                Ok(role) => {
-                    // 書き込みトランザクションの開始には Write 権限を要求する。
-                    if !read_only
-                        && crate::auth::AuthManager::check_role_permission(
-                            role,
-                            crate::auth::Operation::Write,
-                        )
-                        .is_err()
-                    {
-                        Response::AuthError {
-                            message: "permission denied: role cannot begin a write transaction"
-                                .to_string(),
-                        }
-                    } else {
-                        let tx_id = if read_only {
-                            tx_manager.begin_read_only()
-                        } else {
-                            tx_manager.begin()
-                        };
-                        Response::TransactionBegun { tx_id }
-                    }
-                }
-            },
-            Request::Commit {
-                tx_id,
-                session_token,
-            } => match check_session(config.require_auth, &auth, &session_token) {
-                Err(resp) => resp,
-                Ok(_) => match tx_manager.commit(tx_id) {
-                    Ok(()) => Response::Committed { tx_id },
-                    Err(e) => Response::Error {
-                        message: format!("Commit failed: {}", e),
-                    },
-                },
-            },
-            Request::Rollback {
-                tx_id,
-                session_token,
-            } => match check_session(config.require_auth, &auth, &session_token) {
-                Err(resp) => resp,
-                Ok(_) => {
-                    // Serialize with writers so the compensating WAL entries
-                    // are ordered after the statements they undo.
-                    let write_guard = managers.write_gate.lock().await;
-                    match managers.rollback(&graph, &tx_manager, tx_id, sinks.record()) {
-                        Ok(wal) => {
-                            let ticket = sinks.publish(wal).await;
-                            drop(write_guard);
-                            let durable = match ticket {
-                                Ok(t) => sinks.wait_durable(t).await,
-                                Err(e) => Err(e),
-                            };
-                            match durable {
-                                Ok(()) => Response::RolledBack { tx_id },
-                                Err(message) => Response::Error { message },
-                            }
-                        }
-                        Err(e) => Response::Error {
-                            message: format!("Rollback failed: {}", e),
-                        },
-                    }
-                }
-            },
-        };
-
-        if let Some(query_type) = measured {
-            metrics.record_query(query_type, started.elapsed());
-            if matches!(
-                response,
-                Response::Error { .. } | Response::AuthError { .. }
-            ) {
-                metrics.record_error();
-            }
-            metrics.set_node_count(graph.node_count() as i64);
-            metrics.set_edge_count(graph.edge_count() as i64);
         }
-
-        send_response(&mut socket, &response, config.write_timeout).await?;
     }
 
-    Ok(())
+    result
+}
+
+/// Roll back `tx_id`: apply the compensating changes, write them to the WAL and
+/// send them to followers.
+async fn rollback_transaction(
+    graph: &Arc<ConcurrentGraph>,
+    managers: &SharedManagers,
+    tx_manager: &TransactionManager,
+    sinks: WriteSinks<'_>,
+    tx_id: u64,
+) -> Response {
+    // Serialize with writers so the compensating WAL entries are ordered after
+    // the statements they undo.
+    let write_guard = managers.write_gate.lock().await;
+    match managers.rollback(graph, tx_manager, tx_id, sinks.record()) {
+        Ok(wal) => {
+            let ticket = sinks.publish(wal).await;
+            drop(write_guard);
+            let durable = match ticket {
+                Ok(t) => sinks.wait_durable(t).await,
+                Err(e) => Err(e),
+            };
+            match durable {
+                Ok(()) => Response::RolledBack { tx_id },
+                Err(message) => Response::Error { message },
+            }
+        }
+        Err(e) => Response::Error {
+            message: format!("Rollback failed: {}", e),
+        },
+    }
 }
 
 /// Read a length-prefixed message from the socket
@@ -1885,6 +1935,14 @@ async fn execute_query_with_tx(
     if !tx_manager.is_active(tx_id) {
         return Response::Error {
             message: format!("Execution error: transaction {} is not active", tx_id),
+        };
+    }
+    if tx_manager.is_read_only(tx_id) {
+        return Response::Error {
+            message: format!(
+                "Execution error: transaction {} is read-only: cannot run a write query",
+                tx_id
+            ),
         };
     }
 
@@ -2812,6 +2870,75 @@ mod tests {
             Response::Result { rows } => rows.len(),
             other => panic!("query failed: {q}: {other:?}"),
         }
+    }
+
+    /// bug/159: a read-only transaction refuses writes, and a transaction left
+    /// open when its connection closes is rolled back.
+    #[tokio::test]
+    async fn read_only_transactions_and_disconnect_rollback() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+
+        let ro = match send_recv(
+            &mut s,
+            &Request::BeginTransaction {
+                read_only: true,
+                session_token: None,
+            },
+        )
+        .await
+        {
+            Response::TransactionBegun { tx_id } => tx_id,
+            other => panic!("begin failed: {other:?}"),
+        };
+        match tx_query(&mut s, ro, "CREATE (:T)").await {
+            Response::Error { message } => assert!(message.contains("read-only"), "{message}"),
+            other => panic!("write in a read-only transaction was accepted: {other:?}"),
+        }
+        assert!(matches!(
+            tx_query(&mut s, ro, "MATCH (n) RETURN count(n) AS c").await,
+            Response::Result { .. }
+        ));
+        assert_eq!(row_count(&mut s, "MATCH (n:T) RETURN n").await, 0);
+
+        // Begin, write, and disconnect without committing.
+        let mut other = TcpStream::connect(addr).await.unwrap();
+        let tx = begin(&mut other).await;
+        assert!(matches!(
+            tx_query(&mut other, tx, "CREATE (:Left)").await,
+            Response::Result { .. }
+        ));
+        assert_eq!(row_count(&mut s, "MATCH (n:Left) RETURN n").await, 1);
+        drop(other);
+        let mut gone = 1;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            gone = row_count(&mut s, "MATCH (n:Left) RETURN n").await;
+            if gone == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            gone, 0,
+            "unfinished transaction was not rolled back on disconnect"
+        );
+
+        // A committed transaction stays.
+        let mut third = TcpStream::connect(addr).await.unwrap();
+        let tx = begin(&mut third).await;
+        tx_query(&mut third, tx, "CREATE (:Kept)").await;
+        let resp = send_recv(
+            &mut third,
+            &Request::Commit {
+                tx_id: tx,
+                session_token: None,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Committed { .. }), "{resp:?}");
+        drop(third);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(row_count(&mut s, "MATCH (n:Kept) RETURN n").await, 1);
     }
 
     /// bug/156: the metrics served on /metrics reflect client activity.

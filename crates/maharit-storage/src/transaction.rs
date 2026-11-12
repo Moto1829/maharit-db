@@ -453,6 +453,13 @@ impl TransactionManager {
     // These methods allow the server layer (tcp_server) to record undo entries
     // for operations performed via the Executor, which is unaware of transactions.
 
+    /// Whether `tx_id` was begun read-only.
+    pub fn is_read_only(&self, tx_id: TxId) -> bool {
+        self.get_transaction(tx_id)
+            .map(|tx| tx.lock().unwrap().read_only)
+            .unwrap_or(false)
+    }
+
     /// Whether `tx_id` refers to a transaction that is still active.
     pub fn is_active(&self, tx_id: TxId) -> bool {
         self.get_transaction(tx_id)
