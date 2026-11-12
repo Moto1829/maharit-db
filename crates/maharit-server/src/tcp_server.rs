@@ -747,8 +747,8 @@ impl SharedManagers {
     ///
     /// Write statements must be executed while holding `write_gate`. For writes
     /// with `record_wal`, the returned log holds every graph mutation in
-    /// execution order (also when the statement fails midway, since the graph
-    /// is not rolled back and followers must see the same state).
+    /// execution order. A statement that fails midway is undone and returns an
+    /// empty log, so the WAL and followers never see its partial changes.
     #[cfg(test)]
     fn execute(
         &self,
@@ -830,14 +830,27 @@ impl SharedManagers {
                 .property_index
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            let mut recorder = RecordingGraph::new(graph, record_wal);
-            if capture_undo {
-                recorder = recorder.with_undo();
-            }
+            // Undo records are always captured so that a statement that fails
+            // midway can be undone: a statement either applies completely or
+            // not at all (bug/160).
+            let mut recorder = RecordingGraph::new(graph, record_wal).with_undo();
             let result =
                 Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
                     .execute_with_params(stmt, params);
-            let (mut wal, undo) = recorder.into_parts();
+            let (mut wal, mut undo) = recorder.into_parts();
+            if result.is_err() {
+                if !undo.is_empty() {
+                    // Not recorded: the partial changes never reach the WAL or
+                    // followers, so nothing needs to be compensated there.
+                    let mut reverter = RecordingGraph::new(graph, false);
+                    let touched = maharit_storage::apply_undo(&undo, &mut reverter);
+                    crate::schema::reindex_nodes(graph, touched, &mut fm, &mut pi);
+                }
+                wal.clear();
+                undo.clear();
+            } else if !capture_undo {
+                undo.clear();
+            }
             // Log the whole schema after a DDL statement so that WAL replay
             // and followers end up with the same constraints and indexes.
             if is_ddl && record_wal && result.is_ok() {
@@ -1947,8 +1960,7 @@ async fn execute_query_with_tx(
     }
 
     let (exec_result, wal, undo) = managers.execute_in_tx(graph, stmt, params, sinks.record());
-    // Record undo even when the statement failed midway: its partial changes
-    // were applied and must be reverted by ROLLBACK.
+    // A failed statement has already been undone (no undo records left).
     if let Err(e) = tx_manager.record_undo(tx_id, undo) {
         tracing::error!(tx_id, error = %e, "failed to record undo log");
     }
@@ -2870,6 +2882,48 @@ mod tests {
             Response::Result { rows } => rows.len(),
             other => panic!("query failed: {q}: {other:?}"),
         }
+    }
+
+    /// bug/160: a statement that fails midway leaves no changes behind, in or
+    /// outside a transaction, and the property index stays consistent.
+    #[tokio::test]
+    async fn failed_statement_is_undone() {
+        let addr = start_test_server().await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        query(
+            &mut s,
+            "CREATE CONSTRAINT u_k FOR (n:U) REQUIRE n.k IS UNIQUE",
+        )
+        .await;
+        query(&mut s, "CREATE INDEX ON :U(k)").await;
+        query(&mut s, "CREATE (:U {k: 0, v: 'orig'})").await;
+
+        let resp = query(&mut s, "UNWIND [1, 2, 2, 3] AS k CREATE (:U {k: k})").await;
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(row_count(&mut s, "MATCH (n:U) RETURN n").await, 1);
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 1}) RETURN n").await, 0);
+
+        // SET that fails on a later row: the earlier rows are restored too.
+        query(&mut s, "CREATE (:U {k: 5, v: 'five'})").await;
+        let resp = query(&mut s, "MATCH (n:U) SET n.v = 'x', n.k = 7").await;
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(
+            row_count(&mut s, "MATCH (n:U) WHERE n.v = 'x' RETURN n").await,
+            0
+        );
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 0}) RETURN n").await, 1);
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 7}) RETURN n").await, 0);
+
+        // Inside a transaction: the failed statement is undone, earlier ones stay.
+        let tx = begin(&mut s).await;
+        tx_query(&mut s, tx, "CREATE (:U {k: 10})").await;
+        let resp = tx_query(&mut s, tx, "UNWIND [11, 11] AS k CREATE (:U {k: k})").await;
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 10}) RETURN n").await, 1);
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 11}) RETURN n").await, 0);
+        rollback(&mut s, tx).await;
+        assert_eq!(row_count(&mut s, "MATCH (n:U {k: 10}) RETURN n").await, 0);
+        assert_eq!(row_count(&mut s, "MATCH (n:U) RETURN n").await, 2);
     }
 
     /// bug/159: a read-only transaction refuses writes, and a transaction left

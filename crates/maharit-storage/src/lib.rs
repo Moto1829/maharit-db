@@ -18,7 +18,8 @@ pub use mvcc::{
 };
 pub use persistence::{PersistenceError, PersistentStorage};
 pub use transaction::{
-    LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId, UndoRecord,
+    LockMode, Transaction, TransactionError, TransactionManager, TransactionState, TxId,
+    UndoRecord, apply_undo,
 };
 pub use wal::{LogRecord, Lsn, RecordPayload, RecordType, Wal, WalError};
 pub use wal_group_commit::{WalGroupCommitConfig, WalGroupCommitter};

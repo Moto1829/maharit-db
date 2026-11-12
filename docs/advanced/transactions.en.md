@@ -56,6 +56,7 @@ Writes inside a transaction are **applied to the graph and the WAL when they run
 - **Rollback**: undoes created and deleted nodes and relationships, property and label changes, and index updates. The cancelling changes are written to the WAL too, so the rollback survives restarts and reaches followers
 - **When the connection closes**: transactions that were neither committed nor rolled back are rolled back automatically
 - **Read only**: in a transaction begun with `{"type": "begin", "readOnly": true}` (`client.transaction(read_only=True)` in Python), write queries fail
+- **A query applies completely or not at all**: when a query fails midway (a constraint violation, for example), every change it made is undone. Inside a transaction, changes from earlier queries remain
 - **On failure**: if the server crashes before a commit, the changes made so far remain after restart (they are not rolled back automatically)
 
 Unless you need to be able to roll back, it is simpler to write the change as a single query without a transaction. One query can create and update several elements.
@@ -64,9 +65,6 @@ Unless you need to be able to roll back, it is simpler to write the change as a 
 MATCH (a:Account {id: "A"}), (b:Account {id: "B"})
 SET a.balance = a.balance - 100, b.balance = b.balance + 100
 ```
-
-!!! warning "Known limitations"
-    - When a query fails midway, the changes it made before the error remain (the same outside transactions; bug/160). Inside a transaction you can undo them with `rollback`
 
 ## Writing large amounts of data
 

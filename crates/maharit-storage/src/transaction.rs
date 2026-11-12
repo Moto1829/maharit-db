@@ -264,83 +264,11 @@ impl TransactionManager {
             return Err(TransactionError::AlreadyFinished(tx_id));
         }
 
-        let mut touched: Vec<NodeId> = Vec::new();
-        for record in tx.undo_log.iter().rev() {
-            match record {
-                UndoRecord::CreateNode { node_id } => {
-                    graph.delete_node(*node_id);
-                    touched.push(*node_id);
-                }
-                UndoRecord::DeleteNode {
-                    node_id,
-                    labels,
-                    properties,
-                } => {
-                    graph.restore_node(*node_id, labels.clone());
-                    for (key, value) in properties.iter() {
-                        graph.set_node_property(*node_id, key, value.clone());
-                    }
-                    touched.push(*node_id);
-                }
-                UndoRecord::SetProperty {
-                    node_id,
-                    key,
-                    old_value,
-                } => {
-                    match old_value {
-                        Some(value) => graph.set_node_property(*node_id, key, value.clone()),
-                        None => {
-                            graph.remove_node_property(*node_id, key);
-                        }
-                    }
-                    touched.push(*node_id);
-                }
-                UndoRecord::CreateEdge { edge_id } => {
-                    graph.delete_edge(*edge_id);
-                }
-                UndoRecord::DeleteEdge {
-                    edge_id,
-                    from,
-                    to,
-                    label,
-                    properties,
-                } => {
-                    if graph
-                        .restore_edge(*edge_id, *from, *to, label.clone())
-                        .is_ok()
-                    {
-                        for (k, v) in properties.iter() {
-                            graph.set_edge_property(*edge_id, k, v.clone());
-                        }
-                    }
-                }
-                UndoRecord::SetEdgeProperty {
-                    edge_id,
-                    key,
-                    old_value,
-                } => match old_value {
-                    Some(value) => graph.set_edge_property(*edge_id, key, value.clone()),
-                    None => {
-                        graph.remove_edge_property(*edge_id, key);
-                    }
-                },
-                UndoRecord::AddLabel { node_id, label } => {
-                    graph.remove_node_label(*node_id, label);
-                    touched.push(*node_id);
-                }
-                UndoRecord::RemoveLabel { node_id, label } => {
-                    graph.add_node_label(*node_id, label.clone());
-                    touched.push(*node_id);
-                }
-            }
-        }
+        let touched = apply_undo(&tx.undo_log, graph);
 
         self.release_all_locks(tx_id, &tx.held_locks);
         tx.undo_log.clear();
         tx.state = TransactionState::RolledBack;
-
-        touched.sort_unstable();
-        touched.dedup();
         Ok(touched)
     }
 
@@ -764,6 +692,86 @@ impl TransactionManager {
             })
             .collect()
     }
+}
+
+/// Apply undo records in reverse order to `graph` and return the IDs of the
+/// nodes whose properties or labels were changed back (sorted, deduplicated),
+/// so their indexes can be rebuilt.
+pub fn apply_undo(undo_log: &[UndoRecord], graph: &mut dyn GraphBackend) -> Vec<NodeId> {
+    let mut touched: Vec<NodeId> = Vec::new();
+    for record in undo_log.iter().rev() {
+        match record {
+            UndoRecord::CreateNode { node_id } => {
+                graph.delete_node(*node_id);
+                touched.push(*node_id);
+            }
+            UndoRecord::DeleteNode {
+                node_id,
+                labels,
+                properties,
+            } => {
+                graph.restore_node(*node_id, labels.clone());
+                for (key, value) in properties.iter() {
+                    graph.set_node_property(*node_id, key, value.clone());
+                }
+                touched.push(*node_id);
+            }
+            UndoRecord::SetProperty {
+                node_id,
+                key,
+                old_value,
+            } => {
+                match old_value {
+                    Some(value) => graph.set_node_property(*node_id, key, value.clone()),
+                    None => {
+                        graph.remove_node_property(*node_id, key);
+                    }
+                }
+                touched.push(*node_id);
+            }
+            UndoRecord::CreateEdge { edge_id } => {
+                graph.delete_edge(*edge_id);
+            }
+            UndoRecord::DeleteEdge {
+                edge_id,
+                from,
+                to,
+                label,
+                properties,
+            } => {
+                if graph
+                    .restore_edge(*edge_id, *from, *to, label.clone())
+                    .is_ok()
+                {
+                    for (k, v) in properties.iter() {
+                        graph.set_edge_property(*edge_id, k, v.clone());
+                    }
+                }
+            }
+            UndoRecord::SetEdgeProperty {
+                edge_id,
+                key,
+                old_value,
+            } => match old_value {
+                Some(value) => graph.set_edge_property(*edge_id, key, value.clone()),
+                None => {
+                    graph.remove_edge_property(*edge_id, key);
+                }
+            },
+            UndoRecord::AddLabel { node_id, label } => {
+                graph.remove_node_label(*node_id, label);
+                touched.push(*node_id);
+            }
+            UndoRecord::RemoveLabel { node_id, label } => {
+                graph.add_node_label(*node_id, label.clone());
+                touched.push(*node_id);
+            }
+        }
+    }
+
+    touched.sort_unstable();
+    touched.dedup();
+    touched
 }
 
 #[cfg(test)]
