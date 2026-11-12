@@ -504,7 +504,7 @@ fn run_server(args: &[String]) {
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
                 spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
-                spawn_http_server(metrics_bind.clone());
+                spawn_http_server(metrics_bind.clone(), server.metrics());
                 tokio::spawn(async move {
                     if let Err(e) = leader_clone.start().await {
                         eprintln!("Replication leader error: {}", e);
@@ -585,7 +585,7 @@ fn run_server(args: &[String]) {
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
                 spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
-                spawn_http_server(metrics_bind.clone());
+                spawn_http_server(metrics_bind.clone(), server.metrics());
                 // Keep retrying until the leader is reachable, and reconnect
                 // whenever the connection drops.
                 follower_clone.start_with_retry();
@@ -621,7 +621,7 @@ fn run_server(args: &[String]) {
             let checkpointer = server.checkpointer();
             rt.block_on(async move {
                 spawn_shutdown_handler(writer_for_signal, path_for_signal, checkpointer);
-                spawn_http_server(metrics_bind.clone());
+                spawn_http_server(metrics_bind.clone(), server.metrics());
                 if let Err(e) = server.start().await {
                     eprintln!("Server error: {}", e);
                     std::process::exit(1);
@@ -772,13 +772,14 @@ fn resolve_leader_tls(
 ///
 /// Binds to `bind_address` if provided, otherwise the safe default
 /// (`127.0.0.1:9090`, loopback only).
-fn spawn_http_server(bind_address: Option<String>) {
+fn spawn_http_server(
+    bind_address: Option<String>,
+    metrics: std::sync::Arc<crate::metrics::Metrics>,
+) {
     use crate::http_server::{HealthState, HttpConfig, HttpServer};
-    use crate::metrics::Metrics;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    let metrics = Arc::new(Metrics::new());
     let health = Arc::new(HealthState::default());
     let config = match bind_address {
         Some(addr) => HttpConfig { bind_address: addr },

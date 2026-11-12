@@ -564,6 +564,8 @@ pub struct TcpServer {
     durability: Option<Arc<Durability>>,
     /// TLS for client connections. `None` serves plaintext.
     tls: Option<ReloadableTlsAcceptor>,
+    /// Prometheus metrics served by the monitoring HTTP server (`/metrics`).
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 /// The leader replication manager, if this node currently is a leader. Set at
@@ -956,6 +958,7 @@ impl TcpServer {
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
             tls: None,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
 
@@ -975,6 +978,7 @@ impl TcpServer {
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
             tls: None,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
 
@@ -994,7 +998,16 @@ impl TcpServer {
             ast_cache: Arc::new(Mutex::new(AstCache::new(AST_CACHE_CAPACITY))),
             durability: None,
             tls: None,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
+    }
+
+    /// The metrics this server records (queries, errors, latency, connections,
+    /// graph size). Hand it to the monitoring HTTP server.
+    pub fn metrics(&self) -> Arc<crate::metrics::Metrics> {
+        self.metrics.set_node_count(self.graph.node_count() as i64);
+        self.metrics.set_edge_count(self.graph.edge_count() as i64);
+        Arc::clone(&self.metrics)
     }
 
     /// Return a clone of the graph Arc
@@ -1169,6 +1182,8 @@ impl TcpServer {
                     self.stats
                         .current_connections
                         .fetch_add(1, Ordering::SeqCst);
+                    self.metrics.increment_connections();
+                    let metrics = Arc::clone(&self.metrics);
 
                     let graph = Arc::clone(&self.graph);
                     let stats = Arc::clone(&self.stats);
@@ -1199,6 +1214,7 @@ impl TcpServer {
                             auth,
                             ast_cache,
                             durability,
+                            metrics: Arc::clone(&metrics),
                         };
                         let result = match tls {
                             None => handle_connection(socket, ctx, &mut shutdown_rx).await,
@@ -1231,6 +1247,7 @@ impl TcpServer {
                         }
 
                         stats.current_connections.fetch_sub(1, Ordering::SeqCst);
+                        metrics.decrement_connections();
                     });
                 }
                 Ok(Err(e)) => {
@@ -1283,6 +1300,7 @@ struct ConnectionContext {
     auth: Arc<Mutex<crate::auth::AuthManager>>,
     ast_cache: Arc<Mutex<AstCache>>,
     durability: Option<Arc<Durability>>,
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 /// Handle a single client connection (plain TCP or TLS).
@@ -1307,6 +1325,7 @@ where
         auth,
         ast_cache,
         durability,
+        metrics,
     } = ctx;
     let mut buffer = BytesMut::with_capacity(4096);
 
@@ -1361,6 +1380,15 @@ where
         };
 
         // Handle request
+        // Metrics: classify the query before `request` is consumed.
+        let measured = match &request {
+            Request::Query { query, .. } | Request::StreamQuery { query, .. } => {
+                Some(crate::metrics::QueryType::of_query(query))
+            }
+            _ => None,
+        };
+        let started = std::time::Instant::now();
+
         let response = match request {
             Request::Login { username, password } => {
                 let mut mgr = auth.lock().unwrap();
@@ -1610,6 +1638,18 @@ where
                 }
             },
         };
+
+        if let Some(query_type) = measured {
+            metrics.record_query(query_type, started.elapsed());
+            if matches!(
+                response,
+                Response::Error { .. } | Response::AuthError { .. }
+            ) {
+                metrics.record_error();
+            }
+            metrics.set_node_count(graph.node_count() as i64);
+            metrics.set_edge_count(graph.edge_count() as i64);
+        }
 
         send_response(&mut socket, &response, config.write_timeout).await?;
     }
@@ -2772,6 +2812,39 @@ mod tests {
             Response::Result { rows } => rows.len(),
             other => panic!("query failed: {q}: {other:?}"),
         }
+    }
+
+    /// bug/156: the metrics served on /metrics reflect client activity.
+    #[tokio::test]
+    async fn metrics_record_queries_errors_connections_and_graph_size() {
+        use crate::metrics::QueryType;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            ..Default::default()
+        });
+        let metrics = server.metrics();
+        tokio::spawn(async move { server.start_with_listener(listener).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        query(&mut s, "CREATE (:A)-[:R]->(:B)").await;
+        query(&mut s, "MATCH (n) RETURN n").await;
+        query(&mut s, "MATCH (n:A) SET n.x = 1").await;
+        query(&mut s, "MATCH (n RETURN n").await;
+
+        assert_eq!(metrics.query_count(QueryType::Create), 1);
+        assert_eq!(metrics.query_count(QueryType::Match), 2);
+        assert_eq!(metrics.query_count(QueryType::Set), 1);
+        assert_eq!(metrics.error_count(), 1);
+        assert_eq!(metrics.node_count(), 2);
+        assert_eq!(metrics.edge_count(), 1);
+        assert_eq!(metrics.current_connections(), 1);
+        assert_eq!(metrics.total_connections(), 1);
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(metrics.current_connections(), 0);
     }
 
     /// bug/142: DETACH DELETE のサーバー経路（RecordingGraph）でも、ノードと

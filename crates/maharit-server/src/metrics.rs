@@ -114,6 +114,36 @@ impl QueryType {
         }
     }
 
+    /// Classify a query by its first keyword (`MATCH … SET` counts as `set`).
+    pub fn of_query(query: &str) -> Self {
+        let upper = query.to_ascii_uppercase();
+        let words: Vec<&str> = upper.split_whitespace().collect();
+        let has = |w: &str| words.iter().any(|x| *x == w);
+        match words.first().copied() {
+            Some("CREATE") if has("CONSTRAINT") || has("INDEX") => QueryType::Constraint,
+            Some("DROP") if has("CONSTRAINT") || has("INDEX") => QueryType::Constraint,
+            Some("CREATE") => QueryType::Create,
+            Some("MERGE") => QueryType::Merge,
+            Some("UNWIND") => QueryType::Unwind,
+            Some("MATCH") | Some("OPTIONAL") => {
+                if has("DELETE") {
+                    QueryType::Delete
+                } else if has("SET") {
+                    QueryType::Set
+                } else if has("REMOVE") {
+                    QueryType::Remove
+                } else if has("MERGE") {
+                    QueryType::Merge
+                } else if has("CREATE") {
+                    QueryType::Create
+                } else {
+                    QueryType::Match
+                }
+            }
+            _ => QueryType::Other,
+        }
+    }
+
     /// Convert query type to lowercase string label for Prometheus.
     const fn as_str(self) -> &'static str {
         match self {
@@ -588,6 +618,28 @@ impl Drop for QueryTimer<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn query_type_of_query() {
+        use super::QueryType as Q;
+        for (q, t) in [
+            ("CREATE (:A)", Q::Create),
+            ("create index on :A(x)", Q::Constraint),
+            (
+                "CREATE CONSTRAINT c FOR (n:A) REQUIRE n.x IS UNIQUE",
+                Q::Constraint,
+            ),
+            ("MATCH (n) RETURN n", Q::Match),
+            ("MATCH (n) SET n.x = 1", Q::Set),
+            ("MATCH (n) DETACH DELETE n", Q::Delete),
+            ("MATCH (n) REMOVE n.x", Q::Remove),
+            ("MERGE (n:A)", Q::Merge),
+            ("UNWIND [1] AS x RETURN x", Q::Unwind),
+            ("RETURN 1", Q::Other),
+        ] {
+            assert_eq!(Q::of_query(q), t, "{q}");
+        }
+    }
+
     use super::*;
     use std::sync::Arc;
     use std::thread;

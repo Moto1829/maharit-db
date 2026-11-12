@@ -32,9 +32,6 @@ maharit server --metrics-bind 0.0.0.0:9090
 curl http://127.0.0.1:9090/metrics
 ```
 
-!!! warning "既知の不具合"
-    現在、クエリ数・エラー数・レイテンシ・ノード数・リレーションシップ数・接続数は、クライアントの操作が反映されず常に 0 です（bug/156）。正しい値が出るのは `maharit_memory_usage_bytes` と `maharit_uptime_seconds` だけです。
-
 | メトリクス | 種類 | 説明 |
 |---|---|---|
 | `maharit_queries_total{type}` | counter | 実行したクエリ数。`type` は `create` / `match` / `delete` / `set` / `merge` / `remove` / `unwind` / `constraint` / `other` |

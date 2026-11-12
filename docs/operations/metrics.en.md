@@ -33,9 +33,6 @@ Any other path returns `404 Not Found`.
 curl http://127.0.0.1:9090/metrics
 ```
 
-!!! warning "Known issue"
-    Currently the query, error, latency, node, relationship, and connection metrics do not reflect client activity and always read 0 (bug/156). Only `maharit_memory_usage_bytes` and `maharit_uptime_seconds` report correct values.
-
 | Metric | Type | Description |
 |---|---|---|
 | `maharit_queries_total{type}` | counter | Queries executed. `type` is `create` / `match` / `delete` / `set` / `merge` / `remove` / `unwind` / `constraint` / `other` |
