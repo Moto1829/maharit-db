@@ -118,7 +118,7 @@ impl QueryType {
     pub fn of_query(query: &str) -> Self {
         let upper = query.to_ascii_uppercase();
         let words: Vec<&str> = upper.split_whitespace().collect();
-        let has = |w: &str| words.iter().any(|x| *x == w);
+        let has = |w: &str| words.contains(&w);
         match words.first().copied() {
             Some("CREATE") if has("CONSTRAINT") || has("INDEX") => QueryType::Constraint,
             Some("DROP") if has("CONSTRAINT") || has("INDEX") => QueryType::Constraint,
