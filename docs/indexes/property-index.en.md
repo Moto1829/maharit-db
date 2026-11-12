@@ -67,9 +67,6 @@ MATCH (n:Person) WHERE n.age >= 25 AND n.age <= 40 RETURN n
 
 `EXPLAIN` shows whether an index is used.
 
-!!! warning "Known issue"
-    `EXPLAIN` currently ignores indexes and shows `NodeByLabelScan` even when an index exists (bug/167). The output below is what it shows once that is fixed.
-
 ```cypher
 EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n.name
 ```
@@ -77,28 +74,28 @@ EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n.name
 Example output when the index is used:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-IndexSeek                         1        2 :Person.name
-Return                            1        1
+IndexSeek                           1        2 :Person.name
+Projection                          1        1 columns: n.name
 ```
 
 Without an index, `NodeByLabelScan` is shown:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-NodeByLabelScan                  10        2 :Person
-Return                           10        1
+NodeByLabelScan                    11        2 :Person
+Projection                         11        1 columns: n.name
 ```
 
 When a `WHERE` condition uses the index, `IndexRangeScan` is shown:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-IndexRangeScan                    2        1 :Person.age
-Return                            2        1
+IndexRangeScan                      2        1 :Person.age
+Projection                          2        1
 ```
 
 ## Index design best practices

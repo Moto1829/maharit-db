@@ -32,9 +32,6 @@ Projection                          2        1
 - `Cost`: the estimated amount of work (relative)
 - `Details`: the label, relationship type, aggregation keys, and so on
 
-!!! warning "Known issue"
-    `EXPLAIN` / `PROFILE` currently ignore indexes and show `NodeByLabelScan` instead of `IndexSeek` even when an index exists (bug/167).
-
 ## PROFILE
 
 Runs the query and shows the execution plan together with the number of result rows and the execution time.

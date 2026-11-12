@@ -66,9 +66,6 @@ MATCH (n:Person) WHERE n.age >= 25 AND n.age <= 40 RETURN n
 
 インデックスが使用されているかどうかは `EXPLAIN` で確認できます。
 
-!!! warning "既知の不具合"
-    現在、`EXPLAIN` はインデックスを反映せず、インデックスがあっても `NodeByLabelScan` と表示します（bug/167）。下の出力例は修正後の表示です。
-
 ```cypher
 EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n.name
 ```
@@ -76,28 +73,28 @@ EXPLAIN MATCH (n:Person {name: "Alice"}) RETURN n.name
 インデックスが使用されている場合の出力例:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-IndexSeek                         1        2 :Person.name
-Return                            1        1
+IndexSeek                           1        2 :Person.name
+Projection                          1        1 columns: n.name
 ```
 
 インデックスが未作成の場合は `NodeByLabelScan` が表示されます:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-NodeByLabelScan                  10        2 :Person
-Return                           10        1
+NodeByLabelScan                    11        2 :Person
+Projection                         11        1 columns: n.name
 ```
 
 WHERE 句の条件でインデックスが適用される場合は `IndexRangeScan` が表示されます:
 
 ```
-Operator                  Est. Rows     Cost Details
+Operator                    Est. Rows     Cost Details
 ------------------------------------------------------------------------
-IndexRangeScan                    2        1 :Person.age
-Return                            2        1
+IndexRangeScan                      2        1 :Person.age
+Projection                          2        1
 ```
 
 ## インデックス設計のベストプラクティス

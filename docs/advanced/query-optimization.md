@@ -31,9 +31,6 @@ Projection                          2        1
 - `Cost`: 見積もりの処理量（相対値）
 - `Details`: 対象のラベル・リレーションシップの型・集計のキーなど
 
-!!! warning "既知の不具合"
-    現在、`EXPLAIN` / `PROFILE` はインデックスを反映せず、インデックスがあっても `IndexSeek` ではなく `NodeByLabelScan` と表示します（bug/167）。
-
 ## PROFILE
 
 クエリを実際に実行し、実行計画とあわせて結果の行数と実行時間を表示します。

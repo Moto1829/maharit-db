@@ -948,6 +948,30 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                                 .collect::<String>()
                         };
 
+                        // Inline equality on an indexed property, `(n:L {p: 'v'})`:
+                        // the executor looks literals up in the index.
+                        if let Some(label) = np.labels.first() {
+                            let mut keys: Vec<&String> = np
+                                .properties
+                                .iter()
+                                .filter(|(k, v)| {
+                                    matches!(v, Expression::Literal(_)) && stats.has_index(label, k)
+                                })
+                                .map(|(k, _)| k)
+                                .collect();
+                            keys.sort();
+                            if let Some(property) = keys.first() {
+                                nodes.push(PlanNode::new(
+                                    "IndexSeek",
+                                    1u64.max(est / 100),
+                                    2,
+                                    &format!("{}.{}", label_info, property),
+                                ));
+                                used_index = true;
+                                continue;
+                            }
+                        }
+
                         // Index selection: use the first label for index lookup
                         if let (Some(label), Some(where_expr)) =
                             (np.labels.first(), &segment.where_clause)

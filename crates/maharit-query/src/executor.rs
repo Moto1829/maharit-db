@@ -2300,10 +2300,31 @@ impl<'a> Executor<'a> {
 
     // ========== EXPLAIN / PROFILE ==========
 
+    /// Graph statistics for EXPLAIN / PROFILE: counts per label and the
+    /// property indexes that exist, so the plan shows index use (bug/167).
+    fn plan_stats(&self) -> crate::planner::GraphStats {
+        let graph = self.graph_ref();
+        let mut label_counts: HashMap<String, u64> = HashMap::new();
+        for node in graph.all_nodes() {
+            for label in &node.labels {
+                *label_counts.entry(label.clone()).or_insert(0) += 1;
+            }
+        }
+        crate::planner::GraphStats {
+            node_count: graph.node_count() as u64,
+            edge_count: graph.edge_count() as u64,
+            label_counts,
+            indexed_properties: self
+                .property_index
+                .list_indexes()
+                .into_iter()
+                .map(|d| (d.label.clone(), d.property.clone()))
+                .collect(),
+        }
+    }
+
     fn execute_explain(&self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
-        let node_count = self.graph_ref().node_count() as u64;
-        let edge_count = self.graph_ref().edge_count() as u64;
-        let plan = crate::planner::build_plan(&stmt, node_count, edge_count);
+        let plan = crate::planner::build_plan_with_stats(&stmt, &self.plan_stats());
         let plan_text = format!("{}", plan);
 
         let mut rows = Vec::new();
@@ -2317,9 +2338,7 @@ impl<'a> Executor<'a> {
     }
 
     fn execute_profile(&mut self, stmt: Statement) -> Result<ResultSet, ExecuteError> {
-        let node_count = self.graph_ref().node_count() as u64;
-        let edge_count = self.graph_ref().edge_count() as u64;
-        let mut plan = crate::planner::build_plan(&stmt, node_count, edge_count);
+        let mut plan = crate::planner::build_plan_with_stats(&stmt, &self.plan_stats());
 
         // Execute the statement and measure time
         let start = std::time::Instant::now();
@@ -12531,6 +12550,38 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_explain_reflects_property_indexes() {
+        // bug/167: EXPLAIN showed NodeByLabelScan even with an index
+        let mut graph = Graph::new();
+        let mut ex = Executor::new(&mut graph);
+        let mut plan = |q: &str| -> String {
+            let r = ex
+                .execute(Parser::new(q).unwrap().parse().unwrap())
+                .unwrap();
+            r.rows
+                .iter()
+                .map(|row| format!("{:?}", row.columns[0]))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        plan("UNWIND range(1, 20) AS i CREATE (:Person {name: toString(i), age: i})");
+        assert!(plan("EXPLAIN MATCH (n:Person {name: '1'}) RETURN n").contains("NodeByLabelScan"));
+        plan("CREATE INDEX ON :Person(name)");
+        plan("CREATE INDEX ON :Person(age)");
+        let p = plan("EXPLAIN MATCH (n:Person {name: '1'}) RETURN n");
+        assert!(p.contains("IndexSeek") && p.contains(":Person.name"), "{p}");
+        let p = plan("EXPLAIN MATCH (n:Person) WHERE n.name = '1' RETURN n");
+        assert!(p.contains("IndexSeek"), "{p}");
+        let p = plan("EXPLAIN MATCH (n:Person) WHERE n.age > 15 RETURN n");
+        assert!(
+            p.contains("IndexRangeScan") && p.contains(":Person.age"),
+            "{p}"
+        );
+        let p = plan("PROFILE MATCH (n:Person {name: '1'}) RETURN n");
+        assert!(p.contains("IndexSeek"), "{p}");
     }
 
     #[test]
