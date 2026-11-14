@@ -69,9 +69,14 @@ MATCH (n:Person) RETURN n.name, labels(n)
 // 変数束縛とプロパティ
 (a)-[r:KNOWS {since: 2020}]->(b)
 
+// 型を複数指定（いずれかに一致。マッチ時のみ）
+(a)-[:KNOWS|FOLLOWS]->(b)
+
 // ホップ数指定（可変長）
 (a)-[:KNOWS*1..3]->(b)
 ```
+
+CREATE / MERGE で作るエッジには型を 1 つだけ指定します（`[:A|B]` はエラー）。
 
 ## CREATE
 

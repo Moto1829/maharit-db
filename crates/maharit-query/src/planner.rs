@@ -578,12 +578,7 @@ fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanN
                         ));
                         for seg in &pp.segments {
                             let est_expand = edge_count.max(1);
-                            let edge_info = seg
-                                .edge
-                                .edge_type
-                                .as_ref()
-                                .map(|t| format!(":{}", t))
-                                .unwrap_or_default();
+                            let edge_info = seg.edge.type_display();
                             nodes.push(PlanNode::new(
                                 "Expand",
                                 est_expand,
@@ -1069,12 +1064,7 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                                     .map(|l| format!(":{}", l))
                                     .collect::<String>()
                             };
-                            let edge_info = pp.segments[0]
-                                .edge
-                                .edge_type
-                                .as_ref()
-                                .map(|t| format!(":{}", t))
-                                .unwrap_or_default();
+                            let edge_info = pp.segments[0].edge.type_display();
 
                             if est_end < est_start && !end_node.labels.is_empty() {
                                 // Reverse: scan end node first, expand backward
@@ -1130,12 +1120,7 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                             ));
                             for seg in &pp.segments {
                                 let est_expand = stats.edge_count.max(1);
-                                let edge_info = seg
-                                    .edge
-                                    .edge_type
-                                    .as_ref()
-                                    .map(|t| format!(":{}", t))
-                                    .unwrap_or_default();
+                                let edge_info = seg.edge.type_display();
                                 nodes.push(PlanNode::new(
                                     "Expand",
                                     est_expand,

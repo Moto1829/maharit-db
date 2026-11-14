@@ -17,7 +17,7 @@ task 123 で docs の ```cypher ブロックをパース検査するテスト
   `SKIP $a * ($b - 1)` のような式（list / predicates / order-limit-skip）
 - 関数: `sin` / `asin` / `atan2` / `exp` / `pow`、`length("str")`、`startsWith()` などの関数形、
   `exists(n.prop)`（math / string / predicates）
-- パターン: 複数リレーションタイプ `[:ROAD|FERRY*]`（all-paths）、
+- パターン: ~~複数リレーションタイプ `[:ROAD|FERRY*]`（all-paths）~~（task164 で対応）、
   `SET n:A:B` の複数ラベル（set-remove-merge）、`CREATE INDEX FOR (n:L) ON (n.p)`（query-optimization）
   （`CREATE (n:Person $props)` と `SET n = {…}` は task145 で対応済み）
 - 予約語: 変数名 `end`（predicates。CASE の END と衝突）

@@ -1124,6 +1124,10 @@ impl<'a> Executor<'a> {
         let mut bindings = existing_bindings.clone();
         let mut created_nodes = 0i64;
         let mut created_edges = 0i64;
+        // 途中まで作ってから失敗しないよう、先に型指定を検査する
+        for pattern in &create.patterns {
+            check_single_edge_types(pattern)?;
+        }
 
         for pattern in &create.patterns {
             match pattern {
@@ -1182,7 +1186,7 @@ impl<'a> Executor<'a> {
                             EdgeDirection::Both => (current_id, end_id),
                         };
 
-                        let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+                        let edge_label = single_edge_type(&segment.edge)?;
 
                         // Validate endpoint label constraints before creating edge
                         self.constraints.validate_edge_create(
@@ -1506,6 +1510,7 @@ impl<'a> Executor<'a> {
         pattern: &Pattern,
         bindings: &mut Bindings,
     ) -> Result<(), ExecuteError> {
+        check_single_edge_types(pattern)?;
         match pattern {
             Pattern::Node(node_pattern) => {
                 if let Some(var) = &node_pattern.variable
@@ -1550,7 +1555,7 @@ impl<'a> Executor<'a> {
                         EdgeDirection::Both => (current_id, end_id),
                     };
 
-                    let edge_label = segment.edge.edge_type.clone().unwrap_or_default();
+                    let edge_label = single_edge_type(&segment.edge)?;
 
                     // Validate endpoint label constraints before creating edge
                     self.constraints.validate_edge_create(
@@ -3566,9 +3571,7 @@ impl<'a> Executor<'a> {
 
         for edge in edges {
             // Check edge type
-            if let Some(ref edge_type) = segment.edge.edge_type
-                && &edge.label != edge_type
-            {
+            if !segment.edge.matches_type(&edge.label) {
                 continue;
             }
             if !self.edge_matches_properties(&edge, &segment.edge, bindings)? {
@@ -3651,9 +3654,7 @@ impl<'a> Executor<'a> {
 
                 for edge in edges {
                     // Check edge type
-                    if let Some(ref edge_type) = segment.edge.edge_type
-                        && &edge.label != edge_type
-                    {
+                    if !segment.edge.matches_type(&edge.label) {
                         continue;
                     }
                     if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
@@ -3764,9 +3765,7 @@ impl<'a> Executor<'a> {
                 let mut next = Vec::new();
                 for &node in &frontier {
                     for edge in self.get_edges_by_direction(node, segment.edge.direction) {
-                        if let Some(ref edge_type) = segment.edge.edge_type
-                            && &edge.label != edge_type
-                        {
+                        if !segment.edge.matches_type(&edge.label) {
                             continue;
                         }
                         if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
@@ -6956,6 +6955,28 @@ fn pattern_variables(patterns: &[Pattern]) -> Vec<String> {
         }
     }
     vars
+}
+
+/// パターン中で作るリレーションシップすべてについて [`single_edge_type`] を検査する。
+fn check_single_edge_types(pattern: &Pattern) -> Result<(), ExecuteError> {
+    if let Pattern::Path(pp) = pattern {
+        for seg in &pp.segments {
+            single_edge_type(&seg.edge)?;
+        }
+    }
+    Ok(())
+}
+
+/// CREATE / MERGE で作るリレーションシップの型。`[:A|B]` のように複数指定されていたらエラー。
+fn single_edge_type(edge: &EdgePattern) -> Result<String, ExecuteError> {
+    match edge.edge_types.as_slice() {
+        [] => Ok(String::new()),
+        [t] => Ok(t.clone()),
+        _ => Err(ExecuteError::TypeError(format!(
+            "a relationship created by CREATE or MERGE must have exactly one type, got {}",
+            edge.type_display()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -13053,6 +13074,71 @@ mod tests {
         let r = execute(&mut graph, "MATCH (n:P) DETACH DELETE n").unwrap();
         assert_eq!(r.rows[0].columns, vec![Value::Int(2), Value::Int(1)]);
         assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_multiple_relationship_types() {
+        // task164: `[:A|B]` はいずれかの型に一致する
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (a:C {n: 'a'})-[:ROAD]->(b:C {n: 'b'})-[:FERRY]->(c:C {n: 'c'})-[:AIR]->(d:C {n: 'd'})",
+        )
+        .unwrap();
+
+        let r = execute(
+            &mut graph,
+            "MATCH (x)-[r:ROAD|FERRY]->(y) RETURN type(r) AS t ORDER BY t",
+        )
+        .unwrap();
+        let types: Vec<_> = r.rows.iter().map(|row| row.columns[0].clone()).collect();
+        assert_eq!(
+            types,
+            vec![Value::String("FERRY".into()), Value::String("ROAD".into())]
+        );
+
+        // 旧来の `[:A|:B]` も同じ意味
+        let r = execute(&mut graph, "MATCH ()-[r:ROAD|:AIR]->() RETURN count(r)").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+
+        // 可変長: ROAD/FERRY だけで a から c まで行ける、d へは AIR が要るので行けない
+        let r = execute(
+            &mut graph,
+            "MATCH p = (a:C {n: 'a'})-[:ROAD|FERRY*1..5]->(b) RETURN b.n ORDER BY b.n",
+        )
+        .unwrap();
+        let ends: Vec<_> = r.rows.iter().map(|row| row.columns[0].clone()).collect();
+        assert_eq!(
+            ends,
+            vec![Value::String("b".into()), Value::String("c".into())]
+        );
+
+        // shortestPath
+        let r = execute(
+            &mut graph,
+            "MATCH p = shortestPath((a:C {n: 'a'})-[:ROAD|FERRY*]->(c:C {n: 'c'})) RETURN length(p)",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+        let r = execute(
+            &mut graph,
+            "MATCH p = shortestPath((a:C {n: 'a'})-[:ROAD|FERRY*]->(d:C {n: 'd'})) RETURN length(p)",
+        )
+        .unwrap();
+        assert!(r.rows.is_empty());
+    }
+
+    #[test]
+    fn test_create_and_merge_reject_multiple_relationship_types() {
+        // task164: 作るリレーションシップの型は 1 つに決まっていなければならない
+        let mut graph = Graph::new();
+        let err = execute(&mut graph, "CREATE (a)-[:A|B]->(b)").unwrap_err();
+        assert!(matches!(err, ExecuteError::TypeError(_)), "{err:?}");
+        execute(&mut graph, "CREATE (:X), (:Y)").unwrap();
+        let err = execute(&mut graph, "MATCH (x:X), (y:Y) MERGE (x)-[:A|B]->(y)").unwrap_err();
+        assert!(matches!(err, ExecuteError::TypeError(_)), "{err:?}");
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(graph.node_count(), 2);
     }
 
     #[test]

@@ -30,7 +30,12 @@ MATCH p = (a:Node {id: 1})-[*1..3]->(b:Node {id: 10})
 RETURN p, length(p)
 ```
 
-リレーションシップの型を複数指定する書き方（`[:ROAD|FERRY*]`）にはまだ対応していません（query-clauses/164）。
+```cypher
+// 道路かフェリーで行ける 5 ホップ以内の経路（型を `|` で並べると、いずれかに一致）
+MATCH p = (a:City {name: "Tokyo"})-[:ROAD|FERRY*1..5]->(b:City {name: "Sapporo"})
+RETURN [n IN nodes(p) | n.name] AS route, length(p) AS hops
+ORDER BY hops
+```
 
 ## Rust API: all_paths
 

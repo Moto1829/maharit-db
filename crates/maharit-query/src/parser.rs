@@ -2744,7 +2744,7 @@ impl Parser {
         };
 
         let mut variable = None;
-        let mut edge_type = None;
+        let mut edge_types = Vec::new();
         let mut properties = HashMap::new();
         let mut properties_param = None;
         let mut length_range = None;
@@ -2761,7 +2761,15 @@ impl Parser {
             // Type (optional) — リレーション型もラベル同様キーワードを許容 (Task 108)
             if self.check(TokenKind::Colon) {
                 self.advance();
-                edge_type = Some(self.expect_ident_or_keyword()?);
+                edge_types.push(self.expect_ident_or_keyword()?);
+                // `[:A|B]`（旧来の `[:A|:B]` も許容）
+                while self.check(TokenKind::Pipe) {
+                    self.advance();
+                    if self.check(TokenKind::Colon) {
+                        self.advance();
+                    }
+                    edge_types.push(self.expect_ident_or_keyword()?);
+                }
             }
 
             // Variable-length path: *min..max (optional)
@@ -2796,7 +2804,7 @@ impl Parser {
 
         Ok(EdgePattern {
             variable,
-            edge_type,
+            edge_types,
             properties,
             properties_param,
             direction: final_direction,
@@ -3684,7 +3692,7 @@ mod tests {
                 assert_eq!(path.segments.len(), 1);
 
                 let seg = &path.segments[0];
-                assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
+                assert_eq!(seg.edge.edge_types, vec!["KNOWS".to_string()]);
                 assert_eq!(seg.edge.direction, EdgeDirection::Outgoing);
                 assert_eq!(seg.node.variable, Some("b".to_string()));
             } else {
@@ -3898,7 +3906,7 @@ mod tests {
         if let Statement::Match(m) = stmt {
             if let Pattern::Path(path) = &m.segments[0].match_clauses[0].patterns[0] {
                 let seg = &path.segments[0];
-                assert_eq!(seg.edge.edge_type, Some("KNOWS".to_string()));
+                assert_eq!(seg.edge.edge_types, vec!["KNOWS".to_string()]);
                 let range = seg
                     .edge
                     .length_range

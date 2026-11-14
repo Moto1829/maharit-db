@@ -316,13 +316,30 @@ pub struct PathSegment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgePattern {
     pub variable: Option<String>,
-    pub edge_type: Option<String>,
+    /// リレーションシップの型。`[:A|B]` なら `["A", "B"]`（いずれかに一致）、空なら型を問わない。
+    pub edge_types: Vec<String>,
     pub properties: HashMap<String, Expression>,
     /// `-[r:TYPE $props]->` のパラメータ名（[`NodePattern::properties_param`] と同じ）。
     pub properties_param: Option<String>,
     pub direction: EdgeDirection,
     /// Variable-length path: *min..max (None means exactly 1 hop)
     pub length_range: Option<LengthRange>,
+}
+
+impl EdgePattern {
+    /// `label` がこのパターンの型指定に一致するか（型指定が無ければ常に一致）。
+    pub fn matches_type(&self, label: &str) -> bool {
+        self.edge_types.is_empty() || self.edge_types.iter().any(|t| t == label)
+    }
+
+    /// EXPLAIN 等の表示用: `:A|B`（型指定が無ければ空文字列）。
+    pub fn type_display(&self) -> String {
+        if self.edge_types.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", self.edge_types.join("|"))
+        }
+    }
 }
 
 /// Length range for variable-length paths

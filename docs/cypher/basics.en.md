@@ -70,9 +70,14 @@ Edges are written with square brackets `[]` and arrows.
 // Variable binding and properties
 (a)-[r:KNOWS {since: 2020}]->(b)
 
+// Several types (matches any of them; matching only)
+(a)-[:KNOWS|FOLLOWS]->(b)
+
 // Number of hops (variable length)
 (a)-[:KNOWS*1..3]->(b)
 ```
+
+An edge created by CREATE or MERGE takes exactly one type (`[:A|B]` is an error).
 
 ## CREATE
 
