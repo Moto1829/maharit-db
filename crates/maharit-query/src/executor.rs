@@ -804,6 +804,7 @@ impl<'a> Executor<'a> {
                 self.build_result_set(&return_clause, &[bindings])
             }
             Statement::Match(m) => self.execute_match(m),
+            Statement::Pipeline(p) => self.execute_pipeline(&p),
             Statement::Delete(d) => self.execute_delete(d),
             Statement::Union(u) => self.execute_union(u),
             Statement::MatchCreate(mc) => self.execute_match_create(mc),
@@ -1463,9 +1464,29 @@ impl<'a> Executor<'a> {
             }
         }
 
+        let result_bindings = self.apply_merge(&merge, &all_bindings)?;
+
+        if let Some(return_clause) = &merge.return_clause {
+            self.build_result_set(return_clause, &result_bindings)
+        } else {
+            Ok(ResultSet::new(
+                vec!["merge_result".to_string()],
+                vec![Row {
+                    columns: vec![Value::String("ok".to_string())],
+                }],
+            ))
+        }
+    }
+
+    /// 行ごとに MERGE のパターンを照合し、無ければ作る。照合・作成後の行を返す。
+    fn apply_merge(
+        &mut self,
+        merge: &MergeStatement,
+        all_bindings: &[Bindings],
+    ) -> Result<Vec<Bindings>, ExecuteError> {
         let mut result_bindings = Vec::new();
 
-        for bindings in &all_bindings {
+        for bindings in all_bindings {
             // Try to MATCH the merge patterns
             let mut match_result = vec![bindings.clone()];
             for pattern in &merge.patterns {
@@ -1492,17 +1513,96 @@ impl<'a> Executor<'a> {
                 result_bindings.extend(match_result);
             }
         }
+        Ok(result_bindings)
+    }
 
-        if let Some(return_clause) = &merge.return_clause {
-            self.build_result_set(return_clause, &result_bindings)
-        } else {
-            Ok(ResultSet::new(
-                vec!["merge_result".to_string()],
-                vec![Row {
-                    columns: vec![Value::String("ok".to_string())],
-                }],
-            ))
+    // ========== 句の列（task171） ==========
+
+    /// 句を書かれた順に、行（バインディング）の列へ適用する。
+    fn execute_pipeline(&mut self, p: &PipelineStatement) -> Result<ResultSet, ExecuteError> {
+        let mut rows: Vec<Bindings> = vec![Bindings::new()];
+        let (mut created_nodes, mut created_edges) = (0i64, 0i64);
+        let (mut deleted_nodes, mut deleted_edges) = (0i64, 0i64);
+        let mut properties_set = 0i64;
+        let counts = |this: &Self| {
+            (
+                this.graph_ref().node_count() as i64,
+                this.graph_ref().edge_count() as i64,
+            )
+        };
+
+        for clause in &p.clauses {
+            match clause {
+                PipelineClause::Read(segment) => {
+                    rows = self.execute_query_segment(segment, rows)?;
+                }
+                PipelineClause::Create(create) => {
+                    let mut next = Vec::with_capacity(rows.len());
+                    for b in &rows {
+                        let (n, e, b) = self.execute_create_with_bindings(create, b)?;
+                        created_nodes += n;
+                        created_edges += e;
+                        next.push(b);
+                    }
+                    rows = next;
+                }
+                PipelineClause::Merge(merge) => {
+                    let before = counts(self);
+                    rows = self.apply_merge(merge, &rows)?;
+                    let after = counts(self);
+                    created_nodes += after.0 - before.0;
+                    created_edges += after.1 - before.1;
+                }
+                PipelineClause::Update(update) => {
+                    if let UpdateClause::Set(set) = update {
+                        properties_set += set.items.len() as i64 * rows.len() as i64;
+                    }
+                    self.apply_update_clauses(std::slice::from_ref(update), &rows)?;
+                }
+                PipelineClause::Delete(delete) => {
+                    let before = counts(self);
+                    for b in &rows {
+                        self.apply_delete_clause(delete, b)?;
+                    }
+                    let after = counts(self);
+                    deleted_nodes += before.0 - after.0;
+                    deleted_edges += before.1 - after.1;
+                }
+                PipelineClause::Foreach(f) => {
+                    let before = counts(self);
+                    for b in &rows {
+                        self.execute_foreach_stmt_ref(f, b)?;
+                    }
+                    let after = counts(self);
+                    created_nodes += (after.0 - before.0).max(0);
+                    created_edges += (after.1 - before.1).max(0);
+                    deleted_nodes += (before.0 - after.0).max(0);
+                    deleted_edges += (before.1 - after.1).max(0);
+                }
+            }
         }
+
+        if let Some(return_clause) = &p.return_clause {
+            return self.build_result_set(return_clause, &rows);
+        }
+        Ok(ResultSet::new(
+            vec![
+                "created_nodes".to_string(),
+                "created_edges".to_string(),
+                "deleted_nodes".to_string(),
+                "deleted_edges".to_string(),
+                "properties_set".to_string(),
+            ],
+            vec![Row {
+                columns: vec![
+                    Value::Int(created_nodes),
+                    Value::Int(created_edges),
+                    Value::Int(deleted_nodes),
+                    Value::Int(deleted_edges),
+                    Value::Int(properties_set),
+                ],
+            }],
+        ))
     }
 
     fn create_pattern(
@@ -13188,14 +13288,103 @@ mod tests {
     }
 
     #[test]
-    fn test_unwind_before_delete_is_rejected() {
-        // DELETE / MERGE の文は UNWIND をまだ扱わないので、黙って無視せずエラーにする
-        for q in [
-            "UNWIND [1] AS i MATCH (n {id: i}) DETACH DELETE n",
-            "UNWIND [1] AS i MERGE (n:P {id: i})",
-        ] {
-            assert!(Parser::new(q).unwrap().parse().is_err(), "{q}");
-        }
+    fn test_write_clause_chaining() {
+        // task171: 書き込み句の後にも句を続けられる
+        let mut graph = Graph::new();
+        let count = |g: &mut Graph, q: &str| execute(g, q).unwrap().rows[0].columns[0].clone();
+
+        // CREATE … CREATE、件数は 5 列で返す
+        let r = execute(&mut graph, "CREATE (:Q {n: 1}) CREATE (:Q {n: 2})").unwrap();
+        assert_eq!(r.columns[0], "created_nodes");
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+
+        // MATCH … CREATE … SET … RETURN
+        let r = execute(
+            &mut graph,
+            "MATCH (a:Q {n: 1}) CREATE (c:Q {n: 3}) SET c.from = a.n RETURN c.from",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(1));
+
+        // CREATE … WITH … MATCH: 作ったノードが後続の MATCH に見える
+        assert_eq!(
+            count(
+                &mut graph,
+                "CREATE (x:Q {n: 4}) WITH x MATCH (q:Q) RETURN count(q)"
+            ),
+            Value::Int(4)
+        );
+
+        // UNWIND … MATCH … DETACH DELETE
+        let r = execute(
+            &mut graph,
+            "UNWIND [1, 2] AS i MATCH (n:Q {n: i}) DETACH DELETE n",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[2], Value::Int(2));
+        assert_eq!(
+            count(&mut graph, "MATCH (q:Q) RETURN count(q)"),
+            Value::Int(2)
+        );
+
+        // UNWIND … MERGE: 同じ値は 1 回だけ作る
+        assert_eq!(
+            count(
+                &mut graph,
+                "UNWIND [7, 8, 7] AS i MERGE (m:M {i: i}) RETURN count(m)"
+            ),
+            Value::Int(3)
+        );
+        assert_eq!(
+            count(&mut graph, "MATCH (m:M) RETURN count(m)"),
+            Value::Int(2)
+        );
+
+        // MATCH … WITH … MERGE（WITH を無視しない）
+        execute(
+            &mut graph,
+            "MATCH (m:M) WITH m WHERE m.i = 7 MERGE (m)-[:SELF]->(m)",
+        )
+        .unwrap();
+        assert_eq!(
+            count(&mut graph, "MATCH ()-[r:SELF]->() RETURN count(r)"),
+            Value::Int(1)
+        );
+
+        // MERGE … MERGE … MERGE
+        let r = execute(
+            &mut graph,
+            "MERGE (a:Z {k: 1}) MERGE (b:Z {k: 2}) MERGE (a)-[:R]->(b)",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[..2], [Value::Int(2), Value::Int(1)]);
+
+        // SET … CREATE … REMOVE
+        execute(
+            &mut graph,
+            "MATCH (q:Q) SET q.t = 1 CREATE (:Log {n: q.n}) REMOVE q.t",
+        )
+        .unwrap();
+        assert_eq!(
+            count(&mut graph, "MATCH (l:Log) RETURN count(l)"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            count(
+                &mut graph,
+                "MATCH (q:Q) WHERE q.t IS NOT NULL RETURN count(q)"
+            ),
+            Value::Int(0)
+        );
+
+        // 句の列にならない誤りは元のエラーのまま
+        assert!(
+            Parser::new("MATCH (n) RETURN n junk")
+                .unwrap()
+                .parse()
+                .is_err()
+        );
+        assert!(Parser::new("CREATE (a) SET").unwrap().parse().is_err());
     }
 
     #[test]

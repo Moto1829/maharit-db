@@ -164,6 +164,29 @@ MATCH (n:Person {name: "Dave"})
 DETACH DELETE n
 ```
 
+## Chaining clauses
+
+`MATCH` / `OPTIONAL MATCH` / `UNWIND` / `WITH` / `CREATE` / `MERGE` / `SET` / `REMOVE` / `DELETE` / `FOREACH` apply,
+in the order written, to the rows produced by the previous clause. The final `RETURN` is optional (without it, the counts of created and deleted elements are returned).
+
+```cypher
+// Look up nodes by a list of IDs and flag the ones found
+UNWIND [1, 2, 3] AS id
+MATCH (p:Product {id: id})
+SET p.featured = true
+RETURN p.name
+```
+
+```cypher
+// Use a node you just created in the following clauses
+MATCH (a:Person {name: "Alice"})
+CREATE (a)-[:WROTE]->(post:Post {title: "Hello"})
+SET post.created_at = timestamp()
+WITH post
+MATCH (f:Person)-[:FOLLOWS]->(:Person {name: "Alice"})
+CREATE (f)-[:NOTIFIED]->(post)
+```
+
 ## Comments
 
 Everything from `//` to the end of the line is a comment. Text enclosed in `/* … */` is also a comment and may span multiple lines.

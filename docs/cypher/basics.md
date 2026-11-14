@@ -163,6 +163,29 @@ MATCH (n:Person {name: "Dave"})
 DETACH DELETE n
 ```
 
+## 句をつなげる
+
+`MATCH` / `OPTIONAL MATCH` / `UNWIND` / `WITH` / `CREATE` / `MERGE` / `SET` / `REMOVE` / `DELETE` / `FOREACH` は、
+書いた順に前の句の結果（行）へ適用されます。最後の `RETURN` は省略できます（省略すると作成・削除の件数を返します）。
+
+```cypher
+// ID のリストで探し、見つかったノードに印を付ける
+UNWIND [1, 2, 3] AS id
+MATCH (p:Product {id: id})
+SET p.featured = true
+RETURN p.name
+```
+
+```cypher
+// 作ったノードを、続く句でそのまま使う
+MATCH (a:Person {name: "Alice"})
+CREATE (a)-[:WROTE]->(post:Post {title: "Hello"})
+SET post.created_at = timestamp()
+WITH post
+MATCH (f:Person)-[:FOLLOWS]->(:Person {name: "Alice"})
+CREATE (f)-[:NOTIFIED]->(post)
+```
+
 ## コメント
 
 `//` から行末まではコメントとして扱われます。`/* … */` で囲んだ部分もコメントになり、複数行にまたがっても構いません。

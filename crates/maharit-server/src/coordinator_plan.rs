@@ -129,6 +129,8 @@ pub fn plan(query: &str) -> Result<CoordPlan, String> {
             }
         }
         Statement::Profile(_) => Err(unsupported("PROFILE")),
+        // 読み取りだけの句の列（決まった形で読めなかったもの）。合算の仕方を決められない
+        Statement::Pipeline(_) => Err(unsupported("this combination of clauses")),
         // SHOW … / プロシージャ: 各シャードの結果を連結し、重複を除く
         _ => fan_out(Merge::Distinct),
     }

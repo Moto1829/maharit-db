@@ -17,6 +17,10 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         // Pure reads
         Statement::Match(_) => true,
         Statement::Return(_) => true,
+        Statement::Pipeline(p) => p
+            .clauses
+            .iter()
+            .all(|c| matches!(c, PipelineClause::Read(_))),
         Statement::Union(u) => u.queries.iter().all(|_| true), // all MATCH queries
         Statement::ShowConstraints => true,
         Statement::ShowUsers => true,
@@ -106,6 +110,29 @@ pub enum Statement {
     ProcedureCall(ProcedureCallStatement),
     /// 単独RETURN文: RETURN 1+1 AS result
     Return(ReturnClause),
+    /// 句を書かれた順に適用する文（task171）。決まった形の文で表せない
+    /// `MATCH … CREATE … SET …`、`CREATE … WITH … MATCH …` などに使う。
+    Pipeline(PipelineStatement),
+}
+
+/// 句の列（[`Statement::Pipeline`]）
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineStatement {
+    pub clauses: Vec<PipelineClause>,
+    pub return_clause: Option<ReturnClause>,
+}
+
+/// [`PipelineStatement`] の句。どれも行（バインディング）の列を受け取り、行の列を返す。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PipelineClause {
+    /// UNWIND / MATCH / OPTIONAL MATCH / WHERE / WITH
+    Read(QuerySegment),
+    Create(CreateClause),
+    /// MERGE（`match_clauses` / `where_clause` / `return_clause` は使わない）
+    Merge(MergeStatement),
+    Update(UpdateClause),
+    Delete(DeleteClause),
+    Foreach(ForeachStatement),
 }
 
 /// UNION文

@@ -377,6 +377,7 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
     let nodes = match stmt {
         Statement::Create(create) | Statement::CreateReturn(create, _) => plan_create(create),
         Statement::Match(m) => plan_match_with_stats(m, stats),
+        Statement::Pipeline(p) => plan_pipeline(p, &|m| plan_match_with_stats(m, stats)),
         Statement::Delete(d) => plan_delete_with_stats(d, stats),
         Statement::Union(u) => plan_union_with_stats(u, stats),
         Statement::MatchCreate(mc) => plan_match_create_with_stats(mc, stats),
@@ -458,6 +459,7 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
     let nodes = match stmt {
         Statement::Create(create) | Statement::CreateReturn(create, _) => plan_create(create),
         Statement::Match(m) => plan_match(m, node_count, edge_count),
+        Statement::Pipeline(p) => plan_pipeline(p, &|m| plan_match(m, node_count, edge_count)),
         Statement::Delete(d) => plan_delete(d, node_count),
         Statement::Union(u) => plan_union(u, node_count, edge_count),
         Statement::MatchCreate(mc) => plan_match_create(mc, node_count, edge_count),
@@ -542,6 +544,71 @@ fn plan_create(create: &CreateClause) -> Vec<PlanNode> {
         pattern_count,
         &format!("{} pattern(s)", pattern_count),
     )]
+}
+
+/// 句の列（task171）: 読み取りは `plan_read` の結果（最後の Projection を除く）、書き込みは句ごとに 1 つ並べる。
+fn plan_pipeline(
+    p: &PipelineStatement,
+    plan_read: &dyn Fn(&MatchStatement) -> Vec<PlanNode>,
+) -> Vec<PlanNode> {
+    let empty_return = ReturnClause {
+        distinct: false,
+        items: vec![],
+        order_by: None,
+        skip: None,
+        limit: None,
+    };
+    let mut nodes = Vec::new();
+    for clause in &p.clauses {
+        match clause {
+            PipelineClause::Read(seg) => {
+                let mut read = plan_read(&MatchStatement {
+                    segments: vec![seg.clone()],
+                    call_clause: None,
+                    return_clause: empty_return.clone(),
+                });
+                if read.last().is_some_and(|n| n.operator == "Projection") {
+                    read.pop();
+                }
+                nodes.extend(read);
+            }
+            PipelineClause::Create(c) => nodes.push(PlanNode::new(
+                "Create",
+                1,
+                1,
+                &format!("{} pattern(s)", c.patterns.len()),
+            )),
+            PipelineClause::Merge(_) => nodes.push(PlanNode::new("Merge", 1, 1, "")),
+            PipelineClause::Update(UpdateClause::Set(s)) => nodes.push(PlanNode::new(
+                "SetProperties",
+                1,
+                1,
+                &format!("{} item(s)", s.items.len()),
+            )),
+            PipelineClause::Update(UpdateClause::Remove(_)) => {
+                nodes.push(PlanNode::new("Remove", 1, 1, ""))
+            }
+            PipelineClause::Delete(d) => nodes.push(PlanNode::new(
+                if d.detach { "DetachDelete" } else { "Delete" },
+                1,
+                1,
+                "",
+            )),
+            PipelineClause::Foreach(_) => {
+                nodes.push(PlanNode::new("Foreach", 1, 1, "iterate list"))
+            }
+        }
+    }
+    if let Some(rc) = &p.return_clause {
+        nodes.push(PlanNode::new("Projection", 1, 1, ""));
+        if rc.order_by.is_some() {
+            nodes.push(PlanNode::new("Sort", 1, 1, ""));
+        }
+        if rc.limit.is_some() || rc.skip.is_some() {
+            nodes.push(PlanNode::new("Limit", 1, 1, ""));
+        }
+    }
+    nodes
 }
 
 /// セグメント先頭の UNWIND 句を `Unwind` として並べる（行数は不明なので 1 と見積もる）。

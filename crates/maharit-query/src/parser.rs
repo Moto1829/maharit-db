@@ -137,7 +137,151 @@ impl Parser {
         }
     }
 
+    /// 決まった形の文として読み、書き込み句の後に句が続いていたり読めなかったりしたら、
+    /// 先頭から句の列（[`Statement::Pipeline`]）として読み直す（task171）。
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        let start = self.pos;
+        let data_statement = matches!(
+            self.peek_kind(),
+            Some(
+                TokenKind::Create
+                    | TokenKind::Match
+                    | TokenKind::Merge
+                    | TokenKind::Unwind
+                    | TokenKind::Optional
+                    | TokenKind::With
+                    | TokenKind::Foreach
+            )
+        );
+        let result = self.parse_fixed_statement();
+        if !data_statement || (result.is_ok() && !self.at_pipeline_clause()) {
+            return result;
+        }
+        // DDL（CREATE INDEX など）は句の列にならない
+        if let Ok(stmt) = &result
+            && !matches!(
+                stmt,
+                Statement::Create(_)
+                    | Statement::CreateReturn(..)
+                    | Statement::Match(_)
+                    | Statement::MatchCreate(_)
+                    | Statement::MatchSet(_)
+                    | Statement::MatchRemove(_)
+                    | Statement::Merge(_)
+                    | Statement::Delete(_)
+                    | Statement::Unwind(_)
+                    | Statement::Foreach(_)
+                    | Statement::MatchForeach(_)
+            )
+        {
+            return result;
+        }
+        let end = self.pos;
+        self.pos = start;
+        match self.parse_pipeline() {
+            Ok(stmt) if matches!(self.peek_kind(), None | Some(TokenKind::Eof)) => Ok(stmt),
+            _ => {
+                self.pos = end;
+                result
+            }
+        }
+    }
+
+    /// 次のトークンが句の始まりか（決まった形の文の後に続いていたら句の列として読み直す）
+    fn at_pipeline_clause(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            Some(
+                TokenKind::Create
+                    | TokenKind::Match
+                    | TokenKind::Optional
+                    | TokenKind::Merge
+                    | TokenKind::Unwind
+                    | TokenKind::With
+                    | TokenKind::Set
+                    | TokenKind::Remove
+                    | TokenKind::Delete
+                    | TokenKind::Detach
+                    | TokenKind::Foreach
+            )
+        )
+    }
+
+    /// 句の列: 任意の順の読み取り・書き込み句と、最後の省略可能な RETURN
+    fn parse_pipeline(&mut self) -> Result<Statement, ParseError> {
+        let mut clauses = Vec::new();
+        let return_clause = loop {
+            match self.peek_kind() {
+                Some(
+                    TokenKind::Match | TokenKind::Optional | TokenKind::Unwind | TokenKind::With,
+                ) => {
+                    let (segment, _, set_clause, delete_clause) = self.parse_query_segment()?;
+                    clauses.push(PipelineClause::Read(segment));
+                    if let Some(set) = set_clause {
+                        clauses.push(PipelineClause::Update(UpdateClause::Set(set)));
+                    }
+                    if let Some(delete) = delete_clause {
+                        clauses.push(PipelineClause::Delete(delete));
+                    }
+                }
+                Some(TokenKind::Where)
+                    if matches!(
+                        clauses.last(),
+                        Some(PipelineClause::Read(QuerySegment {
+                            with_clause: Some(_),
+                            ..
+                        }))
+                    ) =>
+                {
+                    // WITH … WHERE
+                    self.advance();
+                    clauses.push(PipelineClause::Read(QuerySegment {
+                        where_clause: Some(self.parse_expression()?),
+                        ..Default::default()
+                    }));
+                }
+                Some(TokenKind::Create) => {
+                    clauses.push(PipelineClause::Create(self.parse_create_clause()?))
+                }
+                Some(TokenKind::Merge) => match self.parse_merge(vec![], None)? {
+                    Statement::Merge(m) if m.return_clause.is_some() => {
+                        let mut m = m;
+                        let rc = m.return_clause.take();
+                        clauses.push(PipelineClause::Merge(m));
+                        break rc;
+                    }
+                    Statement::Merge(m) => clauses.push(PipelineClause::Merge(m)),
+                    _ => unreachable!("parse_merge returns Statement::Merge"),
+                },
+                Some(TokenKind::Set) => clauses.push(PipelineClause::Update(UpdateClause::Set(
+                    self.parse_set_clause()?,
+                ))),
+                Some(TokenKind::Remove) => clauses.push(PipelineClause::Update(
+                    UpdateClause::Remove(self.parse_remove_clause()?),
+                )),
+                Some(TokenKind::Delete | TokenKind::Detach) => {
+                    clauses.push(PipelineClause::Delete(self.parse_delete_clause()?))
+                }
+                Some(TokenKind::Foreach) => {
+                    clauses.push(PipelineClause::Foreach(self.parse_foreach_statement()?))
+                }
+                Some(TokenKind::Return) => {
+                    self.advance();
+                    break Some(self.parse_return_clause()?);
+                }
+                _ => break None,
+            }
+        };
+        if clauses.is_empty() {
+            return Err(self.unexpected_token("a clause"));
+        }
+        Ok(Statement::Pipeline(PipelineStatement {
+            clauses,
+            return_clause,
+        }))
+    }
+
+    fn parse_fixed_statement(&mut self) -> Result<Statement, ParseError> {
         // Handle EXPLAIN / PROFILE prefixes
         if self.check(TokenKind::Explain) {
             self.advance();
@@ -345,7 +489,11 @@ impl Parser {
         // Parse first segment
         let (first_segment, is_delete, set_clause, delete_clause) = self.parse_query_segment()?;
 
-        if !first_segment.unwinds.is_empty() && (is_delete || self.check(TokenKind::Merge)) {
+        // UNWIND・WITH を含む DELETE / MERGE は決まった形の文で表せないので、
+        // エラーにして句の列（parse_pipeline）で読み直させる
+        if (!first_segment.unwinds.is_empty() && (is_delete || self.check(TokenKind::Merge)))
+            || (first_segment.with_clause.is_some() && self.check(TokenKind::Merge))
+        {
             return Err(
                 self.unexpected_token("MATCH, WITH, CREATE, SET, REMOVE or RETURN after UNWIND")
             );
