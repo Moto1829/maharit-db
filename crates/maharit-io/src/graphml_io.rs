@@ -448,7 +448,8 @@ impl GraphMlExporter {
             PropertyValue::String(_) => "string",
             PropertyValue::Date(_)
             | PropertyValue::DateTime(_)
-            | PropertyValue::Duration { .. } => "string",
+            | PropertyValue::Duration { .. }
+            | PropertyValue::List(_) => "string",
         }
     }
 
@@ -486,7 +487,8 @@ impl GraphMlExporter {
             PropertyValue::String(s) => s.clone(),
             PropertyValue::Date(_)
             | PropertyValue::DateTime(_)
-            | PropertyValue::Duration { .. } => value.to_string(),
+            | PropertyValue::Duration { .. }
+            | PropertyValue::List(_) => value.to_string(),
         }
     }
 }

@@ -140,7 +140,8 @@ impl DotExporter {
             }
             PropertyValue::Date(_)
             | PropertyValue::DateTime(_)
-            | PropertyValue::Duration { .. } => v.to_string(),
+            | PropertyValue::Duration { .. }
+            | PropertyValue::List(_) => v.to_string(),
         }
     }
 

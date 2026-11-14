@@ -37,6 +37,11 @@ pub fn property_value_to_wal_string(val: &PropertyValue) -> String {
             days,
             millis,
         } => format!("{{\"$duration\":[{months},{days},{millis}]}}"),
+        // リストは JSON の配列（要素は同じ規則で書く）
+        PropertyValue::List(items) => {
+            let parts: Vec<String> = items.iter().map(property_value_to_wal_string).collect();
+            format!("[{}]", parts.join(","))
+        }
         other => serde_json::to_string(&other.to_string()).unwrap_or_default(),
     }
 }
@@ -45,10 +50,32 @@ pub fn property_value_to_wal_string(val: &PropertyValue) -> String {
 ///
 /// Text that is not valid JSON (or an unknown shape) is kept as a string.
 pub fn property_value_from_wal_string(value: &str) -> PropertyValue {
-    let as_string = || PropertyValue::String(value.to_string());
     let Ok(json) = serde_json::from_str::<serde_json::Value>(value) else {
-        return as_string();
+        return PropertyValue::String(value.to_string());
     };
+    if let serde_json::Value::Array(items) = &json {
+        // リスト。要素に配列（ネストしたリスト）があれば元の文字列のまま扱う
+        let decoded: Option<Vec<PropertyValue>> = items
+            .iter()
+            .map(|item| match item {
+                serde_json::Value::Array(_) => None,
+                other => Some(property_value_from_wal_json(
+                    other.clone(),
+                    &other.to_string(),
+                )),
+            })
+            .collect();
+        return match decoded {
+            Some(items) => PropertyValue::List(items),
+            None => PropertyValue::String(value.to_string()),
+        };
+    }
+    property_value_from_wal_json(json, value)
+}
+
+/// 配列以外の JSON 値をプロパティ値に戻す。分からない形は `raw` を文字列として返す。
+fn property_value_from_wal_json(json: serde_json::Value, raw: &str) -> PropertyValue {
+    let as_string = || PropertyValue::String(raw.to_string());
     match json {
         serde_json::Value::Null => PropertyValue::Null,
         serde_json::Value::Bool(b) => PropertyValue::Bool(b),
@@ -411,6 +438,29 @@ impl GraphBackend for RecordingGraph<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_values_round_trip_through_wal_strings() {
+        // graph/146: レプリケーションの WAL 文字列でリストが型ごと戻る（1.0 は Float のまま）
+        let list = PropertyValue::List(vec![
+            PropertyValue::String("x".into()),
+            PropertyValue::Int(2),
+            PropertyValue::Float(1.0),
+            PropertyValue::Null,
+        ]);
+        let text = property_value_to_wal_string(&list);
+        assert_eq!(property_value_from_wal_string(&text), list);
+        let dates = PropertyValue::List(vec![PropertyValue::Date(3)]);
+        assert_eq!(
+            property_value_from_wal_string(&property_value_to_wal_string(&dates)),
+            dates
+        );
+        // 配列の中に配列があればリストにしない
+        assert_eq!(
+            property_value_from_wal_string("[[1]]"),
+            PropertyValue::String("[[1]]".into())
+        );
+    }
 
     #[test]
     fn records_mutations_in_order() {

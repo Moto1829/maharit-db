@@ -10,6 +10,9 @@ use crate::snapshot_codec::{self, SEdge, SIndex, SNode, SSnapshot};
 
 /// ファイルフォーマットのマジックナンバー
 const MAGIC: &[u8; 8] = b"MAHARITD";
+/// v6: v5 と同じ並びで、プロパティ値にリストを含むもの。リストが無ければ v4 / v5 で書くので、
+/// リストを使わない限り旧版でも読める
+const VERSION_V6: u32 = 6;
 /// v5: v4 のペイロードの後ろにスキーマ（インデックス・制約の定義、JSON 文字列）。
 /// `save_concurrent_with_schema` が書く
 const VERSION_V5: u32 = 5;
@@ -98,6 +101,11 @@ impl PersistentStorage {
             indexes,
         };
 
+        if snapshot.has_lists() {
+            // v4 にはリストを書けない。v6（v5 の並び、スキーマは空）で書く
+            let encoded = snapshot_codec::encode_v5(&snapshot, "");
+            return Self::write_snapshot_file(path.as_ref(), VERSION_V6, &encoded);
+        }
         let encoded = snapshot_codec::encode(&snapshot);
 
         Self::write_snapshot_file(path.as_ref(), VERSION, &encoded)
@@ -187,8 +195,13 @@ impl PersistentStorage {
         };
 
         let encoded = snapshot_codec::encode_v5(&snapshot, schema);
+        let version = if snapshot.has_lists() {
+            VERSION_V6
+        } else {
+            VERSION_V5
+        };
 
-        Self::write_snapshot_file(path.as_ref(), VERSION_V5, &encoded)
+        Self::write_snapshot_file(path.as_ref(), version, &encoded)
     }
 
     /// ファイルから ConcurrentGraph を読み込み（スキーマは捨てる）
@@ -213,7 +226,7 @@ impl PersistentStorage {
         let version = Self::read_u32(&mut reader)?;
         let (snapshot, schema) = match version {
             VERSION => (Self::read_snapshot(&mut reader)?, None),
-            VERSION_V5 => {
+            VERSION_V5 | VERSION_V6 => {
                 let (snapshot, schema) = Self::read_snapshot_v5(&mut reader)?;
                 (snapshot, Some(schema).filter(|s| !s.is_empty()))
             }
@@ -285,7 +298,7 @@ impl PersistentStorage {
         if &magic != MAGIC {
             return Err(PersistenceError::InvalidMagic);
         }
-        if Self::read_u32(&mut reader)? == VERSION_V5 {
+        if matches!(Self::read_u32(&mut reader)?, VERSION_V5 | VERSION_V6) {
             let (snapshot, schema) = Self::read_snapshot_v5(&mut reader)?;
             let (graph, _) = Self::graph_from_snapshot(snapshot)?;
             return Ok((graph, Some(schema).filter(|s| !s.is_empty())));
@@ -317,7 +330,7 @@ impl PersistentStorage {
         if version == VERSION {
             return Self::load_v4(reader);
         }
-        if version == VERSION_V5 {
+        if version == VERSION_V5 || version == VERSION_V6 {
             // The schema is for the server; this API only carries the
             // property index definitions stored in the v4 part.
             let (snapshot, _schema) = Self::read_snapshot_v5(&mut reader)?;
@@ -1028,6 +1041,66 @@ mod tests {
         }
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_list_properties_use_v6_and_round_trip() {
+        // graph/146: リストがあれば v6、無ければ従来どおり v4 / v5 で書く
+        use maharit_core::ConcurrentGraph;
+        let version_of = |path: &std::path::Path| {
+            let bytes = std::fs::read(path).unwrap();
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+        };
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let list = PropertyValue::List(vec![
+            PropertyValue::String("x".into()),
+            PropertyValue::Int(2),
+            PropertyValue::Float(1.0),
+            PropertyValue::Null,
+        ]);
+
+        let mut graph = Graph::new();
+        let id = graph.create_node("P");
+        let plain = dir.join(format!("maharit_v6_plain_{pid}.mgdb"));
+        PersistentStorage::save(&graph, &plain).unwrap();
+        assert_eq!(version_of(&plain), VERSION);
+
+        graph
+            .get_node_mut(id)
+            .unwrap()
+            .set_property("tags", list.clone());
+        let with_list = dir.join(format!("maharit_v6_list_{pid}.mgdb"));
+        PersistentStorage::save(&graph, &with_list).unwrap();
+        assert_eq!(version_of(&with_list), VERSION_V6);
+        let loaded = PersistentStorage::load(&with_list).unwrap();
+        assert_eq!(
+            loaded.get_node(id).unwrap().get_property("tags"),
+            Some(&list)
+        );
+
+        let cg = ConcurrentGraph::new();
+        let cid = cg.create_node_with_labels(vec!["P".to_string()]);
+        let concurrent = dir.join(format!("maharit_v6_concurrent_{pid}.mgdb"));
+        PersistentStorage::save_concurrent_with_schema(&cg, "s", &concurrent).unwrap();
+        assert_eq!(version_of(&concurrent), VERSION_V5);
+        cg.set_node_property(cid, "tags", list.clone());
+        PersistentStorage::save_concurrent_with_schema(&cg, "s", &concurrent).unwrap();
+        assert_eq!(version_of(&concurrent), VERSION_V6);
+        let (loaded, schema) = PersistentStorage::load_concurrent_with_schema(&concurrent).unwrap();
+        assert_eq!(schema.as_deref(), Some("s"));
+        assert_eq!(
+            loaded
+                .with_node(cid, |n| n.properties.get("tags").cloned())
+                .unwrap(),
+            Some(list)
+        );
+        let (_, schema) = PersistentStorage::load_with_schema(&concurrent).unwrap();
+        assert_eq!(schema.as_deref(), Some("s"));
+
+        for p in [plain, with_list, concurrent] {
+            std::fs::remove_file(p).ok();
+        }
     }
 
     #[test]

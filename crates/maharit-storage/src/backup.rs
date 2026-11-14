@@ -803,6 +803,14 @@ impl Backup {
                 writer.write_all(&days.to_le_bytes())?;
                 writer.write_all(&millis.to_le_bytes())?;
             }
+            PropertyValue::List(items) => {
+                // 8: リスト（u32 の要素数、続けて要素）。リストの中にリストは入らない
+                writer.write_all(&[8u8])?;
+                writer.write_all(&(items.len() as u32).to_le_bytes())?;
+                for item in items {
+                    Self::write_property_value(writer, item)?;
+                }
+            }
         }
         Ok(())
     }
@@ -852,9 +860,28 @@ impl Backup {
     }
 
     fn read_property_value<R: Read>(reader: &mut R) -> Result<PropertyValue> {
+        Self::read_property_value_in(reader, false)
+    }
+
+    /// `in_list` のときはリストを受け付けない（ネストしたリストで再帰が深くならないように）
+    fn read_property_value_in<R: Read>(reader: &mut R, in_list: bool) -> Result<PropertyValue> {
         let mut type_byte = [0u8; 1];
         reader.read_exact(&mut type_byte)?;
 
+        if type_byte[0] == 8 {
+            if in_list {
+                return Err(BackupError::CorruptedData(
+                    "nested list in property value".to_string(),
+                ));
+            }
+            let count = Self::read_u32(reader)? as usize;
+            // 要素は最低 1 バイト。巨大な要素数で先にメモリを確保しないよう上限を設けて少しずつ伸ばす
+            let mut items = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                items.push(Self::read_property_value_in(reader, true)?);
+            }
+            return Ok(PropertyValue::List(items));
+        }
         match type_byte[0] {
             0 => Ok(PropertyValue::Null),
             1 => {
@@ -1644,6 +1671,30 @@ mod tests {
         let result = Backup::verify(&path);
         assert!(result.is_err());
 
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_backup_restore_list_property() {
+        // graph/146: リストのプロパティもバックアップから戻せる
+        let mut graph = Graph::new();
+        let id = graph.create_node("Test");
+        let list = PropertyValue::List(vec![
+            PropertyValue::String("x".into()),
+            PropertyValue::Int(2),
+            PropertyValue::Float(1.0),
+            PropertyValue::Null,
+        ]);
+        graph
+            .get_node_mut(id)
+            .unwrap()
+            .set_property("tags", list.clone());
+
+        let path = tmp_path("test_list_property.backup");
+        Backup::create(&graph, &path, &BackupOptions::default()).unwrap();
+        let restored = Backup::restore(&path).unwrap();
+        let node = restored.nodes().next().unwrap();
+        assert_eq!(node.properties.get("tags"), Some(&list));
         std::fs::remove_file(path).ok();
     }
 

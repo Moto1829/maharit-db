@@ -302,6 +302,7 @@ impl From<&PropertyValue> for Value {
                 days: *days,
                 millis: *millis,
             },
+            PropertyValue::List(items) => Value::List(items.iter().map(Value::from).collect()),
         }
     }
 }
@@ -2508,6 +2509,17 @@ impl<'a> Executor<'a> {
                 days: *days,
                 millis: *millis,
             }),
+            // リストはプリミティブの要素だけ（Neo4j と同じくリストのリストやマップは保存できない）
+            Value::List(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::List(_) => Err(ExecuteError::TypeError(
+                        "a list stored as a property cannot contain lists".to_string(),
+                    )),
+                    other => self.value_to_property(other),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(PropertyValue::List),
             _ => Err(ExecuteError::TypeError(
                 "cannot convert to property value".to_string(),
             )),
@@ -4124,6 +4136,10 @@ impl<'a> Executor<'a> {
             (PropertyValue::Int(a), Value::Float(e)) => (*a as f64 - e).abs() < f64::EPSILON,
             (PropertyValue::Float(a), Value::Int(e)) => (a - *e as f64).abs() < f64::EPSILON,
             (PropertyValue::String(a), Value::String(e)) => a == e,
+            // リスト・日付など: 値に直して比べる
+            (PropertyValue::List(_), Value::List(_)) => {
+                self.values_equal(&Value::from(actual), expected)
+            }
             _ => false,
         }
     }
@@ -6900,6 +6916,9 @@ impl<'a> Executor<'a> {
                     millis: msb,
                 },
             ) => ma == mb && da == db && msa == msb,
+            (Value::List(a), Value::List(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(x, y))
+            }
             _ => false,
         }
     }
@@ -13172,6 +13191,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.rows[0].columns, vec![Value::Int(3), Value::Int(i64::MAX)]);
+    }
+
+    #[test]
+    fn test_list_property_values() {
+        // graph/146: リストをプロパティに保存し、IN・size()・添字・UNWIND・比較に使える
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (:A {t: 'a', tags: ['x', 'y'], nums: [1, 2.5, null]}), (:A {t: 'b', tags: ['y']})",
+        )
+        .unwrap();
+        let s = |v: &str| Value::String(v.into());
+
+        let r = execute(
+            &mut graph,
+            "MATCH (n:A) WHERE 'x' IN n.tags RETURN n.t, size(n.tags), n.tags[1], n.nums",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns,
+            vec![
+                s("a"),
+                Value::Int(2),
+                s("y"),
+                Value::List(vec![Value::Int(1), Value::Float(2.5), Value::Null])
+            ]
+        );
+
+        let r = execute(
+            &mut graph,
+            "MATCH (n:A) UNWIND n.tags AS tag RETURN count(tag)",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(3));
+
+        // パターンのプロパティ・WHERE の等号でリスト同士を比べる
+        let r = execute(&mut graph, "MATCH (n:A {tags: ['y']}) RETURN n.t").unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].columns[0], s("b"));
+        let r = execute(
+            &mut graph,
+            "MATCH (n:A) WHERE n.tags = ['x', 'y'] RETURN n.t",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], s("a"));
+
+        // SET でリストを更新
+        let r = execute(
+            &mut graph,
+            "MATCH (n:A {t: 'b'}) SET n.tags = n.tags + ['z'] RETURN n.tags",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::List(vec![s("y"), s("z")]));
+
+        // リストのリスト・マップを含むリストは保存できない
+        assert!(execute(&mut graph, "CREATE (:B {v: [[1]]})").is_err());
+        assert!(execute(&mut graph, "CREATE (:B {v: [{a: 1}]})").is_err());
     }
 
     #[test]

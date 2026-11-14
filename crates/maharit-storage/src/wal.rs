@@ -716,13 +716,42 @@ impl Wal {
                 writer.write_all(&days.to_le_bytes())?;
                 writer.write_all(&millis.to_le_bytes())?;
             }
+            PropertyValue::List(items) => {
+                // 8: リスト（u32 の要素数、続けて要素）。リストの中にリストは入らない
+                writer.write_all(&[8u8])?;
+                writer.write_all(&(items.len() as u32).to_le_bytes())?;
+                for item in items {
+                    Self::write_property(writer, item)?;
+                }
+            }
         }
         Ok(())
     }
 
     fn read_property<R: Read>(reader: &mut R) -> Result<PropertyValue> {
+        Self::read_property_in(reader, false)
+    }
+
+    /// `in_list` のときはリストを受け付けない（ネストしたリストで再帰が深くならないように）
+    fn read_property_in<R: Read>(reader: &mut R, in_list: bool) -> Result<PropertyValue> {
         let mut type_buf = [0u8; 1];
         reader.read_exact(&mut type_buf)?;
+
+        if type_buf[0] == 8 {
+            if in_list {
+                return Err(WalError::CorruptedLog(
+                    "nested list in property value".to_string(),
+                ));
+            }
+            let mut len_buf = [0u8; 4];
+            reader.read_exact(&mut len_buf)?;
+            let count = u32::from_le_bytes(len_buf) as usize;
+            let mut items = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                items.push(Self::read_property_in(reader, true)?);
+            }
+            return Ok(PropertyValue::List(items));
+        }
 
         match type_buf[0] {
             0 => Ok(PropertyValue::Null),
@@ -898,6 +927,54 @@ mod tests {
         }
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_list_property_roundtrip() {
+        // graph/146: リストのプロパティも WAL から戻せる
+        let path = temp_path();
+        let list = PropertyValue::List(vec![
+            PropertyValue::String("x".into()),
+            PropertyValue::Int(2),
+            PropertyValue::Float(1.0),
+            PropertyValue::Null,
+        ]);
+        {
+            let mut wal = Wal::open(&path).unwrap();
+            wal.append(
+                RecordType::CreateNode,
+                RecordPayload::CreateNode {
+                    node_id: 0,
+                    label: "P".to_string(),
+                },
+            )
+            .unwrap();
+            wal.append(
+                RecordType::SetNodeProperty,
+                RecordPayload::SetNodeProperty {
+                    node_id: 0,
+                    key: "tags".to_string(),
+                    value: list.clone(),
+                },
+            )
+            .unwrap();
+            wal.sync().unwrap();
+        }
+        let wal = Wal::open(&path).unwrap();
+        let mut graph = Graph::new();
+        wal.recover(&mut graph).unwrap();
+        let node = graph.nodes().next().unwrap();
+        assert_eq!(node.properties.get("tags"), Some(&list));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_nested_list_in_wal_is_rejected() {
+        let mut bytes = vec![8u8];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(8);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(Wal::read_property(&mut bytes.as_slice()).is_err());
     }
 
     #[test]

@@ -16,6 +16,11 @@
 //!
 //! v5 is the v4 payload followed by one more string: the schema (index and
 //! constraint definitions), opaque to this crate. See [`encode_v5`].
+//!
+//! v6 has the v5 layout and may also contain list property values
+//! (`PropertyValue::List`, tag 8: element count, then the elements; a list never
+//! contains another list). Files without lists are still written as v4 / v5 so
+//! older versions can read them; see [`SSnapshot::has_lists`].
 
 use std::collections::HashMap;
 
@@ -64,6 +69,22 @@ const PV_STRING: u32 = 4;
 const PV_DATE: u32 = 5;
 const PV_DATETIME: u32 = 6;
 const PV_DURATION: u32 = 7;
+/// Added in v6.
+const PV_LIST: u32 = 8;
+
+impl SSnapshot {
+    /// Whether any property value is a list (which needs the v6 format).
+    pub(crate) fn has_lists(&self) -> bool {
+        let is_list = |v: &PropertyValue| matches!(v, PropertyValue::List(_));
+        self.nodes
+            .iter()
+            .any(|n| n.properties.values().any(is_list))
+            || self
+                .edges
+                .iter()
+                .any(|e| e.properties.values().any(is_list))
+    }
+}
 
 // ==================== encoding ====================
 
@@ -170,6 +191,13 @@ fn put_value(out: &mut Vec<u8>, v: &PropertyValue) {
             out.extend_from_slice(&days.to_le_bytes());
             out.extend_from_slice(&millis.to_le_bytes());
         }
+        PropertyValue::List(items) => {
+            tag(out, PV_LIST);
+            put_len(out, items.len());
+            for item in items {
+                put_value(out, item);
+            }
+        }
     }
 }
 
@@ -263,6 +291,11 @@ impl Decoder<'_> {
         Ok(buf)
     }
 
+    fn peek_u32(&self) -> Option<u32> {
+        let b = self.bytes.get(self.pos..self.pos + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     fn u32(&mut self) -> Result<u32, String> {
         self.take::<4>().map(u32::from_le_bytes)
     }
@@ -322,6 +355,18 @@ impl Decoder<'_> {
 
     fn value(&mut self) -> Result<PropertyValue, String> {
         let at = self.pos;
+        if self.peek_u32() == Some(PV_LIST) {
+            self.u32()?;
+            let n = self.count(4, "list")?;
+            let mut items = Vec::with_capacity(n);
+            for _ in 0..n {
+                if self.peek_u32() == Some(PV_LIST) {
+                    return Err(format!("nested list at byte {}", self.pos));
+                }
+                items.push(self.value()?);
+            }
+            return Ok(PropertyValue::List(items));
+        }
         Ok(match self.u32()? {
             PV_NULL => PropertyValue::Null,
             PV_BOOL => PropertyValue::Bool(self.bool()?),

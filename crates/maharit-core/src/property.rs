@@ -20,6 +20,9 @@ pub enum PropertyValue {
         days: i32,
         millis: i64,
     },
+    /// リスト（`tags: ['a', 'b']`）。要素は null・リスト以外のプリミティブ
+    /// （Neo4j と同じくネストしたリストやマップは保存できない）。
+    List(Vec<PropertyValue>),
 }
 
 impl PartialEq for PropertyValue {
@@ -44,6 +47,7 @@ impl PartialEq for PropertyValue {
                     millis: msb,
                 },
             ) => ma == mb && da == db && msa == msb,
+            (PropertyValue::List(a), PropertyValue::List(b)) => a == b,
             _ => false,
         }
     }
@@ -71,6 +75,7 @@ impl Hash for PropertyValue {
                 days.hash(state);
                 millis.hash(state);
             }
+            PropertyValue::List(items) => items.hash(state),
         }
     }
 }
@@ -141,6 +146,16 @@ impl std::fmt::Display for PropertyValue {
                     "{}",
                     temporal::duration_to_string(*months, *days, *millis)
                 )
+            }
+            PropertyValue::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
             }
         }
     }

@@ -132,6 +132,12 @@ impl JsonImporter {
                 }
             }
             serde_json::Value::String(s) => PropertyValue::String(s.clone()),
+            // 配列はリストに（要素に配列・オブジェクトがあればリストにできないので従来どおり文字列に）
+            serde_json::Value::Array(items)
+                if items.iter().all(|v| !v.is_array() && !v.is_object()) =>
+            {
+                PropertyValue::List(items.iter().map(Self::json_to_property).collect())
+            }
             _ => PropertyValue::String(value.to_string()),
         }
     }
@@ -256,6 +262,9 @@ impl JsonExporter {
             PropertyValue::Date(_)
             | PropertyValue::DateTime(_)
             | PropertyValue::Duration { .. } => serde_json::Value::String(value.to_string()),
+            PropertyValue::List(items) => {
+                serde_json::Value::Array(items.iter().map(Self::property_to_json).collect())
+            }
         }
     }
 
@@ -354,6 +363,25 @@ mod tests {
         assert!(json_str.contains("\"edges\""));
         assert!(json_str.contains("Person"));
         assert!(json_str.contains("KNOWS"));
+    }
+
+    #[test]
+    fn test_property_arrays_become_lists() {
+        // graph/146: 配列はリストに。配列やオブジェクトを含む配列は従来どおり文字列
+        let v: serde_json::Value = serde_json::json!(["a", 1, null]);
+        assert_eq!(
+            JsonImporter::json_to_property(&v),
+            PropertyValue::List(vec![
+                PropertyValue::String("a".into()),
+                PropertyValue::Int(2 - 1),
+                PropertyValue::Null
+            ])
+        );
+        let nested = serde_json::json!([[1]]);
+        assert_eq!(
+            JsonImporter::json_to_property(&nested),
+            PropertyValue::String("[[1]]".into())
+        );
     }
 
     #[test]

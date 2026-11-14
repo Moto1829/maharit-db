@@ -195,4 +195,5 @@ These types can be passed as parameters.
 - Property keys (a form like `n.$key`) cannot be parameterized
 - Label names and relationship types cannot be parameterized either (the structure of a query must be fixed when it is compiled)
 - Omitting a parameter that the query refers to is an error (it does not become `null`)
-- List and map values can be used with `IN $names`, `UNWIND $rows`, and so on, but they cannot be stored as property values yet
+- A list value can be stored as a property (`CREATE (n:Article {tags: $tags})`), but it cannot contain lists or maps
+- Map values can be used with `UNWIND $rows`, `SET n += $props`, and so on, but they cannot be stored as property values

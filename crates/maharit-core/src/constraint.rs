@@ -537,6 +537,7 @@ impl ConstraintManager {
                 PropertyValue::Date(_) => "DATE",
                 PropertyValue::DateTime(_) => "DATETIME",
                 PropertyValue::Duration { .. } => "DURATION",
+                PropertyValue::List(_) => "LIST",
             };
             return Err(ConstraintError::TypeViolation {
                 name: constraint.name.clone(),

@@ -227,3 +227,6 @@ CREATE (a)-[:KNOWS]->(b)
 | null | `null` |
 | List | `[1, 2, 3]`, `["a", "b"]` |
 | Map | `{name: "Alice", age: 30}` |
+
+A property value can be an integer, float, string, boolean, date or time, or a list of these
+(`CREATE (:Article {tags: ["graph", "db"]})`). Lists of lists and maps cannot be stored as properties.

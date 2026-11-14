@@ -150,6 +150,15 @@ impl From<&PropertyValue> for RowValue {
             PropertyValue::Date(_)
             | PropertyValue::DateTime(_)
             | PropertyValue::Duration { .. } => RowValue::Text(pv.to_string()),
+            PropertyValue::List(items) => RowValue::Json(
+                serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(|item| RowValue::from(item).to_json())
+                        .collect(),
+                )
+                .to_string(),
+            ),
         }
     }
 }
