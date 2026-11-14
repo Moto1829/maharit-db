@@ -13441,7 +13441,15 @@ mod tests {
     fn test_null_property_value_removes_property() {
         // bug/174: null を設定するとプロパティは消える。null のプロパティは作らない
         let mut graph = Graph::new();
-        let keys = |g: &mut Graph, q: &str| execute(g, q).unwrap().rows[0].columns[0].clone();
+        // keys() の順序は決まっていないので、リストは並べ替えて比べる
+        let keys = |g: &mut Graph, q: &str| match execute(g, q).unwrap().rows[0].columns[0].clone()
+        {
+            Value::List(mut items) => {
+                items.sort_by_key(|v| v.to_string());
+                Value::List(items)
+            }
+            other => other,
+        };
         let list =
             |v: &[&str]| Value::List(v.iter().map(|s| Value::String(s.to_string())).collect());
 
