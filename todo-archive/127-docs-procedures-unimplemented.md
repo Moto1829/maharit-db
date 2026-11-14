@@ -20,3 +20,10 @@ docs の parse 検査（task 123）は構文だけを見るため、実行時に
 ## 方針
 各プロシージャを実装するか、docs から外して「未実装」と明記する。
 実行まで確認するテスト（docs の例をフィクスチャ上で実行する等）も検討する。
+
+## 完了（2026-11-14）
+- docs 側で解消済み: task140 でアルゴリズムのページを実際の Rust API に合わせて書き直し、centrality.md / connected-components.md に
+  「Cypher からは使えません（プロシージャは用意していない）」と明記した。export.md・backup・cache・replication の存在しないプロシージャも
+  task124 / task148 で docs から外した。現在 docs に載っているプロシージャは実装済みの `db.index.fulltext.search` だけ（2026-11-14 に grep で確認）
+- `relationships(p)` の要素からプロパティを読めない件は bug/169 で修正済み（shortest-path.md の reduce の例も復活）
+- プロシージャとして実装する作業は機能追加として query-functions/172 に分けた
