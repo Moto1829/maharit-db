@@ -37,6 +37,12 @@ class GraphTest(unittest.TestCase):
             {"id": edge, "label": "KNOWS", "from": alice, "to": bob, "properties": {"since": "2020"}},
         )
         self.assertEqual(g.get_outgoing_edges(alice), [edge])
+
+        g.set_node_property_list(bob, "tags", ["x", 1, 2.5, True])
+        self.assertEqual(g.get_node(bob)["properties"]["tags"], ["x", 1, 2.5, True])
+        self.assertIs(g.get_node(bob)["properties"]["tags"][3], True)
+        with self.assertRaises(ValueError):
+            g.set_node_property_list(bob, "bad", [[1]])
         self.assertEqual(g.get_incoming_edges(bob), [edge])
 
     def test_missing_ids(self):

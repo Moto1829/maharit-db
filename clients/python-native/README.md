@@ -26,6 +26,7 @@ bob   = g.create_node("Person")
 g.set_node_property(alice, "name", "Alice")
 g.set_node_property_int(alice, "age", 30)
 g.set_node_property(bob, "name", "Bob")
+g.set_node_property_list(bob, "tags", ["graph", "db"])  # str / int / float / bool の要素
 
 # Create edge
 edge = g.create_edge(alice, bob, "KNOWS")

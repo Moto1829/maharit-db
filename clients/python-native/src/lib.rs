@@ -96,6 +96,23 @@ impl PyGraph {
             .set_node_property(node_id, key, PropertyValue::Bool(value));
     }
 
+    /// Set a list property on a node. Elements must be str, int, float or bool
+    /// (lists of lists are not allowed, as in Cypher).
+    fn set_node_property_list(
+        &self,
+        node_id: u64,
+        key: &str,
+        value: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let items = value
+            .iter()
+            .map(py_to_scalar_pv)
+            .collect::<PyResult<Vec<_>>>()?;
+        self.inner
+            .set_node_property(node_id, key, PropertyValue::List(items));
+        Ok(())
+    }
+
     /// Set a string property on an edge.
     fn set_edge_property(&self, edge_id: u64, key: &str, value: &str) {
         self.inner.set_edge_property(
@@ -166,6 +183,26 @@ fn props_to_py<'py, 'a>(
     Ok(d)
 }
 
+/// Convert a Python str / int / float / bool to a `PropertyValue` (list elements).
+fn py_to_scalar_pv(obj: &Bound<'_, PyAny>) -> PyResult<PropertyValue> {
+    // bool is a subclass of int, so check it first.
+    if let Ok(b) = obj.cast::<pyo3::types::PyBool>() {
+        return Ok(PropertyValue::Bool(b.is_true()));
+    }
+    if let Ok(n) = obj.extract::<i64>() {
+        return Ok(PropertyValue::Int(n));
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return Ok(PropertyValue::Float(f));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(PropertyValue::String(s));
+    }
+    Err(PyValueError::new_err(
+        "list elements must be str, int, float or bool",
+    ))
+}
+
 /// Convert a `PropertyValue` to a Python object.
 fn pv_to_py<'py>(py: Python<'py>, pv: &PropertyValue) -> PyResult<Bound<'py, PyAny>> {
     Ok(match pv {
@@ -174,6 +211,13 @@ fn pv_to_py<'py>(py: Python<'py>, pv: &PropertyValue) -> PyResult<Bound<'py, PyA
         PropertyValue::Int(n) => n.into_pyobject(py)?.into_any(),
         PropertyValue::Float(f) => f.into_pyobject(py)?.into_any(),
         PropertyValue::String(s) => s.into_pyobject(py)?.into_any(),
+        PropertyValue::List(items) => {
+            let items = items
+                .iter()
+                .map(|v| pv_to_py(py, v))
+                .collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, items)?.into_any()
+        }
         other => format!("{:?}", other).into_pyobject(py)?.into_any(),
     })
 }
