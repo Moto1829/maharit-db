@@ -172,7 +172,22 @@ impl Parser {
             }
             Some(TokenKind::Match) => self.parse_match_or_delete()?,
             Some(TokenKind::Merge) => return self.parse_merge(vec![], None),
-            Some(TokenKind::Unwind) => return self.parse_unwind(),
+            Some(TokenKind::Unwind) => {
+                // `UNWIND … AS x` の後に MATCH / UNWIND / WITH が続くなら読み取りのパイプライン
+                let start = self.pos;
+                self.parse_unwind_clause()?;
+                let chained = self.check(TokenKind::Match)
+                    || self.check(TokenKind::Optional)
+                    || self.check(TokenKind::Unwind)
+                    || self.check(TokenKind::With);
+                self.pos = start;
+                if chained {
+                    self.parse_match_or_delete()?
+                } else {
+                    return self.parse_unwind();
+                }
+            }
+            Some(TokenKind::Optional) | Some(TokenKind::With) => self.parse_match_or_delete()?,
             Some(TokenKind::Foreach) => return self.parse_foreach(),
             Some(TokenKind::Return) => return self.parse_standalone_return(),
             Some(TokenKind::Drop) => {
@@ -330,6 +345,12 @@ impl Parser {
         // Parse first segment
         let (first_segment, is_delete, set_clause, delete_clause) = self.parse_query_segment()?;
 
+        if !first_segment.unwinds.is_empty() && (is_delete || self.check(TokenKind::Merge)) {
+            return Err(
+                self.unexpected_token("MATCH, WITH, CREATE, SET, REMOVE or RETURN after UNWIND")
+            );
+        }
+
         if is_delete {
             // DELETE statement
             let patterns: Vec<Pattern> = first_segment
@@ -403,10 +424,12 @@ impl Parser {
 
         let mut segments = vec![first_segment];
 
-        // Continue parsing segments while we have WITH clauses
-        while segments.last().unwrap().with_clause.is_some() {
-            // After WITH, we may have another MATCH or go directly to RETURN
-            if self.check(TokenKind::Match) || self.check(TokenKind::Optional) {
+        // 後続のセグメント: MATCH / OPTIONAL MATCH / UNWIND / WITH / （WITH の後の）WHERE
+        loop {
+            if self.check(TokenKind::Match)
+                || self.check(TokenKind::Optional)
+                || self.check(TokenKind::Unwind)
+            {
                 let (segment, is_del, set_cl, _) = self.parse_query_segment()?;
                 if is_del {
                     return Err(self.unexpected_token("RETURN or WITH"));
@@ -468,11 +491,14 @@ impl Parser {
                 // WITH directly after WITH (chaining)
                 let with_clause = Some(self.parse_with_clause()?);
                 segments.push(QuerySegment {
+                    unwinds: vec![],
                     match_clauses: vec![],
                     where_clause: None,
                     with_clause,
                 });
-            } else if self.check(TokenKind::Where) {
+            } else if self.check(TokenKind::Where)
+                && segments.last().is_some_and(|seg| seg.with_clause.is_some())
+            {
                 // WHERE after WITH (filtering on WITH results)
                 self.advance();
                 let where_clause = Some(self.parse_expression()?);
@@ -481,17 +507,18 @@ impl Parser {
                 if self.check(TokenKind::With) {
                     let with_clause = Some(self.parse_with_clause()?);
                     segments.push(QuerySegment {
+                        unwinds: vec![],
                         match_clauses: vec![],
                         where_clause,
                         with_clause,
                     });
                 } else {
                     segments.push(QuerySegment {
+                        unwinds: vec![],
                         match_clauses: vec![],
                         where_clause,
                         with_clause: None,
                     });
-                    break;
                 }
             } else {
                 break;
@@ -528,20 +555,24 @@ impl Parser {
     fn parse_query_segment(
         &mut self,
     ) -> Result<(QuerySegment, bool, Option<SetClause>, Option<DeleteClause>), ParseError> {
-        // Parse MATCH clauses (may be empty if starting with WHERE after WITH)
+        // 先頭の UNWIND 句（task163: `UNWIND … MATCH …` / `UNWIND … UNWIND …`）
+        let mut unwinds = Vec::new();
+        while self.check(TokenKind::Unwind) {
+            unwinds.push(self.parse_unwind_clause()?);
+        }
+
+        // MATCH / OPTIONAL MATCH を任意の順・個数で（WITH の後の WHERE だけのときは空）
         let mut match_clauses = Vec::new();
-
-        if self.check(TokenKind::Match) {
-            self.expect(TokenKind::Match)?;
-            let first_clause = self.parse_match_clause(false)?;
-            match_clauses.push(first_clause);
-
-            // Parse additional OPTIONAL MATCH clauses
-            while self.check(TokenKind::Optional) {
+        loop {
+            if self.check(TokenKind::Match) {
+                self.advance();
+                match_clauses.push(self.parse_match_clause(false)?);
+            } else if self.check(TokenKind::Optional) {
                 self.advance();
                 self.expect(TokenKind::Match)?;
-                let clause = self.parse_match_clause(true)?;
-                match_clauses.push(clause);
+                match_clauses.push(self.parse_match_clause(true)?);
+            } else {
+                break;
             }
         }
 
@@ -565,6 +596,7 @@ impl Parser {
             let delete_clause = self.parse_delete_clause()?;
             return Ok((
                 QuerySegment {
+                    unwinds,
                     match_clauses,
                     where_clause,
                     with_clause: None,
@@ -584,6 +616,7 @@ impl Parser {
 
         Ok((
             QuerySegment {
+                unwinds,
                 match_clauses,
                 where_clause,
                 with_clause,
@@ -592,6 +625,18 @@ impl Parser {
             set_clause,
             None,
         ))
+    }
+
+    /// `UNWIND expr AS var`（読み取りの文の中の UNWIND 句）
+    fn parse_unwind_clause(&mut self) -> Result<UnwindClause, ParseError> {
+        self.expect(TokenKind::Unwind)?;
+        let expression = self.parse_expression()?;
+        self.expect(TokenKind::As)?;
+        let variable = self.expect_ident()?;
+        Ok(UnwindClause {
+            expression,
+            variable,
+        })
     }
 
     fn parse_with_clause(&mut self) -> Result<WithClause, ParseError> {
@@ -2460,6 +2505,7 @@ impl Parser {
         if self.check(TokenKind::Where) {
             self.advance();
             segments.push(QuerySegment {
+                unwinds: vec![],
                 match_clauses: vec![],
                 where_clause: Some(self.parse_expression()?),
                 with_clause: None,
@@ -2484,12 +2530,14 @@ impl Parser {
                     None
                 };
                 segments.push(QuerySegment {
+                    unwinds: vec![],
                     match_clauses: vec![clause],
                     where_clause,
                     with_clause: None,
                 });
             } else if self.check(TokenKind::With) {
                 segments.push(QuerySegment {
+                    unwinds: vec![],
                     match_clauses: vec![],
                     where_clause: None,
                     with_clause: Some(self.parse_with_clause()?),
@@ -2499,6 +2547,7 @@ impl Parser {
             {
                 self.advance();
                 segments.push(QuerySegment {
+                    unwinds: vec![],
                     match_clauses: vec![],
                     where_clause: Some(self.parse_expression()?),
                     with_clause: None,

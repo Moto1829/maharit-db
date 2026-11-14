@@ -192,15 +192,27 @@ pub struct MatchStatement {
     pub return_clause: ReturnClause,
 }
 
-/// クエリセグメント（MATCH + WHERE + WITH）
-#[derive(Debug, Clone, PartialEq)]
+/// クエリセグメント（UNWIND + MATCH + WHERE + WITH）。
+///
+/// 句は UNWIND → MATCH（OPTIONAL MATCH 含む）→ WHERE → WITH の順に適用する。
+/// `MATCH … UNWIND …` のように MATCH の後に UNWIND が来たら、そこで次のセグメントに移る。
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QuerySegment {
+    /// 先頭の UNWIND 句（書かれた順に適用）
+    pub unwinds: Vec<UnwindClause>,
     /// MATCH句（OPTIONAL MATCH含む）
     pub match_clauses: Vec<MatchClause>,
     /// WHERE句
     pub where_clause: Option<Expression>,
     /// WITH句（最後のセグメント以外で必須）
     pub with_clause: Option<WithClause>,
+}
+
+/// 読み取りの文の中の UNWIND 句: `UNWIND expr AS variable`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindClause {
+    pub expression: Expression,
+    pub variable: String,
 }
 
 /// WITH句

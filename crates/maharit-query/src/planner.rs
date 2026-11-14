@@ -544,10 +544,18 @@ fn plan_create(create: &CreateClause) -> Vec<PlanNode> {
     )]
 }
 
+/// セグメント先頭の UNWIND 句を `Unwind` として並べる（行数は不明なので 1 と見積もる）。
+fn push_unwinds(nodes: &mut Vec<PlanNode>, segment: &QuerySegment) {
+    for u in &segment.unwinds {
+        nodes.push(PlanNode::new("Unwind", 1, 1, &format!("AS {}", u.variable)));
+    }
+}
+
 fn plan_match(m: &MatchStatement, node_count: u64, edge_count: u64) -> Vec<PlanNode> {
     let mut nodes = Vec::new();
 
     for segment in &m.segments {
+        push_unwinds(&mut nodes, segment);
         for clause in &segment.match_clauses {
             for pattern in &clause.patterns {
                 match pattern {
@@ -928,6 +936,7 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
 
     for segment in &m.segments {
         let mut used_index = false;
+        push_unwinds(&mut nodes, segment);
 
         for clause in &segment.match_clauses {
             for pattern in &clause.patterns {

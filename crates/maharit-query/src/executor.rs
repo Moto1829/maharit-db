@@ -2479,7 +2479,7 @@ impl<'a> Executor<'a> {
             return None;
         }
         let seg = &m.segments[0];
-        if seg.where_clause.is_some() || seg.with_clause.is_some() {
+        if seg.where_clause.is_some() || seg.with_clause.is_some() || !seg.unwinds.is_empty() {
             return None;
         }
         if seg.match_clauses.len() != 1 {
@@ -2698,6 +2698,29 @@ impl<'a> Executor<'a> {
             }
             _ => Vec::new(),
         };
+
+        // UNWIND: 行ごとにリストを展開する（null は 0 行、リスト以外は 1 行）
+        for unwind in &segment.unwinds {
+            let mut expanded = Vec::new();
+            for b in bindings {
+                let items = match self.evaluate_expression(&unwind.expression, &b)? {
+                    Value::List(items) => items,
+                    Value::Null => Vec::new(),
+                    other => vec![other],
+                };
+                for item in items {
+                    let value = match item {
+                        Value::Node(id) | Value::NodeData { id, .. } => BindingValue::Node(id),
+                        Value::Edge(id) => BindingValue::Edge(id),
+                        other => BindingValue::Scalar(other),
+                    };
+                    let mut row = b.clone();
+                    row.insert(Arc::from(unwind.variable.as_str()), value);
+                    expanded.push(row);
+                }
+            }
+            bindings = expanded;
+        }
 
         // Execute MATCH clauses (augmented with pushed-down predicates where safe).
         for match_clause in &segment.match_clauses {
@@ -13074,6 +13097,105 @@ mod tests {
         let r = execute(&mut graph, "MATCH (n:P) DETACH DELETE n").unwrap();
         assert_eq!(r.rows[0].columns, vec![Value::Int(2), Value::Int(1)]);
         assert_eq!(graph.edge_count(), 0);
+    }
+
+    fn column(r: &ResultSet, i: usize) -> Vec<Value> {
+        r.rows.iter().map(|row| row.columns[i].clone()).collect()
+    }
+
+    #[test]
+    fn test_clause_chaining_unwind_match_with() {
+        // task163: UNWIND / MATCH / WITH を自由な順序でつなぐ
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "CREATE (:A {t: 'A', tags: 'x,y'}), (:A {t: 'B', tags: 'y'}), (:P {id: 1}), (:P {id: 3}), (:P {id: 9})",
+        )
+        .unwrap();
+        let s = |v: &str| Value::String(v.into());
+
+        // MATCH の後の UNWIND
+        let r = execute(
+            &mut graph,
+            "MATCH (a:A) UNWIND split(a.tags, ',') AS tag RETURN a.t, tag ORDER BY a.t, tag",
+        )
+        .unwrap();
+        assert_eq!(column(&r, 1), vec![s("x"), s("y"), s("y")]);
+
+        // UNWIND の後の MATCH（UNWIND の変数で絞り込む）
+        let r = execute(
+            &mut graph,
+            "UNWIND [1, 2, 3] AS id MATCH (n:P) WHERE n.id = id RETURN n.id ORDER BY n.id",
+        )
+        .unwrap();
+        assert_eq!(column(&r, 0), vec![Value::Int(1), Value::Int(3)]);
+
+        // UNWIND の連続、null は 0 行
+        let r = execute(
+            &mut graph,
+            "UNWIND [[1, 2], [3]] AS sub UNWIND sub AS n RETURN collect(n)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0].columns[0],
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
+        let r = execute(
+            &mut graph,
+            "UNWIND null AS x UNWIND [1] AS y RETURN count(*)",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(0));
+
+        // WITH の後の UNWIND、WITH … WHERE の後の MATCH
+        let r = execute(
+            &mut graph,
+            "MATCH (a:A) WITH collect(a.t) AS ts UNWIND ts AS t WITH t WHERE t <> 'A' RETURN t",
+        )
+        .unwrap();
+        assert_eq!(column(&r, 0), vec![s("B")]);
+        let r = execute(
+            &mut graph,
+            "MATCH (a:A) WITH a WHERE a.t = 'A' MATCH (p:P {id: 9}) RETURN a.t, p.id",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns, vec![s("A"), Value::Int(9)]);
+
+        // ノードのリストを UNWIND すると、ノードとしてパターンに使える
+        let r = execute(
+            &mut graph,
+            "MATCH (a:A) WITH collect(a) AS xs UNWIND xs AS x MATCH (x:A) RETURN count(x)",
+        )
+        .unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+
+        // トップレベルの MATCH … MATCH、WITH・OPTIONAL MATCH で始まる文
+        let r = execute(&mut graph, "MATCH (a:A) MATCH (p:P) RETURN count(*)").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(6));
+        let r = execute(&mut graph, "WITH 1 AS x RETURN x + 1").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+        let r = execute(&mut graph, "OPTIONAL MATCH (z:Nope) RETURN z").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Null);
+
+        // UNWIND … MATCH … SET（書き込み）
+        execute(
+            &mut graph,
+            "UNWIND [1, 9] AS i MATCH (p:P {id: i}) SET p.hit = true",
+        )
+        .unwrap();
+        let r = execute(&mut graph, "MATCH (p:P) WHERE p.hit = true RETURN count(p)").unwrap();
+        assert_eq!(r.rows[0].columns[0], Value::Int(2));
+    }
+
+    #[test]
+    fn test_unwind_before_delete_is_rejected() {
+        // DELETE / MERGE の文は UNWIND をまだ扱わないので、黙って無視せずエラーにする
+        for q in [
+            "UNWIND [1] AS i MATCH (n {id: i}) DETACH DELETE n",
+            "UNWIND [1] AS i MERGE (n:P {id: i})",
+        ] {
+            assert!(Parser::new(q).unwrap().parse().is_err(), "{q}");
+        }
     }
 
     #[test]
