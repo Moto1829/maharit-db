@@ -25,7 +25,7 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         Statement::ShowConstraints => true,
         Statement::ShowUsers => true,
         // Procedures are read-only; a trailing FOREACH may write.
-        Statement::ProcedureCall(pc) => pc.foreach_clause.is_none(),
+        Statement::ProcedureCall(pc) => pc.foreach_clause.is_none() && pc.updates.is_empty(),
 
         // EXPLAIN / PROFILE are read-only when the inner statement is read-only
         Statement::Explain(inner) => is_read_only(inner),
@@ -1112,6 +1112,8 @@ pub struct ProcedureCallStatement {
     pub yield_items: Vec<YieldItem>,
     /// YIELD 後に続く WHERE / MATCH / WITH（MATCH 文と同じセグメント形式）
     pub segments: Vec<QuerySegment>,
+    /// YIELD した行への SET / REMOVE（`CALL db.pageRank() YIELD node, score SET node.rank = score`）
+    pub updates: Vec<UpdateClause>,
     /// 末尾の FOREACH 句（省略可。RETURN とは排他）
     pub foreach_clause: Option<ForeachStatement>,
     /// RETURN句（省略可）

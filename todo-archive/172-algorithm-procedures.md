@@ -16,3 +16,12 @@
 - ラベル・リレーションシップの型で対象を絞る引数
 - 大きなグラフでの実行時間（クエリタイムアウトとの関係）、読み取りとして並列実行してよいか
 - 実装したら docs の「Cypher からは使えません」を書き換える
+
+## 結果（2026-11-14）
+- `db.pageRank` / `db.betweennessCentrality` / `db.closenessCentrality`（YIELD node, score）、
+  `db.connectedComponents` / `db.stronglyConnectedComponents`（node, componentId）、`db.labelPropagation`（node, communityId）を追加
+- 設定マップ: 共通で `nodeLabels` / `relationshipTypes`、pageRank は `iterations` / `dampingFactor` / `tolerance`、labelPropagation は `maxIterations`。未知のキーはエラー
+- 実行時に対象ノード・リレーションシップを一時 `Graph` に写して計算（`executor/algo.rs`）。Graph / ConcurrentGraph どちらのバックエンドでも動く
+- `CALL … YIELD … SET / REMOVE` で結果をプロパティに書き戻せるようにした（`ProcedureCallStatement.updates`）
+- docs/algorithms の centrality / connected-components に Cypher の節を追加
+- 重み付き最短経路のプロシージャは未実装（Cypher の reduce で重みを比べる方法が docs にある）

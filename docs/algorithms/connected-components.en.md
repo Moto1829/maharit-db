@@ -7,10 +7,30 @@ source_commit: 52f38528
 
 # Connected components
 
-Splits a graph into groups of nodes that are connected to each other. Computed over a whole `Graph` with the Rust API of the `maharit-core` crate.
+Splits a graph into groups of nodes that are connected to each other. Computed with Cypher procedures or with the Rust API of the `maharit-core` crate.
 
-!!! note "Not available from Cypher"
-    Connected components, strongly connected components, and label propagation are Rust API only; there are no Cypher procedures (`CALL …`) for them. None of them distinguish relationship types.
+## Cypher: procedures
+
+| Procedure | YIELD | Configuration (map) |
+|---|---|---|
+| `db.connectedComponents` | `node`, `componentId` | — |
+| `db.stronglyConnectedComponents` | `node`, `componentId` | — |
+| `db.labelPropagation` | `node`, `communityId` | `maxIterations` (default 10) |
+
+The configuration map is optional. Every procedure accepts `nodeLabels` (only nodes with any of these labels) and `relationshipTypes` (follow only relationships of these types); without them the whole graph is used. Rows come back in node-ID order. `componentId` numbers components 0, 1, 2, … in order of the smallest node ID they contain. `communityId` is the ID of the community's representative node.
+
+```cypher
+// Number of nodes per component
+CALL db.connectedComponents() YIELD node, componentId
+RETURN componentId, count(node) AS size
+ORDER BY size DESC
+```
+
+```cypher
+// Write the component number back as a property
+CALL db.connectedComponents({relationshipTypes: ["KNOWS"]}) YIELD node, componentId
+SET node.component = componentId
+```
 
 ## Connected components (weak)
 
@@ -69,7 +89,7 @@ let communities = maharit_core::label_propagation(&graph, 50); // Up to 50 itera
 
 ## Writing results back to the graph
 
-To aggregate by component in Cypher, write the results back as properties.
+With the Cypher procedures, write the results back with `SET node.component = componentId` ([above](#cypher-procedures)). When you compute with the Rust API, write them back as properties like this.
 
 ```rust
 for (i, component) in maharit_core::connected_components(&graph).iter().enumerate() {

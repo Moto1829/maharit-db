@@ -6,10 +6,30 @@ nav_order: 4
 
 # 連結成分
 
-グラフを「互いにつながっているノードのまとまり」に分けます。`maharit-core` クレートの Rust API で、`Graph` 全体に対して計算します。
+グラフを「互いにつながっているノードのまとまり」に分けます。Cypher のプロシージャか、`maharit-core` クレートの Rust API で計算します。
 
-!!! note "Cypher からは使えません"
-    連結成分・強連結成分・ラベル伝播は Rust API だけです。Cypher のプロシージャ（`CALL …`）としては用意していません。どれもリレーションシップの型は区別しません。
+## Cypher: プロシージャ
+
+| プロシージャ | YIELD | 設定（マップ） |
+|---|---|---|
+| `db.connectedComponents` | `node`, `componentId` | — |
+| `db.stronglyConnectedComponents` | `node`, `componentId` | — |
+| `db.labelPropagation` | `node`, `communityId` | `maxIterations`（既定 10） |
+
+設定のマップは省略できます。どのプロシージャでも `nodeLabels`（いずれかのラベルを持つノードだけを対象にする）と `relationshipTypes`（いずれかの型のリレーションシップだけを辿る）が使えます。指定しなければグラフ全体が対象です。結果はノード ID の順に返ります。 `componentId` は、成分に含まれる最小のノード ID の順に 0, 1, 2, … と振ります。`communityId` はコミュニティの代表ノードの ID です。
+
+```cypher
+// 成分ごとのノード数
+CALL db.connectedComponents() YIELD node, componentId
+RETURN componentId, count(node) AS size
+ORDER BY size DESC
+```
+
+```cypher
+// 成分の番号をプロパティに書き戻す
+CALL db.connectedComponents({relationshipTypes: ["KNOWS"]}) YIELD node, componentId
+SET node.component = componentId
+```
 
 ## 弱連結成分（Connected Components）
 
@@ -68,7 +88,7 @@ let communities = maharit_core::label_propagation(&graph, 50); // 最大 50 回�
 
 ## 結果をグラフに書き戻す
 
-Cypher で成分ごとに集計したいときは、計算結果をプロパティとして書き戻します。
+Cypher のプロシージャなら `SET node.component = componentId` で書き戻せます（上記）。Rust API で計算したときは、次のようにプロパティとして書き戻します。
 
 ```rust
 for (i, component) in maharit_core::connected_components(&graph).iter().enumerate() {

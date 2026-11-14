@@ -7,10 +7,41 @@ source_commit: 52f38528
 
 # PageRank and centrality
 
-Measures of how important a node is. They are computed over a whole `Graph` with the Rust API of the `maharit-core` crate.
+Measures of how important a node is. They are computed with Cypher procedures (such as `CALL db.pageRank()`) or with the Rust API of the `maharit-core` crate.
 
-!!! note "Not available from Cypher"
-    Centrality is computed with the Rust API only; there are no Cypher procedures (`CALL …`) for it. Every measure ignores relationship types and covers the whole graph.
+## Cypher: procedures
+
+| Procedure | YIELD | Configuration (map) |
+|---|---|---|
+| `db.pageRank` | `node`, `score` | `iterations` (default 100), `dampingFactor` (default 0.85), `tolerance` |
+| `db.betweennessCentrality` | `node`, `score` | — |
+| `db.closenessCentrality` | `node`, `score` | — |
+
+The configuration map is optional. Every procedure accepts `nodeLabels` (only nodes with any of these labels) and `relationshipTypes` (follow only relationships of these types); without them the whole graph is used. Rows come back in node-ID order.
+
+```cypher
+// Top 10 nodes by PageRank
+CALL db.pageRank({iterations: 50, dampingFactor: 0.85}) YIELD node, score
+RETURN node.name AS name, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+```cypher
+// Follow only FOLLOWS and write the scores back as a property
+CALL db.pageRank({nodeLabels: ["Person"], relationshipTypes: ["FOLLOWS"]}) YIELD node, score
+SET node.pagerank = score
+```
+
+```cypher
+// Nodes with betweenness above 0
+CALL db.betweennessCentrality() YIELD node, score
+WITH node, score WHERE score > 0
+RETURN node.name, score
+ORDER BY score DESC
+```
+
+The computation first copies the selected nodes and relationships into a temporary graph, so it takes time and memory proportional to the whole graph.
 
 ## PageRank
 
@@ -90,7 +121,7 @@ On graphs with 500 or more nodes, betweenness and closeness centrality are compu
 
 ## Writing results back to the graph
 
-Results come back as `HashMap<NodeId, f64>`. To use them from Cypher, write them back as properties.
+With the Cypher procedures, write the results back with `YIELD node, score SET node.pagerank = score` ([above](#cypher-procedures)). The Rust API returns `HashMap<NodeId, f64>`; write the values back as properties like this.
 
 ```rust
 let scores = maharit_core::betweenness_centrality(&graph);

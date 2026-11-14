@@ -11,6 +11,8 @@ use regex::Regex;
 use thiserror::Error;
 
 use crate::ast::*;
+
+mod algo;
 use crate::cache::AstCache;
 
 /// Minimum number of candidate nodes required before switching to parallel filtering.
@@ -2252,6 +2254,9 @@ impl<'a> Executor<'a> {
         let (columns, rows) = match pc.procedure.as_str() {
             "db.index.fulltext.search" => self.fulltext_search_procedure(&pc.arguments)?,
             "db.labels" => self.labels_procedure(&pc.arguments)?,
+            name if algo::ALGORITHM_PROCEDURES.iter().any(|(n, _)| *n == name) => {
+                self.algorithm_procedure(name, &pc.arguments)?
+            }
             other => {
                 return Err(ExecuteError::TypeError(format!(
                     "unknown procedure: {}",
@@ -2298,6 +2303,24 @@ impl<'a> Executor<'a> {
 
         for segment in &pc.segments {
             bindings = self.execute_query_segment(segment, bindings)?;
+        }
+
+        self.apply_update_clauses(&pc.updates, &bindings)?;
+        if !pc.updates.is_empty() && pc.foreach_clause.is_none() && pc.return_clause.is_none() {
+            let set_items: usize = pc
+                .updates
+                .iter()
+                .map(|u| match u {
+                    UpdateClause::Set(s) => s.items.len(),
+                    UpdateClause::Remove(_) => 0,
+                })
+                .sum();
+            return Ok(ResultSet::new(
+                vec!["properties_set".to_string()],
+                vec![Row {
+                    columns: vec![Value::Int((set_items * bindings.len()) as i64)],
+                }],
+            ));
         }
 
         if let Some(foreach) = &pc.foreach_clause {

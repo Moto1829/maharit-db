@@ -6,10 +6,41 @@ nav_order: 3
 
 # PageRank / 中心性指標
 
-ノードの重要度を測る指標です。`maharit-core` クレートの Rust API で、`Graph` 全体に対して計算します。
+ノードの重要度を測る指標です。Cypher のプロシージャ（`CALL db.pageRank()` など）か、`maharit-core` クレートの Rust API で計算します。
 
-!!! note "Cypher からは使えません"
-    中心性の計算は Rust API だけです。Cypher のプロシージャ（`CALL …`）としては用意していません。どの指標も、リレーションシップの型は区別せず、グラフ全体を対象にします。
+## Cypher: プロシージャ
+
+| プロシージャ | YIELD | 設定（マップ） |
+|---|---|---|
+| `db.pageRank` | `node`, `score` | `iterations`（既定 100）、`dampingFactor`（既定 0.85）、`tolerance` |
+| `db.betweennessCentrality` | `node`, `score` | — |
+| `db.closenessCentrality` | `node`, `score` | — |
+
+設定のマップは省略できます。どのプロシージャでも `nodeLabels`（いずれかのラベルを持つノードだけを対象にする）と `relationshipTypes`（いずれかの型のリレーションシップだけを辿る）が使えます。指定しなければグラフ全体が対象です。結果はノード ID の順に返ります。
+
+```cypher
+// PageRank の上位 10 件
+CALL db.pageRank({iterations: 50, dampingFactor: 0.85}) YIELD node, score
+RETURN node.name AS name, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+```cypher
+// FOLLOWS だけを辿って計算し、プロパティに書き戻す
+CALL db.pageRank({nodeLabels: ["Person"], relationshipTypes: ["FOLLOWS"]}) YIELD node, score
+SET node.pagerank = score
+```
+
+```cypher
+// 媒介中心性が 0 より大きいノード
+CALL db.betweennessCentrality() YIELD node, score
+WITH node, score WHERE score > 0
+RETURN node.name, score
+ORDER BY score DESC
+```
+
+計算は対象のノードとリレーションシップを一時的なグラフに写してから行うので、グラフ全体を読む時間とメモリが掛かります。
 
 ## PageRank
 
@@ -89,7 +120,7 @@ let normalized = degree.normalized(&graph); // 合計を 2(n-1) で割った値
 
 ## 結果をグラフに書き戻す
 
-計算結果は `HashMap<NodeId, f64>` で返ります。Cypher から使うには、プロパティとして書き戻します。
+Cypher のプロシージャなら、`YIELD node, score SET node.pagerank = score` のように書き戻せます（上記）。Rust API の計算結果は `HashMap<NodeId, f64>` で返るので、次のようにプロパティとして書き戻します。
 
 ```rust
 let scores = maharit_core::betweenness_centrality(&graph);

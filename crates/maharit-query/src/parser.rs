@@ -2598,6 +2598,7 @@ impl Parser {
         }
 
         let segments = self.parse_procedure_continuation(!yield_items.is_empty())?;
+        let updates = self.parse_trailing_updates()?;
 
         let foreach_clause = if self.check(TokenKind::Foreach) {
             Some(self.parse_foreach_statement()?)
@@ -2617,7 +2618,11 @@ impl Parser {
         let has_reading_clause = segments
             .iter()
             .any(|seg| !seg.match_clauses.is_empty() || seg.with_clause.is_some());
-        if has_reading_clause && foreach_clause.is_none() && return_clause.is_none() {
+        if has_reading_clause
+            && updates.is_empty()
+            && foreach_clause.is_none()
+            && return_clause.is_none()
+        {
             return Err(self.unexpected_token("RETURN or FOREACH"));
         }
 
@@ -2626,6 +2631,7 @@ impl Parser {
             arguments,
             yield_items,
             segments,
+            updates,
             foreach_clause,
             return_clause,
         }))
