@@ -10,7 +10,7 @@
 ## 実装内容
 
 ### フェーズ1: GitHub Actions リリースパイプライン
-- [ ] `.github/workflows/release.yml` を作成（※ 2026-09-30 確認: 完了扱いだったがファイル・履歴とも存在しない。未実装）
+- [x] `.github/workflows/release.yml` を作成（2026-11-03 に実装済み。5 ターゲット、`.sha256` 付き、git-cliff のノートで Release 作成）
   - `v*` タグ push 時にトリガー
   - ターゲット: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
   - `cross` または GitHub-hosted runners でクロスコンパイル
@@ -45,3 +45,11 @@
 - `install.sh`（新規作成）
 - `install.ps1`（新規作成）
 - `Formula/maharit.rb`（Homebrew tap、別リポジトリ）
+
+## 状況（2026-11-14 確認）
+- フェーズ 1・2 は完了。ただし GitHub Release はまだ 1 つも公開されていない（タグは v0.1.0 のみで release.yml 導入前）。
+  `bash scripts/release.sh <版> --push` で最初のリリースを出すと install.sh / install.ps1 が使えるようになる
+- フェーズ 3・4 は外部のリポジトリ・アカウントが要るので、**ユーザーの判断待ち**:
+  - Homebrew: tap リポジトリ（例 `Moto1829/homebrew-tap`）を作るか
+  - crates.io: 全クレートを publish するか（maharit-server は workspace 内の他クレートに依存するので、依存クレートも publish が必要。クレート名の確保も）
+  - AUR / .deb / .rpm: 需要があるか
