@@ -230,3 +230,6 @@ CREATE (a)-[:KNOWS]->(b)
 
 A property value can be an integer, float, string, boolean, date or time, or a list of these
 (`CREATE (:Article {tags: ["graph", "db"]})`). Lists of lists and maps cannot be stored as properties.
+
+null is never stored as a property value. `SET n.p = null` (and `SET n += {p: null}`) removes the property `p`,
+and `CREATE (n {p: null})` does not create `p`.

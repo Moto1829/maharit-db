@@ -944,7 +944,11 @@ impl<'a> Executor<'a> {
                 let prop_val = self.value_to_property(&val)?;
                 Ok((k, prop_val))
             })
-            .collect::<Result<_, ExecuteError>>()?;
+            .collect::<Result<Vec<_>, ExecuteError>>()?
+            .into_iter()
+            // null のプロパティは作らない（Cypher の意味。bug/174）
+            .filter(|(_, v)| !matches!(v, PropertyValue::Null))
+            .collect();
 
         let props: HashMap<String, PropertyValue> = evaluated_props.iter().cloned().collect();
 
@@ -1216,7 +1220,10 @@ impl<'a> Executor<'a> {
                             })
                             .collect::<Result<_, ExecuteError>>()?;
 
-                        for (key, prop_val) in edge_props {
+                        for (key, prop_val) in edge_props
+                            .into_iter()
+                            .filter(|(_, v)| !matches!(v, PropertyValue::Null))
+                        {
                             self.graph_mut().set_edge_property(edge_id, &key, prop_val);
                         }
                         if let Some(var) = &segment.edge.variable {
@@ -1290,6 +1297,32 @@ impl<'a> Executor<'a> {
 
     /// `SET n += map`（`replace = false`）/ `SET n = map`（`replace = true`）を適用する。
     /// 置き換えでは、マップに無い既存のプロパティを削除する。
+    /// ノードまたはリレーションシップのプロパティを 1 つ消す（無ければ何もしない）。
+    fn remove_property(
+        &mut self,
+        binding_value: &BindingValue,
+        property: &str,
+    ) -> Result<(), ExecuteError> {
+        match binding_value {
+            BindingValue::Node(node_id) => {
+                if let Some(node) = self.graph_ref().get_node(*node_id) {
+                    self.constraints.validate_property_remove(&node, property)?;
+                }
+                if let Some(old) = self.graph_mut().remove_node_property(*node_id, property) {
+                    self.reindex_node_property(*node_id, property, Some(old), None);
+                }
+                Ok(())
+            }
+            BindingValue::Edge(edge_id) => {
+                self.graph_mut().remove_edge_property(*edge_id, property);
+                Ok(())
+            }
+            _ => Err(ExecuteError::TypeError(
+                "SET requires node or edge binding".to_string(),
+            )),
+        }
+    }
+
     fn set_properties_from_map(
         &mut self,
         bindings: &Bindings,
@@ -1299,8 +1332,16 @@ impl<'a> Executor<'a> {
     ) -> Result<(), ExecuteError> {
         let binding_value = bindings
             .get(variable)
-            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.to_string()))?;
-        match binding_value {
+            .ok_or_else(|| ExecuteError::UndefinedVariable(variable.to_string()))?
+            .clone();
+        // null の値はプロパティの削除（bug/174）。`SET n = {…}` では残さないキーと同じ扱い
+        let (nulls, evaluated): (Vec<_>, Vec<_>) = evaluated
+            .into_iter()
+            .partition(|(_, v)| matches!(v, PropertyValue::Null));
+        for (key, _) in &nulls {
+            self.remove_property(&binding_value, key)?;
+        }
+        match &binding_value {
             BindingValue::Node(node_id) => {
                 let node_id = *node_id;
                 // Validate constraints for each new property
@@ -1367,6 +1408,13 @@ impl<'a> Executor<'a> {
 
                         let value = self.evaluate_expression(value_expr, bindings)?;
                         let prop_value = self.value_to_property(&value)?;
+
+                        // `SET n.p = null` はプロパティの削除（bug/174）
+                        if matches!(prop_value, PropertyValue::Null) {
+                            let binding_value = binding_value.clone();
+                            self.remove_property(&binding_value, property)?;
+                            continue;
+                        }
 
                         match binding_value {
                             BindingValue::Node(node_id) => {
@@ -1684,7 +1732,10 @@ impl<'a> Executor<'a> {
                         })
                         .collect::<Result<_, ExecuteError>>()?;
 
-                    for (key, prop_val) in edge_props {
+                    for (key, prop_val) in edge_props
+                        .into_iter()
+                        .filter(|(_, v)| !matches!(v, PropertyValue::Null))
+                    {
                         self.graph_mut().set_edge_property(edge_id, &key, prop_val);
                     }
                     // MERGE の ON CREATE SET / RETURN から `r` を参照できるように束縛する
@@ -13384,6 +13435,61 @@ mod tests {
         .unwrap();
         let r = execute(&mut graph, "MATCH (p:P) WHERE p.hit = true RETURN count(p)").unwrap();
         assert_eq!(r.rows[0].columns[0], Value::Int(2));
+    }
+
+    #[test]
+    fn test_null_property_value_removes_property() {
+        // bug/174: null を設定するとプロパティは消える。null のプロパティは作らない
+        let mut graph = Graph::new();
+        let keys = |g: &mut Graph, q: &str| execute(g, q).unwrap().rows[0].columns[0].clone();
+        let list =
+            |v: &[&str]| Value::List(v.iter().map(|s| Value::String(s.to_string())).collect());
+
+        execute(
+            &mut graph,
+            "CREATE (n:Q {a: 1, b: null, c: 3})-[:R {w: null, x: 1}]->(:Q)",
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH (n:Q {a: 1}) RETURN keys(n)"),
+            list(&["a", "c"])
+        );
+        assert_eq!(
+            keys(&mut graph, "MATCH ()-[r:R]->() RETURN keys(r)"),
+            list(&["x"])
+        );
+
+        execute(&mut graph, "MATCH (n:Q {a: 1}) SET n.a = null").unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH (n:Q {c: 3}) RETURN keys(n)"),
+            list(&["c"])
+        );
+
+        execute(&mut graph, "MATCH (n:Q {c: 3}) SET n += {c: null, d: 4}").unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH (n:Q {d: 4}) RETURN keys(n)"),
+            list(&["d"])
+        );
+
+        execute(&mut graph, "MATCH (n:Q {d: 4}) SET n = {d: null, e: 5}").unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH (n:Q {e: 5}) RETURN keys(n)"),
+            list(&["e"])
+        );
+
+        execute(&mut graph, "MATCH ()-[r:R]->() SET r.x = null").unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH ()-[r:R]->() RETURN size(keys(r))"),
+            Value::Int(0)
+        );
+
+        // プロパティインデックスからも消える
+        execute(&mut graph, "CREATE INDEX ON :Q(e)").unwrap();
+        execute(&mut graph, "MATCH (n:Q {e: 5}) SET n.e = null").unwrap();
+        assert_eq!(
+            keys(&mut graph, "MATCH (n:Q {e: 5}) RETURN count(n)"),
+            Value::Int(0)
+        );
     }
 
     #[test]
