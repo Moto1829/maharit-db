@@ -20,8 +20,21 @@ maharit server --host 0.0.0.0 --port 7687 \
 - `--require-auth`: すべてのリクエストにセッショントークンを要求し、ロールの権限を検査する
 - `--admin-password <PW>`（環境変数 `MAHARIT_ADMIN_PASSWORD`）: 起動時に作る `admin` ユーザーのパスワード。`--require-auth` のときは必須で、指定が無いと起動しない
 
-!!! warning "ユーザーはサーバーの再起動で消える"
-    ユーザーとパスワードはメモリ上にだけあり、データファイルにもバックアップにも保存されません。再起動すると `admin` だけに戻るので、`CREATE USER` で作ったユーザーは起動後に作り直してください。
+## ユーザーを保存する（`--users-file`）
+
+`--users-file <PATH>`（環境変数 `MAHARIT_USERS_FILE`）を付けると、ユーザーをそのファイルに保存し、再起動後も使えます。指定しないとユーザーはメモリ上にだけあり、再起動すると `admin` だけに戻ります。
+
+```bash
+maharit server --require-auth --users-file /var/lib/maharit/users.json \
+  --admin-password "$MAHARIT_ADMIN_PASSWORD"
+```
+
+- ファイルが**無い**とき: `--admin-password` の `admin` だけを持つファイルを作ります（パスワードが無いと起動しません）
+- ファイルが**ある**とき: ユーザーをファイルから読み込みます。`--admin-password` は使いません（指定されていればその旨を表示します）。`admin` のパスワードを変えるには `ALTER USER admin SET PASSWORD '…'` を使います。有効な `admin` ロールのユーザーがいないファイルや、読めないファイルなら起動しません
+- `CREATE USER` / `ALTER USER` / `DROP USER` のたびにファイルを書き直します（一時ファイルに書いてから置き換えます）
+- ファイルにはユーザー名・ロール・ソルト・パスワードのハッシュを JSON で保存します。平文のパスワードは保存しません。Unix では所有者だけが読み書きできる権限（0600）で作ります
+- `--require-auth` なしで指定すると起動しません
+- ユーザーはデータファイルにもバックアップにもレプリケーションにも含まれません。ファイルは別にバックアップし、レプリケーションの各ノードやシャードには必要に応じて同じファイルを置いてください
 
 ## ログインとセッション
 
@@ -116,4 +129,21 @@ alice    | read_only  | true
 
 ## 監査ログ
 
-ログインやユーザー管理の操作を記録する監査ログは、まだサーバーに組み込まれていません。
+`--audit-log <PATH>`（環境変数 `MAHARIT_AUDIT_LOG`）を付けると、次の出来事を 1 行 1 件の JSON でファイルに追記します。書き込めないパスなら起動しません。
+
+| `event` | 記録する場面 | 項目 |
+|---|---|---|
+| `login_success` / `login_failure` | ログインの成功・失敗 | `username` |
+| `user_created` / `user_modified` / `user_deleted` | `CREATE USER` / `ALTER USER` / `DROP USER` の成功 | `username`（対象）、`by`（実行したユーザー） |
+| `permission_denied` | ロールの権限が足りずに拒否したとき | `username`、`action`（`write` / `manage_users` / `promote` / `begin_write_transaction`） |
+
+```text
+{"timestamp":1763100000,"event":"login_success","username":"admin"}
+{"timestamp":1763100005,"event":"user_created","username":"alice","by":"admin"}
+{"timestamp":1763100010,"event":"permission_denied","username":"alice","action":"write"}
+```
+
+- `timestamp` は Unix 時刻（秒）。パスワードは記録しません
+- ファイルが 10 MiB を超えると `<PATH>.1` 〜 `<PATH>.3` に回して新しいファイルに書きます
+- 認証が無効なサーバーでも使えます（ユーザー名は `anonymous` になります）
+- コーディネーター（`--coordinator`）では記録しません。各シャードで指定してください

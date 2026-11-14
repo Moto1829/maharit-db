@@ -20,4 +20,4 @@ The only access control on the current server is the three roles (`reader` / `wr
 
 ## Next steps
 
-The `maharit-server` crate has an `AclManager` (`auth.rs`) that evaluates per-label and per-property rules, but it is not connected to query execution. Enforcing it on the server and adding statements to define rules is future work.
+The `maharit-server` crate has an `AclManager` (`auth.rs`) that evaluates per-label and per-property rules, but it is not connected to query execution. Enforcing it on the server and adding statements to define rules is future work (server/173).

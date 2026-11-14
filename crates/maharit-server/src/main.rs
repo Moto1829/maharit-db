@@ -61,16 +61,46 @@ fn run_repl() {
 /// 認証が有効な場合に管理者パスワードを解決し `AuthManager` を返す。
 /// デフォルトの admin/admin をネットワーク公開しないよう、パスワード未指定なら
 /// エラー終了する。認証無効なら `None`。
+///
+/// `users_file`（`--users-file`）があれば、ユーザーをそのファイルから読み込み、変更のたびに保存する。
+/// ファイルがまだ無いときは管理者パスワードで admin を作ってファイルを作成する。
+/// ファイルがあるときは管理者パスワードを使わない（ファイルの admin のパスワードが有効）。
 fn resolve_admin_auth(
     require_auth: bool,
     admin_password: Option<String>,
+    users_file: Option<&str>,
 ) -> Option<crate::auth::AuthManager> {
     if !require_auth {
+        if users_file.is_some() {
+            eprintln!("Error: --users-file requires --require-auth");
+            std::process::exit(1);
+        }
         return None;
     }
     let pw = admin_password
         .or_else(|| std::env::var("MAHARIT_ADMIN_PASSWORD").ok())
         .filter(|p| !p.is_empty());
+    if let Some(path) = users_file {
+        return match crate::auth::AuthManager::open_users_file(path, pw.as_deref()) {
+            Ok((mgr, ignored)) => {
+                if ignored {
+                    eprintln!(
+                        "Note: {path} already exists, so the admin password from \
+                         --admin-password / MAHARIT_ADMIN_PASSWORD is ignored \
+                         (use ALTER USER to change it)."
+                    );
+                }
+                Some(mgr)
+            }
+            Err(e) => {
+                eprintln!(
+                    "Error: --users-file: {e}. Set --admin-password <PW> or \
+                     MAHARIT_ADMIN_PASSWORD to create a new users file."
+                );
+                std::process::exit(1);
+            }
+        };
+    }
     match pw {
         Some(p) => Some(crate::auth::AuthManager::with_admin_password(&p)),
         None => {
@@ -82,6 +112,13 @@ fn resolve_admin_auth(
             std::process::exit(1);
         }
     }
+}
+
+/// フラグの値、無ければ環境変数 `env`（空文字列は未指定扱い）。
+fn env_or(flag: &Option<String>, env: &str) -> Option<String> {
+    flag.clone()
+        .or_else(|| std::env::var(env).ok())
+        .filter(|s| !s.is_empty())
 }
 
 fn run_server(args: &[String]) {
@@ -109,6 +146,8 @@ fn run_server(args: &[String]) {
     // Authentication options
     let mut admin_password: Option<String> = None;
     let mut replication_secret: Option<String> = None;
+    let mut users_file: Option<String> = None;
+    let mut audit_log: Option<String> = None;
 
     // Monitoring HTTP server bind address (metrics + health)
     let mut metrics_bind: Option<String> = None;
@@ -188,6 +227,18 @@ fn run_server(args: &[String]) {
             "--admin-password" => {
                 if i + 1 < args.len() {
                     admin_password = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--users-file" => {
+                if i + 1 < args.len() {
+                    users_file = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--audit-log" => {
+                if i + 1 < args.len() {
+                    audit_log = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
@@ -358,7 +409,11 @@ fn run_server(args: &[String]) {
             ..CoordinatorConfig::default()
         };
 
-        let coord_auth = resolve_admin_auth(config.require_auth, admin_password.take());
+        let coord_auth = resolve_admin_auth(
+            config.require_auth,
+            admin_password.take(),
+            env_or(&users_file, "MAHARIT_USERS_FILE").as_deref(),
+        );
         let shard_options = resolve_shard_options(shard_ca, shard_user, shard_password);
         let mut srv_inner = ShardCoordinatorServer::new(coord_config, cluster_config)
             .with_shard_options(shard_options);
@@ -447,7 +502,28 @@ fn run_server(args: &[String]) {
     // 認証を有効化する場合は管理者パスワードを解決する。
     // デフォルトの admin/admin をネットワークに公開しないよう、
     // パスワード未指定なら起動を拒否する。
-    let mut auth_manager = resolve_admin_auth(config.require_auth, admin_password.take());
+    let mut auth_manager = resolve_admin_auth(
+        config.require_auth,
+        admin_password.take(),
+        env_or(&users_file, "MAHARIT_USERS_FILE").as_deref(),
+    );
+
+    // 監査ログ（--audit-log / MAHARIT_AUDIT_LOG）。書けない場所なら起動時に止める。
+    let audit_log = env_or(&audit_log, "MAHARIT_AUDIT_LOG");
+    if let Some(path) = &audit_log
+        && let Err(e) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        eprintln!("Error: cannot open the audit log {path}: {e}");
+        std::process::exit(1);
+    }
+    let audit_logger = || {
+        audit_log
+            .as_ref()
+            .map(|p| crate::audit::AuditLogger::with_defaults(p.clone()))
+    };
 
     // レプリケーションチャネルの共有シークレット（--replication-secret / 環境変数）。
     // 設定するとリーダーはシークレットを提示しないフォロワーを拒否する。
@@ -492,6 +568,9 @@ fn run_server(args: &[String]) {
             .with_replication(Arc::clone(&leader));
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
+            }
+            if let Some(l) = audit_logger() {
+                server = server.with_audit_log(l);
             }
             if let Some(t) = tls.clone() {
                 server = server.with_tls(t);
@@ -574,6 +653,9 @@ fn run_server(args: &[String]) {
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
             }
+            if let Some(l) = audit_logger() {
+                server = server.with_audit_log(l);
+            }
             if let Some(t) = tls.clone() {
                 server = server.with_tls(t);
             }
@@ -609,6 +691,9 @@ fn run_server(args: &[String]) {
             );
             if let Some(a) = auth_manager.take() {
                 server = server.with_auth(a);
+            }
+            if let Some(l) = audit_logger() {
+                server = server.with_audit_log(l);
             }
             if let Some(t) = tls.clone() {
                 server = server.with_tls(t);
@@ -1436,6 +1521,15 @@ fn print_server_help() {
     );
     println!(
         "    --admin-password <PW>            Initial admin password (env: MAHARIT_ADMIN_PASSWORD); required with --require-auth"
+    );
+    println!(
+        "    --users-file <PATH>              Load users from PATH and save every user change there (env: MAHARIT_USERS_FILE; needs --require-auth)."
+    );
+    println!(
+        "                                     If PATH does not exist it is created with the --admin-password admin; if it exists, --admin-password is ignored"
+    );
+    println!(
+        "    --audit-log <PATH>               Append logins, user management and permission errors to PATH as JSON lines (env: MAHARIT_AUDIT_LOG)"
     );
     println!(
         "    --tls-cert <PATH>                PEM certificate (chain) for client connections (env: MAHARIT_TLS_CERT)"

@@ -8,7 +8,7 @@
 #
 # 実行内容:
 #   1. 単一サーバーを起動し smoke / query_feature / concurrent / constraint / auth を実行
-#   2. persistence / tls（自前でサーバーを起動・停止する。tls は openssl コマンドを使う）
+#   2. persistence / tls / users_audit（自前でサーバーを起動・停止する。tls は openssl コマンドを使う）
 #   3. 3 ノードのレプリケーションクラスターで replication_test を N 回、failover_test を 1 回
 #
 # いずれかが失敗すると非 0 で終了する。ログは $E2E_LOG_DIR（既定: /tmp/maharit-e2e）に残す。
@@ -79,6 +79,7 @@ kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=""
 # ── 2. 永続化・TLS ─────────────────────────────────────────────────────────────
 run persistence_test python3 scripts/persistence_test.py --binary "$BINARY"
 run tls_test python3 scripts/tls_test.py --binary "$BINARY"
+run users_audit_test python3 scripts/users_audit_test.py --binary "$BINARY"
 
 # ── 3. レプリケーション ────────────────────────────────────────────────────────
 for i in $(seq 1 "$REPLICATION_RUNS"); do

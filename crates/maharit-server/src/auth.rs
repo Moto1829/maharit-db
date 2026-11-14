@@ -268,6 +268,15 @@ impl AuthManager {
 
         let persisted: PersistedUsers = serde_json::from_str(&content)
             .map_err(|e| AuthError::PersistenceError(format!("parse {}: {}", path, e)))?;
+        if persisted.version != PersistedUsers::CURRENT_VERSION {
+            // v1 のハッシュ（FNV-1a）は検証できないので、黙って読み込まずにエラーにする
+            return Err(AuthError::PersistenceError(format!(
+                "{}: unsupported users file version {} (expected {}); recreate the file",
+                path,
+                persisted.version,
+                PersistedUsers::CURRENT_VERSION
+            )));
+        }
 
         let mut users = HashMap::new();
         for pu in persisted.users {
@@ -296,17 +305,69 @@ impl AuthManager {
         let json = serde_json::to_string_pretty(&persisted)
             .map_err(|e| AuthError::PersistenceError(format!("serialize: {}", e)))?;
 
-        std::fs::write(path, json)
-            .map_err(|e| AuthError::PersistenceError(format!("write {}: {}", path, e)))?;
+        // 一時ファイルに書いてから rename する（書き込み途中で落ちても元のファイルが残る）。
+        // パスワードハッシュを含むので、Unix では所有者だけが読める 0600 で作る。
+        let tmp = format!("{}.tmp", path);
+        let err = |e: std::io::Error| AuthError::PersistenceError(format!("write {}: {}", path, e));
+        {
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(&tmp).map_err(err)?;
+            f.write_all(json.as_bytes()).map_err(err)?;
+            f.sync_all().map_err(err)?;
+        }
+        std::fs::rename(&tmp, path).map_err(err)?;
 
         Ok(())
     }
 
-    /// Save to the configured `save_path` if one has been set.  Errors are
-    /// silently ignored to avoid disrupting callers.
+    /// サーバーの `--users-file` 用: `path` があれば読み込み、無ければ `admin_password` の
+    /// admin だけを持つファイルを作る。以後の変更は自動で `path` に保存される。
+    ///
+    /// ファイルがあるときは `admin_password` を使わない（戻り値の `bool` が `true` なら
+    /// 指定されたが無視した）。ファイルに有効な admin がいなければエラー。
+    pub fn open_users_file(
+        path: &str,
+        admin_password: Option<&str>,
+    ) -> Result<(Self, bool), AuthError> {
+        if std::path::Path::new(path).exists() {
+            let mgr = Self::load_from_file(path)?;
+            if !mgr
+                .users
+                .values()
+                .any(|u| u.role == Role::Admin && u.active)
+            {
+                return Err(AuthError::PersistenceError(format!(
+                    "{}: no active admin user in the users file",
+                    path
+                )));
+            }
+            return Ok((mgr, admin_password.is_some()));
+        }
+        let pw = admin_password.ok_or_else(|| {
+            AuthError::PersistenceError(format!(
+                "{} does not exist; an admin password is needed to create it",
+                path
+            ))
+        })?;
+        let mgr = Self::with_admin_password(pw).with_save_path(path);
+        mgr.save_to_file(path)?;
+        Ok((mgr, false))
+    }
+
+    /// Save to the configured `save_path` if one has been set. A failure is
+    /// logged (the in-memory change is kept) rather than returned.
     fn auto_save(&self) {
-        if let Some(ref path) = self.save_path {
-            let _ = self.save_to_file(path);
+        if let Some(ref path) = self.save_path
+            && let Err(e) = self.save_to_file(path)
+        {
+            tracing::error!(error = %e, "failed to save the users file");
         }
     }
 
@@ -1164,6 +1225,47 @@ mod tests {
 
         let result = AuthManager::load_from_file(path);
         assert!(matches!(result, Err(AuthError::PersistenceError(_))));
+    }
+
+    #[test]
+    fn test_open_users_file_creates_then_reloads() {
+        let tmp = TempFile::new("open_users_file");
+        let path = tmp.path().to_string();
+
+        // 無いときはパスワードが必要
+        assert!(AuthManager::open_users_file(&path, None).is_err());
+
+        let (mut mgr, ignored) = AuthManager::open_users_file(&path, Some("s3cret")).unwrap();
+        assert!(!ignored);
+        assert!(std::path::Path::new(&path).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        mgr.create_user("kate", "pw", Role::ReadOnly).unwrap();
+
+        // 再起動相当: ファイルのユーザーが残り、--admin-password は使われない
+        let (mut reloaded, ignored) = AuthManager::open_users_file(&path, Some("other")).unwrap();
+        assert!(ignored);
+        assert!(reloaded.authenticate("kate", "pw").is_ok());
+        assert!(reloaded.authenticate("admin", "s3cret").is_ok());
+        assert!(reloaded.authenticate("admin", "other").is_err());
+        // 読み込んだマネージャーも以後の変更を保存する
+        reloaded.drop_user("kate").unwrap();
+        let (mut again, _) = AuthManager::open_users_file(&path, None).unwrap();
+        assert!(again.authenticate("kate", "pw").is_err());
+    }
+
+    #[test]
+    fn test_open_users_file_rejects_old_version_and_no_admin() {
+        let tmp = TempFile::new("open_users_file_bad");
+        let path = tmp.path().to_string();
+        std::fs::write(&path, r#"{"version":1,"users":[]}"#).unwrap();
+        assert!(AuthManager::open_users_file(&path, Some("pw")).is_err());
+        std::fs::write(&path, r#"{"version":2,"users":[]}"#).unwrap();
+        assert!(AuthManager::open_users_file(&path, Some("pw")).is_err());
     }
 
     // -----------------------------------------------------------------------

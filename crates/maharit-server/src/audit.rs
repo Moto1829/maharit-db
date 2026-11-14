@@ -35,6 +35,9 @@ pub enum AuthEvent {
     UserDeleted { username: String, by: String },
     /// A user account was modified (role or password change).
     UserModified { username: String, by: String },
+    /// An authenticated user was refused an operation by RBAC
+    /// (`action` is e.g. `"write"`, `"manage_users"`, `"promote"`).
+    PermissionDenied { username: String, action: String },
 }
 
 impl AuthEvent {
@@ -48,6 +51,7 @@ impl AuthEvent {
             AuthEvent::UserCreated { .. } => "user_created",
             AuthEvent::UserDeleted { .. } => "user_deleted",
             AuthEvent::UserModified { .. } => "user_modified",
+            AuthEvent::PermissionDenied { .. } => "permission_denied",
         }
     }
 
@@ -70,6 +74,11 @@ impl AuthEvent {
                     escape_json(by)
                 )
             }
+            AuthEvent::PermissionDenied { username, action } => format!(
+                ",\"username\":\"{}\",\"action\":\"{}\"",
+                escape_json(username),
+                escape_json(action)
+            ),
         }
     }
 }
@@ -292,6 +301,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(v["event"], "login_success");
         assert_eq!(v["username"], "alice");
+    }
+
+    #[test]
+    fn test_log_auth_event_permission_denied() {
+        let tmp = TempLog::new("permission_denied");
+        let logger = AuditLogger::with_defaults(tmp.path());
+
+        logger.log_auth_event(AuthEvent::PermissionDenied {
+            username: "dave".to_string(),
+            action: "write".to_string(),
+        });
+
+        let content = fs::read_to_string(tmp.path()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(v["event"], "permission_denied");
+        assert_eq!(v["username"], "dave");
+        assert_eq!(v["action"], "write");
     }
 
     #[test]

@@ -21,8 +21,21 @@ maharit server --host 0.0.0.0 --port 7687 \
 - `--require-auth`: require a session token on every request and check role permissions
 - `--admin-password <PW>` (env `MAHARIT_ADMIN_PASSWORD`): password of the `admin` user created at startup. Required with `--require-auth`; without it the server does not start
 
-!!! warning "Users are lost on restart"
-    Users and passwords live only in memory; they are not saved in the data file or in backups. After a restart only `admin` remains, so recreate users made with `CREATE USER` after each start.
+## Saving users (`--users-file`)
+
+With `--users-file <PATH>` (env `MAHARIT_USERS_FILE`), users are saved to that file and survive restarts. Without it, users live only in memory and only `admin` remains after a restart.
+
+```bash
+maharit server --require-auth --users-file /var/lib/maharit/users.json \
+  --admin-password "$MAHARIT_ADMIN_PASSWORD"
+```
+
+- If the file **does not exist**: it is created with just the `admin` user from `--admin-password` (the server does not start without a password)
+- If the file **exists**: users are loaded from it and `--admin-password` is not used (the server prints a note if one was given). To change the `admin` password, use `ALTER USER admin SET PASSWORD '…'`. The server does not start if the file cannot be read or has no active user with the `admin` role
+- The file is rewritten after every `CREATE USER` / `ALTER USER` / `DROP USER` (written to a temporary file, then swapped in)
+- The file stores user names, roles, salts, and password hashes as JSON; plaintext passwords are never stored. On Unix it is created readable and writable by the owner only (0600)
+- Giving it without `--require-auth` is an error
+- Users are not part of the data file, backups, or replication. Back the file up separately, and put the same file on each replication node or shard as needed
 
 ## Login and sessions
 
@@ -117,4 +130,21 @@ Passwords are hashed with a per-user salt and PBKDF2-HMAC-SHA256 (100,000 iterat
 
 ## Audit log
 
-An audit log of logins and user-management operations is not built into the server yet.
+With `--audit-log <PATH>` (env `MAHARIT_AUDIT_LOG`), the server appends the following events to the file as JSON, one per line. The server does not start if the path cannot be written.
+
+| `event` | When | Fields |
+|---|---|---|
+| `login_success` / `login_failure` | A login succeeds or fails | `username` |
+| `user_created` / `user_modified` / `user_deleted` | `CREATE USER` / `ALTER USER` / `DROP USER` succeeds | `username` (the target), `by` (who ran it) |
+| `permission_denied` | A request is refused because the role lacks permission | `username`, `action` (`write` / `manage_users` / `promote` / `begin_write_transaction`) |
+
+```text
+{"timestamp":1763100000,"event":"login_success","username":"admin"}
+{"timestamp":1763100005,"event":"user_created","username":"alice","by":"admin"}
+{"timestamp":1763100010,"event":"permission_denied","username":"alice","action":"write"}
+```
+
+- `timestamp` is Unix time in seconds. Passwords are never logged
+- When the file grows past 10 MiB it is rotated to `<PATH>.1` … `<PATH>.3` and a new file is started
+- It also works with authentication off (the user name is then `anonymous`)
+- The coordinator (`--coordinator`) does not write one; set it on each shard

@@ -73,6 +73,8 @@ maharit server [OPTIONS]
 | `--checkpoint-mb` | | `64` | Checkpoint when the WAL exceeds this size (MB). `0` checkpoints only at shutdown |
 | `--require-auth` | | off | Require a valid session token for every request ([authentication](auth.md)) |
 | `--admin-password` | | none | Initial admin password (env: `MAHARIT_ADMIN_PASSWORD`). Required with `--require-auth` |
+| `--users-file` | | none | File to save users in (env: `MAHARIT_USERS_FILE`). Needs `--require-auth`. See [authentication](auth.md) |
+| `--audit-log` | | none | Audit log file (env: `MAHARIT_AUDIT_LOG`). See [authentication](auth.md) |
 | `--tls-cert` / `--tls-key` | | none | Certificate and private key (PEM) for TLS on client connections (and, on a leader, replication connections). Env: `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` ([TLS/SSL](tls.md)) |
 | `--tls-min-version` | | `1.2` | Minimum TLS version accepted: `1.2` / `1.3` (env: `MAHARIT_TLS_MIN_VERSION`) |
 | `--metrics-bind` | | `127.0.0.1:9090` | Address of the metrics and health-check HTTP server ([metrics](metrics.md)) |
@@ -158,6 +160,8 @@ Environment variables can be used instead of command-line options. If both are g
 | `MAHARIT_DATA` | `--data` |
 | `MAHARIT_WAL` | `--wal` |
 | `MAHARIT_ADMIN_PASSWORD` | `--admin-password` |
+| `MAHARIT_USERS_FILE` | `--users-file` |
+| `MAHARIT_AUDIT_LOG` | `--audit-log` |
 | `MAHARIT_REPLICATION_SECRET` | `--replication-secret` |
 | `MAHARIT_NODE_ID` | `--node-id` |
 | `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` | `--tls-cert` / `--tls-key` |

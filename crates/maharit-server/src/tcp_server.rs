@@ -97,8 +97,18 @@ fn check_session(
     auth: &Arc<Mutex<crate::auth::AuthManager>>,
     token: &Option<String>,
 ) -> Result<crate::auth::Role, Response> {
+    check_session_user(require_auth, auth, token).map(|(role, _)| role)
+}
+
+/// [`check_session`] と同じだが、監査ログ用にユーザー名も返す
+/// （認証が無効なら `"anonymous"`）。
+fn check_session_user(
+    require_auth: bool,
+    auth: &Arc<Mutex<crate::auth::AuthManager>>,
+    token: &Option<String>,
+) -> Result<(crate::auth::Role, String), Response> {
     if !require_auth {
-        return Ok(crate::auth::Role::Admin);
+        return Ok((crate::auth::Role::Admin, "anonymous".to_string()));
     }
     let token_str = match token {
         Some(t) if !t.is_empty() => t.as_str(),
@@ -110,7 +120,7 @@ fn check_session(
     };
     let mut mgr = auth.lock().unwrap();
     match mgr.validate_session(token_str) {
-        Ok(session) => Ok(session.role),
+        Ok(session) => Ok((session.role, session.username.clone())),
         Err(e) => Err(Response::AuthError {
             message: format!("invalid session: {}", e),
         }),
@@ -156,6 +166,24 @@ fn parse_role_str(s: &str) -> Option<crate::auth::Role> {
     }
 }
 
+/// 監査ログが有効なら `event` を記録する。
+fn audit_log(audit: Option<&crate::audit::AuditLogger>, event: crate::audit::AuthEvent) {
+    if let Some(a) = audit {
+        a.log_auth_event(event);
+    }
+}
+
+/// 権限エラーを監査ログに記録する。
+fn audit_denied(audit: Option<&crate::audit::AuditLogger>, username: &str, action: &str) {
+    audit_log(
+        audit,
+        crate::audit::AuthEvent::PermissionDenied {
+            username: username.to_string(),
+            action: action.to_string(),
+        },
+    );
+}
+
 /// 単一メッセージの `result` レスポンスを作る。
 fn result_message(msg: String) -> Response {
     let mut row = HashMap::new();
@@ -176,7 +204,10 @@ fn try_handle_user_management(
     ast_cache: &Arc<Mutex<AstCache>>,
     role: crate::auth::Role,
     require_auth: bool,
+    audit: Option<&crate::audit::AuditLogger>,
+    actor: &str,
 ) -> Option<Response> {
+    use crate::audit::AuthEvent;
     use maharit_query::ast::Statement;
 
     let stmt = ast_cache.lock().unwrap().get_or_parse(query).ok()?;
@@ -199,6 +230,7 @@ fn try_handle_user_management(
         )
         .is_err()
     {
+        audit_denied(audit, actor, "manage_users");
         return Some(Response::AuthError {
             message: "permission denied: user management requires admin role".to_string(),
         });
@@ -208,10 +240,19 @@ fn try_handle_user_management(
     let resp = match stmt {
         Statement::CreateUser(cu) => match parse_role_str(&cu.role) {
             Some(r) => match mgr.create_user(&cu.username, &cu.password, r) {
-                Ok(()) => result_message(format!(
-                    "User '{}' created with role '{}'",
-                    cu.username, cu.role
-                )),
+                Ok(()) => {
+                    audit_log(
+                        audit,
+                        AuthEvent::UserCreated {
+                            username: cu.username.clone(),
+                            by: actor.to_string(),
+                        },
+                    );
+                    result_message(format!(
+                        "User '{}' created with role '{}'",
+                        cu.username, cu.role
+                    ))
+                }
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
@@ -221,7 +262,16 @@ fn try_handle_user_management(
             },
         },
         Statement::DropUser(du) => match mgr.drop_user(&du.username) {
-            Ok(()) => result_message(format!("User '{}' dropped", du.username)),
+            Ok(()) => {
+                audit_log(
+                    audit,
+                    AuthEvent::UserDeleted {
+                        username: du.username.clone(),
+                        by: actor.to_string(),
+                    },
+                );
+                result_message(format!("User '{}' dropped", du.username))
+            }
             Err(e) => Response::Error {
                 message: e.to_string(),
             },
@@ -244,7 +294,16 @@ fn try_handle_user_management(
                 }
             }
             match result {
-                Ok(()) => result_message(format!("User '{}' altered", au.username)),
+                Ok(()) => {
+                    audit_log(
+                        audit,
+                        AuthEvent::UserModified {
+                            username: au.username.clone(),
+                            by: actor.to_string(),
+                        },
+                    );
+                    result_message(format!("User '{}' altered", au.username))
+                }
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
@@ -566,6 +625,8 @@ pub struct TcpServer {
     tls: Option<ReloadableTlsAcceptor>,
     /// Prometheus metrics served by the monitoring HTTP server (`/metrics`).
     metrics: Arc<crate::metrics::Metrics>,
+    /// 監査ログ（`--audit-log`）。ログイン・ユーザー管理・権限エラーを記録する。
+    audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
 /// The leader replication manager, if this node currently is a leader. Set at
@@ -972,6 +1033,7 @@ impl TcpServer {
             durability: None,
             tls: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            audit: None,
         }
     }
 
@@ -992,6 +1054,7 @@ impl TcpServer {
             durability: None,
             tls: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            audit: None,
         }
     }
 
@@ -1012,6 +1075,7 @@ impl TcpServer {
             durability: None,
             tls: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            audit: None,
         }
     }
 
@@ -1032,6 +1096,12 @@ impl TcpServer {
     /// password before enabling `require_auth`).
     pub fn with_auth(mut self, auth: crate::auth::AuthManager) -> Self {
         self.auth = Arc::new(Mutex::new(auth));
+        self
+    }
+
+    /// 監査ログを有効にする（ログイン成功・失敗、ユーザー管理、権限エラーを記録）。
+    pub fn with_audit_log(mut self, logger: crate::audit::AuditLogger) -> Self {
+        self.audit = Some(Arc::new(logger));
         self
     }
 
@@ -1210,6 +1280,7 @@ impl TcpServer {
                     let auth = Arc::clone(&self.auth);
                     let ast_cache = Arc::clone(&self.ast_cache);
                     let durability = self.durability.clone();
+                    let audit = self.audit.clone();
                     let tls = self.tls.as_ref().map(ReloadableTlsAcceptor::acceptor);
                     let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -1228,6 +1299,7 @@ impl TcpServer {
                             ast_cache,
                             durability,
                             metrics: Arc::clone(&metrics),
+                            audit,
                         };
                         let result = match tls {
                             None => handle_connection(socket, ctx, &mut shutdown_rx).await,
@@ -1314,6 +1386,7 @@ struct ConnectionContext {
     ast_cache: Arc<Mutex<AstCache>>,
     durability: Option<Arc<Durability>>,
     metrics: Arc<crate::metrics::Metrics>,
+    audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
 /// Handle a single client connection (plain TCP or TLS).
@@ -1339,7 +1412,9 @@ where
         ast_cache,
         durability,
         metrics,
+        audit,
     } = ctx;
+    let audit = audit.as_deref();
     let mut buffer = BytesMut::with_capacity(4096);
 
     // Transactions begun on this connection and not finished yet: rolled back
@@ -1411,6 +1486,12 @@ where
                     let mut mgr = auth.lock().unwrap();
                     match mgr.authenticate(&username, &password) {
                         Ok(token) => {
+                            audit_log(
+                                audit,
+                                crate::audit::AuthEvent::LoginSuccess {
+                                    username: username.clone(),
+                                },
+                            );
                             let role = mgr
                                 .validate_session(&token)
                                 .map(|s| role_label(&s.role))
@@ -1426,9 +1507,17 @@ where
                                 expires_at,
                             }
                         }
-                        Err(e) => Response::AuthError {
-                            message: format!("{}", e),
-                        },
+                        Err(e) => {
+                            audit_log(
+                                audit,
+                                crate::audit::AuthEvent::LoginFailure {
+                                    username: username.clone(),
+                                },
+                            );
+                            Response::AuthError {
+                                message: format!("{}", e),
+                            }
+                        }
                     }
                 }
                 Request::Query {
@@ -1436,18 +1525,21 @@ where
                     params,
                     tx_id,
                     session_token,
-                } => match check_session(config.require_auth, &auth, &session_token) {
+                } => match check_session_user(config.require_auth, &auth, &session_token) {
                     Err(resp) => resp,
-                    Ok(role) => {
+                    Ok((role, user)) => {
                         if let Some(resp) = try_handle_user_management(
                             &query,
                             &auth,
                             &ast_cache,
                             role,
                             config.require_auth,
+                            audit,
+                            &user,
                         ) {
                             resp
                         } else if let Some(resp) = authorize_query(role, &query) {
+                            audit_denied(audit, &user, "write");
                             resp
                         } else if let Some(resp) =
                             reject_write_on_follower(follower.as_deref(), &ast_cache, &query)
@@ -1500,9 +1592,10 @@ where
                     tx_id: _,
                     chunk_size,
                     session_token,
-                } => match check_session(config.require_auth, &auth, &session_token) {
+                } => match check_session_user(config.require_auth, &auth, &session_token) {
                     Err(resp) => resp,
-                    Ok(role) if authorize_query(role, &query).is_some() => {
+                    Ok((role, user)) if authorize_query(role, &query).is_some() => {
+                        audit_denied(audit, &user, "write");
                         authorize_query(role, &query).unwrap()
                     }
                     Ok(_)
@@ -1564,11 +1657,14 @@ where
                     }
                 }
                 Request::Promote { session_token } => {
-                    match check_session(config.require_auth, &auth, &session_token) {
+                    match check_session_user(config.require_auth, &auth, &session_token) {
                         Err(resp) => resp,
-                        Ok(role) if role != crate::auth::Role::Admin => Response::AuthError {
-                            message: "promote requires the admin role".to_string(),
-                        },
+                        Ok((role, user)) if role != crate::auth::Role::Admin => {
+                            audit_denied(audit, &user, "promote");
+                            Response::AuthError {
+                                message: "promote requires the admin role".to_string(),
+                            }
+                        }
                         Ok(_) => {
                             promote_to_leader(
                                 follower.as_deref(),
@@ -1589,9 +1685,9 @@ where
                 Request::BeginTransaction {
                     read_only,
                     session_token,
-                } => match check_session(config.require_auth, &auth, &session_token) {
+                } => match check_session_user(config.require_auth, &auth, &session_token) {
                     Err(resp) => resp,
-                    Ok(role) => {
+                    Ok((role, user)) => {
                         // 書き込みトランザクションの開始には Write 権限を要求する。
                         if !read_only
                             && crate::auth::AuthManager::check_role_permission(
@@ -1600,6 +1696,7 @@ where
                             )
                             .is_err()
                         {
+                            audit_denied(audit, &user, "begin_write_transaction");
                             Response::AuthError {
                                 message: "permission denied: role cannot begin a write transaction"
                                     .to_string(),

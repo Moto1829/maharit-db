@@ -72,6 +72,8 @@ maharit server [OPTIONS]
 | `--checkpoint-mb` | | `64` | WAL がこのサイズ（MB）を超えたらチェックポイントを取る。`0` で停止時のみ |
 | `--require-auth` | | オフ | すべてのリクエストに有効なセッショントークンを要求する（[認証](auth.md)） |
 | `--admin-password` | | なし | 初期管理者パスワード（環境変数: `MAHARIT_ADMIN_PASSWORD`）。`--require-auth` では必須 |
+| `--users-file` | | なし | ユーザーを保存するファイル（環境変数: `MAHARIT_USERS_FILE`）。`--require-auth` が必要。[認証](auth.md) |
+| `--audit-log` | | なし | 監査ログのファイル（環境変数: `MAHARIT_AUDIT_LOG`）。[認証](auth.md) |
 | `--tls-cert` / `--tls-key` | | なし | クライアント接続（リーダーではレプリケーション接続も）を TLS にする証明書と秘密鍵（PEM）。環境変数: `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY`（[TLS/SSL 設定](tls.md)） |
 | `--tls-min-version` | | `1.2` | 受け付ける最小の TLS バージョン: `1.2` / `1.3`（環境変数: `MAHARIT_TLS_MIN_VERSION`） |
 | `--metrics-bind` | | `127.0.0.1:9090` | メトリクス・ヘルスチェック用 HTTP のアドレス（[メトリクス](metrics.md)） |
@@ -157,6 +159,8 @@ maharit server --host 0.0.0.0 \
 | `MAHARIT_DATA` | `--data` |
 | `MAHARIT_WAL` | `--wal` |
 | `MAHARIT_ADMIN_PASSWORD` | `--admin-password` |
+| `MAHARIT_USERS_FILE` | `--users-file` |
+| `MAHARIT_AUDIT_LOG` | `--audit-log` |
 | `MAHARIT_REPLICATION_SECRET` | `--replication-secret` |
 | `MAHARIT_NODE_ID` | `--node-id` |
 | `MAHARIT_TLS_CERT` / `MAHARIT_TLS_KEY` | `--tls-cert` / `--tls-key` |
