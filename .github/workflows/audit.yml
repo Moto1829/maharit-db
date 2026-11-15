@@ -41,7 +41,7 @@ jobs:
             blocking: true
     continue-on-error: ${{ !matrix.blocking }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
