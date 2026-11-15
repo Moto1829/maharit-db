@@ -436,6 +436,12 @@ pub fn build_plan_with_stats(stmt: &Statement, stats: &GraphStats) -> QueryPlan 
         Statement::ShowUsers => {
             vec![PlanNode::new("ShowUsers", 1, 1, "")]
         }
+        Statement::Acl(_) => {
+            vec![PlanNode::new("Acl", 1, 1, "")]
+        }
+        Statement::ShowAcl => {
+            vec![PlanNode::new("ShowAcl", 1, 1, "")]
+        }
         Statement::Explain(inner) => return build_plan_with_stats(inner, stats),
         Statement::Profile(inner) => return build_plan_with_stats(inner, stats),
         Statement::ProcedureCall(pc) => {
@@ -517,6 +523,12 @@ pub fn build_plan(stmt: &Statement, node_count: u64, edge_count: u64) -> QueryPl
         }
         Statement::ShowUsers => {
             vec![PlanNode::new("ShowUsers", 1, 1, "")]
+        }
+        Statement::Acl(_) => {
+            vec![PlanNode::new("Acl", 1, 1, "")]
+        }
+        Statement::ShowAcl => {
+            vec![PlanNode::new("ShowAcl", 1, 1, "")]
         }
         Statement::Explain(inner) => return build_plan(inner, node_count, edge_count),
         Statement::Profile(inner) => return build_plan(inner, node_count, edge_count),

@@ -75,7 +75,7 @@ The Python client has no login API yet.
 
 Whether a query writes is decided by the kind of statement. Without permission, the reply is `authError` (`permission denied: …`).
 
-There is no finer-grained control by label or property yet (see [Access control (ACL)](acl.md)).
+Reads and writes can be restricted further per label or property (see [Access control (ACL)](acl.md)).
 
 ## User management
 

@@ -49,8 +49,23 @@ SHOW ACL                                          // 規則の一覧（subject /
 - コーディネーター: シャードで適用されるので、コーディネーターは素通し
 - ストリーミングクエリ・トランザクション内のクエリも同じフィルタを通すこと
 
+## 決定（2026-11-15）
+- 読み取りの Deny は「見えない」（エラーにしない）
+- admin ロールには ACL を適用しない
+
 ## 作業
-- [ ] 上の「要決定」（読み取り Deny の意味＝見えない / エラー、admin 除外の可否）をユーザーと確定
-- [ ] AST・パーサー・サーバー処理・保存（v3）
-- [ ] Executor の可視性フィルタとプロパティマスク、高速パスの無効化
-- [ ] テスト（ユニット・E2E）、docs/operations/acl.md（日英）を実装に合わせて書き直す
+- [x] 上の「要決定」をユーザーと確定
+- [x] AST・パーサー・サーバー処理・保存（v3）
+- [x] Executor の可視性フィルタとプロパティマスク、高速パスの無効化
+- [x] テスト（ユニット・TCP 結合）、docs/operations/acl.md（日英）を実装に合わせて書き直す
+
+## 実装メモ
+- `maharit-query::acl`: `AccessPolicy`（読み取り・書き込みごとの `LabelRules`）と、グラフを包む `AclBackend`。
+  `Executor::with_access_policy` で渡す。見えないノード・リレーションシップ・プロパティを `GraphBackend` の段階で隠すので、
+  MATCH・件数の高速パス・プロシージャ・アルゴリズムがそのまま規則を守る
+- 書き込みの違反は変更を通したうえで記録し、`execute_with_params` が `AccessDenied` を返す。サーバーの undo で文ごと取り消す
+- 制約の検査・索引の維持・DDL は ACL を通さない（一意性や索引の内容を保つため）。ACL 適用中はプロパティ索引で候補を絞らない
+- 評価順は設計案から変更: ユーザーを名指しした規則があればそれで決め、無ければロールの規則、同じ段では DENY 優先
+  （設計案の「ロール Deny > ユーザー Allow」では GRANT に意味が無くなるため）
+- 監査ログ: `acl_changed`（GRANT / DENY / REVOKE）、`permission_denied`（`action: "acl_write"`）
+- E2E（Python スクリプト）は未追加。TCP の結合テスト `integration_acl_over_tcp` で代替

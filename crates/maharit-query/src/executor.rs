@@ -77,6 +77,10 @@ pub enum ExecuteError {
 
     #[error("parse error: {0}")]
     ParseError(#[from] crate::parser::ParseError),
+
+    /// ACL で拒否された書き込み（サーバーが文の変更を取り消す）
+    #[error("access denied: {0}")]
+    AccessDenied(String),
 }
 
 /// 実行結果の行
@@ -450,6 +454,8 @@ pub struct Executor<'a> {
     /// スキャン候補を範囲索引で絞るために使う。正当性は WHERE の retain が保証し、
     /// ここでは候補のスーパーセットを得るだけなので誤りは生じない。
     range_hints: Vec<(String, String, BinaryOp, PropertyValue)>,
+    /// ACL を適用するときのグラフのラッパー。`graph` はこれを指す（server/173）
+    acl: Option<Box<crate::acl::AclBackend<'a>>>,
 }
 
 // SAFETY: The raw `*mut Graph` pointer inside `Executor` is derived from a
@@ -472,6 +478,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -507,6 +514,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -533,6 +541,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Owned(PropertyIndex::new()),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -558,6 +567,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Owned(property_index),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -588,6 +598,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Shared(property_index),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -614,6 +625,7 @@ impl<'a> Executor<'a> {
             property_index: ManagerSlot::Exclusive(property_index),
             params: HashMap::new(),
             range_hints: Vec::new(),
+            acl: None,
         }
     }
 
@@ -630,6 +642,36 @@ impl<'a> Executor<'a> {
             self.fulltext.into_owned(),
             self.property_index.into_owned(),
         )
+    }
+
+    /// ACL を適用して実行する（`None` や空の規則なら何もしない）。
+    ///
+    /// 見えないノード・プロパティは無いものとして扱い、拒否された書き込みは
+    /// [`execute_with_params`](Self::execute_with_params) が
+    /// [`ExecuteError::AccessDenied`] を返す。書き込みを取り消すのは呼び出し側の役目。
+    pub fn with_access_policy(mut self, policy: Option<crate::acl::AccessPolicy>) -> Self {
+        if let Some(policy) = policy.filter(|p| !p.is_empty()) {
+            let mut wrapper = Box::new(crate::acl::AclBackend::new(self.graph, policy));
+            let g: &mut (dyn GraphBackend + 'a) = &mut *wrapper;
+            self.graph = g as *mut (dyn GraphBackend + 'a);
+            self.acl = Some(wrapper);
+        }
+        self
+    }
+
+    /// ACL を通さないグラフ。制約の検査と索引の維持に使う
+    /// （見えないノードを含めて一意性を守り、索引から値を落とさないため）。
+    fn raw_graph(&self) -> &dyn GraphBackend {
+        match &self.acl {
+            Some(acl) => acl.raw(),
+            None => self.graph_ref(),
+        }
+    }
+
+    /// 索引で候補を絞ってよいか。ACL 適用中は使わない
+    /// （読めないプロパティの値で一致してしまうため）。
+    fn index_lookup_allowed(&self) -> bool {
+        self.acl.is_none()
     }
 
     /// Return a shared reference to the graph backend.
@@ -679,7 +721,10 @@ impl<'a> Executor<'a> {
         self.params = params;
         let result = self.execute(stmt);
         self.params = HashMap::new();
-        result
+        match self.acl.as_ref().and_then(|acl| acl.take_violation()) {
+            Some(msg) if result.is_ok() => Err(ExecuteError::AccessDenied(msg)),
+            _ => result,
+        }
     }
 
     /// AstCache を利用してクエリ文字列をパース・キャッシュし、パラメータ付きで実行する。
@@ -767,7 +812,7 @@ impl<'a> Executor<'a> {
     /// ノードの全文検索インデックスを今のプロパティで作り直す。
     fn refresh_fulltext(&mut self, node_id: NodeId) {
         self.fulltext.remove_node(node_id);
-        if let Some(node) = self.graph_ref().get_node(node_id) {
+        if let Some(node) = self.raw_graph().get_node(node_id) {
             let label = node.primary_label().to_string();
             self.fulltext.index_node(node_id, &label, &node.properties);
         }
@@ -782,7 +827,7 @@ impl<'a> Executor<'a> {
     ) {
         self.refresh_fulltext(node_id);
         // 索引定義は (label, property) 単位。プライマリラベルで判定する。
-        let label = match self.graph_ref().get_node(node_id) {
+        let label = match self.raw_graph().get_node(node_id) {
             Some(n) => n.primary_label().to_string(),
             None => return,
         };
@@ -853,6 +898,9 @@ impl<'a> Executor<'a> {
                         "SHOW USERS requires server context".to_string(),
                     )],
                 }],
+            )),
+            Statement::Acl(_) | Statement::ShowAcl => Err(ExecuteError::TypeError(
+                "GRANT / DENY / REVOKE / SHOW ACL are only available on the server".to_string(),
             )),
             Statement::Explain(inner) => self.execute_explain(*inner),
             Statement::Profile(inner) => self.execute_profile(*inner),
@@ -954,7 +1002,7 @@ impl<'a> Executor<'a> {
 
         // Validate constraints before creating (using primary label)
         self.constraints
-            .validate_node_create(self.graph_ref(), &primary_label, &props, None)?;
+            .validate_node_create(self.raw_graph(), &primary_label, &props, None)?;
 
         let node_id = self.graph_mut().create_node_with_labels(labels.clone());
 
@@ -1198,7 +1246,7 @@ impl<'a> Executor<'a> {
 
                         // Validate endpoint label constraints before creating edge
                         self.constraints.validate_edge_create(
-                            self.graph_ref(),
+                            self.raw_graph(),
                             &edge_label,
                             from,
                             to,
@@ -1348,7 +1396,7 @@ impl<'a> Executor<'a> {
                 for (key, prop_val) in &evaluated {
                     if let Some(node) = self.graph_ref().get_node(node_id) {
                         self.constraints.validate_property_set(
-                            self.graph_ref(),
+                            self.raw_graph(),
                             &node,
                             key,
                             prop_val,
@@ -1421,7 +1469,7 @@ impl<'a> Executor<'a> {
                                 // Validate constraint before setting
                                 if let Some(node) = self.graph_ref().get_node(*node_id) {
                                     self.constraints.validate_property_set(
-                                        self.graph_ref(),
+                                        self.raw_graph(),
                                         &node,
                                         property,
                                         &prop_value,
@@ -1710,7 +1758,7 @@ impl<'a> Executor<'a> {
 
                     // Validate endpoint label constraints before creating edge
                     self.constraints.validate_edge_create(
-                        self.graph_ref(),
+                        self.raw_graph(),
                         &edge_label,
                         from,
                         to,
@@ -2445,10 +2493,28 @@ impl<'a> Executor<'a> {
             }
         };
 
+        // ACL: 見えないノードと、索引の対象に読めないプロパティを含むノードは返さない
+        // （スコアから読めない値が推測できてしまうため）
+        let indexed: Vec<String> = self
+            .fulltext
+            .get_index(&index_name)
+            .map(|idx| idx.properties().to_vec())
+            .unwrap_or_default();
         let rows = self
             .fulltext
             .search(&index_name, &query)?
             .iter()
+            .filter(|result| match &self.acl {
+                None => true,
+                Some(acl) => match acl.raw().get_node(result.node_id) {
+                    Some(n) => {
+                        let read = &acl.policy().read;
+                        !read.node_denied(&n.labels)
+                            && !indexed.iter().any(|p| read.property_denied(&n.labels, p))
+                    }
+                    None => false,
+                },
+            })
             .map(|result| {
                 let mut bindings = Bindings::new();
                 bindings.insert(Arc::from("node"), BindingValue::Node(result.node_id));
@@ -2877,7 +2943,7 @@ impl<'a> Executor<'a> {
         // an index to fire, so without one this collection is pure overhead on
         // every WHERE query.
         self.range_hints = match &segment.where_clause {
-            Some(w) if self.property_index.has_any_index() => {
+            Some(w) if self.property_index.has_any_index() && self.index_lookup_allowed() => {
                 let mut v = Vec::new();
                 Self::collect_range_predicates(w, &mut v);
                 v
@@ -3549,7 +3615,11 @@ impl<'a> Executor<'a> {
             // property that is indexed and has a literal value, use the index to avoid
             // a full scan.
             let mut used_index = false;
-            if let Some(label) = pattern.labels.first() {
+            if let Some(label) = pattern
+                .labels
+                .first()
+                .filter(|_| self.index_lookup_allowed())
+            {
                 'index_loop: for (prop_key, prop_expr) in &pattern.properties {
                     if self.property_index.has_index(label, prop_key)
                         && let Expression::Literal(lit) = prop_expr

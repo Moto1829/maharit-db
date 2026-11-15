@@ -351,6 +351,11 @@ impl Parser {
             }
             Some(TokenKind::Alter) => return self.parse_alter_user(),
             Some(TokenKind::Show) => return self.parse_show(),
+            Some(TokenKind::Ident(word))
+                if ["GRANT", "DENY", "REVOKE"].contains(&word.to_uppercase().as_str()) =>
+            {
+                return self.parse_acl();
+            }
             Some(TokenKind::Call) => {
                 // If followed by identifier (not '{'), it's a top-level procedure call
                 let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
@@ -2236,6 +2241,9 @@ impl Parser {
 
         // Expect CONSTRAINTS or USERS (as identifiers since they're not keywords)
         let ident = self.expect_ident()?;
+        if ident.to_uppercase() == "ACL" {
+            return Ok(Statement::ShowAcl);
+        }
         if ident.to_uppercase() == "CONSTRAINTS" {
             Ok(Statement::ShowConstraints)
         } else if ident.to_uppercase() == "USERS" {
@@ -2462,6 +2470,76 @@ impl Parser {
             username,
             password,
             role,
+        }))
+    }
+
+    // ========== ACL ==========
+
+    /// 次のトークンが（大文字小文字を問わず）識別子 `word` なら読み進める。
+    fn expect_word(&mut self, word: &str) -> Result<(), ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::Ident(w)) if w.eq_ignore_ascii_case(word) => {
+                self.advance();
+                Ok(())
+            }
+            _ => Err(self.unexpected_token(word)),
+        }
+    }
+
+    /// `GRANT|DENY READ|WRITE ON :Label[(prop)] TO USER name | ROLE role`
+    /// `REVOKE READ|WRITE ON :Label[(prop)] FROM USER name | ROLE role`
+    /// （`:*` は全ラベル）
+    fn parse_acl(&mut self) -> Result<Statement, ParseError> {
+        let command = match self.peek_kind() {
+            Some(TokenKind::Ident(w)) => match w.to_uppercase().as_str() {
+                "GRANT" => AclCommand::Grant,
+                "DENY" => AclCommand::Deny,
+                _ => AclCommand::Revoke,
+            },
+            _ => return Err(self.unexpected_token("GRANT, DENY, or REVOKE")),
+        };
+        self.advance();
+        let action = match self.peek_kind() {
+            Some(TokenKind::Ident(w)) if w.eq_ignore_ascii_case("READ") => AclAction::Read,
+            Some(TokenKind::Ident(w)) if w.eq_ignore_ascii_case("WRITE") => AclAction::Write,
+            _ => return Err(self.unexpected_token("READ or WRITE")),
+        };
+        self.advance();
+        self.expect(TokenKind::On)?;
+        self.expect(TokenKind::Colon)?;
+        let target = if self.check(TokenKind::Star) {
+            self.advance();
+            AclTarget::AllLabels
+        } else {
+            let label = self.expect_ident_or_keyword()?;
+            if self.check(TokenKind::LParen) {
+                self.advance();
+                let property = self.expect_ident_or_keyword()?;
+                self.expect(TokenKind::RParen)?;
+                AclTarget::Property(label, property)
+            } else {
+                AclTarget::Label(label)
+            }
+        };
+        if command == AclCommand::Revoke {
+            self.expect_word("FROM")?;
+        } else {
+            self.expect_word("TO")?;
+        }
+        let grantee = if self.check(TokenKind::User) {
+            self.advance();
+            AclGrantee::User(self.expect_ident()?)
+        } else if self.check(TokenKind::Role) {
+            self.advance();
+            AclGrantee::Role(self.parse_role_value()?)
+        } else {
+            return Err(self.unexpected_token("USER or ROLE"));
+        };
+        Ok(Statement::Acl(AclStatement {
+            command,
+            action,
+            target,
+            grantee,
         }))
     }
 

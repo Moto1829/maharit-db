@@ -24,6 +24,7 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         Statement::Union(u) => u.queries.iter().all(|_| true), // all MATCH queries
         Statement::ShowConstraints => true,
         Statement::ShowUsers => true,
+        Statement::ShowAcl => true,
         // Procedures are read-only; a trailing FOREACH may write.
         Statement::ProcedureCall(pc) => pc.foreach_clause.is_none() && pc.updates.is_empty(),
 
@@ -52,6 +53,7 @@ pub fn is_read_only(stmt: &Statement) -> bool {
         Statement::CreateUser(_) => false,
         Statement::DropUser(_) => false,
         Statement::AlterUser(_) => false,
+        Statement::Acl(_) => false,
     }
 }
 
@@ -102,6 +104,10 @@ pub enum Statement {
     AlterUser(AlterUserStatement),
     /// SHOW USERS
     ShowUsers,
+    /// GRANT / DENY / REVOKE（ACL。サーバーで処理する）
+    Acl(AclStatement),
+    /// SHOW ACL
+    ShowAcl,
     /// EXPLAIN文（実行計画の表示）
     Explain(Box<Statement>),
     /// PROFILE文（実行統計付き実行）
@@ -1096,6 +1102,46 @@ pub struct AlterUserStatement {
     pub password: Option<String>,
     /// 新しいロール（省略可）
     pub role: Option<String>,
+}
+
+/// ACL 文の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclCommand {
+    Grant,
+    Deny,
+    Revoke,
+}
+
+/// ACL の対象となる操作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclAction {
+    Read,
+    Write,
+}
+
+/// ACL の対象（`:*` / `:Label` / `:Label(prop)`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AclTarget {
+    AllLabels,
+    Label(String),
+    Property(String, String),
+}
+
+/// ACL の主体（`USER name` / `ROLE role`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AclGrantee {
+    User(String),
+    Role(String),
+}
+
+/// `GRANT|DENY READ|WRITE ON :Label[(prop)] TO USER|ROLE x` /
+/// `REVOKE READ|WRITE ON … FROM USER|ROLE x`
+#[derive(Debug, Clone, PartialEq)]
+pub struct AclStatement {
+    pub command: AclCommand,
+    pub action: AclAction,
+    pub target: AclTarget,
+    pub grantee: AclGrantee,
 }
 
 /// プロシージャコール文:

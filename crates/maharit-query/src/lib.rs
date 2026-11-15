@@ -1,3 +1,4 @@
+pub mod acl;
 pub mod ast;
 pub mod cache;
 #[cfg(test)]
@@ -7,6 +8,7 @@ pub mod lexer;
 pub mod parser;
 pub mod planner;
 
+pub use acl::{AccessPolicy, LabelRules};
 pub use ast::is_read_only;
 pub use cache::{AstCache, CacheStats, PlanCache, QueryCache};
 pub use executor::{ExecuteError, Executor, ResultSet, Row, Value};

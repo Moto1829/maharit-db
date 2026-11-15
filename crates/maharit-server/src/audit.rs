@@ -38,6 +38,8 @@ pub enum AuthEvent {
     /// An authenticated user was refused an operation by RBAC
     /// (`action` is e.g. `"write"`, `"manage_users"`, `"promote"`).
     PermissionDenied { username: String, action: String },
+    /// An ACL rule was added or removed (`rule` is e.g. `"DENY READ ON :Secret TO ROLE read_only"`).
+    AclChanged { rule: String, by: String },
 }
 
 impl AuthEvent {
@@ -52,6 +54,7 @@ impl AuthEvent {
             AuthEvent::UserDeleted { .. } => "user_deleted",
             AuthEvent::UserModified { .. } => "user_modified",
             AuthEvent::PermissionDenied { .. } => "permission_denied",
+            AuthEvent::AclChanged { .. } => "acl_changed",
         }
     }
 
@@ -78,6 +81,11 @@ impl AuthEvent {
                 ",\"username\":\"{}\",\"action\":\"{}\"",
                 escape_json(username),
                 escape_json(action)
+            ),
+            AuthEvent::AclChanged { rule, by } => format!(
+                ",\"rule\":\"{}\",\"by\":\"{}\"",
+                escape_json(rule),
+                escape_json(by)
             ),
         }
     }

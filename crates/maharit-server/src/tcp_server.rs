@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use maharit_core::{ConcurrentGraph, ConstraintManager, FulltextManager, PropertyIndex};
-use maharit_query::{AstCache, Executor, Parser, Value, is_read_only};
+use maharit_query::{AccessPolicy, AstCache, Executor, Parser, Value, is_read_only};
 use maharit_storage::TransactionManager;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -184,6 +184,86 @@ fn audit_denied(audit: Option<&crate::audit::AuditLogger>, username: &str, actio
     );
 }
 
+/// セッションに適用する ACL（認証が無効なとき、admin、規則が無いときは `None`）。
+fn session_policy(
+    auth: &Arc<Mutex<crate::auth::AuthManager>>,
+    require_auth: bool,
+    role: crate::auth::Role,
+    user: &str,
+) -> Option<AccessPolicy> {
+    if !require_auth {
+        return None;
+    }
+    auth.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .acl()
+        .policy_for(user, role)
+}
+
+/// ACL で書き込みを拒否したエラーか。
+fn is_access_denied(resp: &Response) -> bool {
+    matches!(resp, Response::Error { message } if message.contains("access denied:"))
+}
+
+/// ACL 文の主体・対象・操作をサーバーの型に変換する。
+fn acl_parts(
+    st: &maharit_query::ast::AclStatement,
+) -> Result<
+    (
+        crate::auth::AclSubject,
+        crate::auth::AclResource,
+        crate::auth::AclAction,
+    ),
+    Response,
+> {
+    use crate::auth::{AclAction, AclResource, AclSubject};
+    use maharit_query::ast::{AclAction as A, AclGrantee, AclTarget};
+    let subject = match &st.grantee {
+        AclGrantee::User(u) => AclSubject::User(u.clone()),
+        AclGrantee::Role(r) => match parse_role_str(r) {
+            Some(role) => AclSubject::Role(role),
+            None => {
+                return Err(Response::Error {
+                    message: format!("unknown role: '{}'", r),
+                });
+            }
+        },
+    };
+    let resource = match &st.target {
+        AclTarget::AllLabels => AclResource::AllLabels,
+        AclTarget::Label(l) => AclResource::Label(l.clone()),
+        AclTarget::Property(l, p) => AclResource::Property(l.clone(), p.clone()),
+    };
+    let action = match st.action {
+        A::Read => AclAction::Read,
+        A::Write => AclAction::Write,
+    };
+    Ok((subject, resource, action))
+}
+
+/// 規則を `GRANT READ ON :Label(prop) TO USER alice` の形で表す（監査ログと SHOW ACL 用）。
+fn describe_acl(
+    subject: &crate::auth::AclSubject,
+    resource: &crate::auth::AclResource,
+    action: crate::auth::AclAction,
+) -> (String, String, String) {
+    use crate::auth::{AclAction, AclResource, AclSubject};
+    let subject = match subject {
+        AclSubject::User(u) => format!("USER {}", u),
+        AclSubject::Role(r) => format!("ROLE {}", role_label(r)),
+    };
+    let resource = match resource {
+        AclResource::AllLabels => ":*".to_string(),
+        AclResource::Label(l) => format!(":{}", l),
+        AclResource::Property(l, p) => format!(":{}({})", l, p),
+    };
+    let action = match action {
+        AclAction::Read => "READ",
+        AclAction::Write => "WRITE",
+    };
+    (subject, resource, action.to_string())
+}
+
 /// 単一メッセージの `result` レスポンスを作る。
 fn result_message(msg: String) -> Response {
     let mut row = HashMap::new();
@@ -217,6 +297,8 @@ fn try_handle_user_management(
             | Statement::DropUser(_)
             | Statement::AlterUser(_)
             | Statement::ShowUsers
+            | Statement::Acl(_)
+            | Statement::ShowAcl
     );
     if !is_user_mgmt {
         return None;
@@ -308,6 +390,78 @@ fn try_handle_user_management(
                     message: e.to_string(),
                 },
             }
+        }
+        Statement::Acl(st) => {
+            use maharit_query::ast::AclCommand;
+            let (subject, resource, action) = match acl_parts(&st) {
+                Ok(parts) => parts,
+                Err(resp) => return Some(resp),
+            };
+            let (who, what, act) = describe_acl(&subject, &resource, action);
+            let result = match st.command {
+                AclCommand::Grant | AclCommand::Deny => {
+                    let deny = st.command == AclCommand::Deny;
+                    let rule = crate::auth::AclRule {
+                        subject,
+                        resource,
+                        action,
+                        permission: if deny {
+                            crate::auth::AclPermission::Deny
+                        } else {
+                            crate::auth::AclPermission::Allow
+                        },
+                    };
+                    let verb = if deny { "DENY" } else { "GRANT" };
+                    mgr.add_acl_rule(rule)
+                        .map(|()| format!("{} {} ON {} TO {}", verb, act, what, who))
+                }
+                AclCommand::Revoke => {
+                    let n = mgr.revoke_acl(&subject, &resource, action);
+                    Ok(format!(
+                        "REVOKE {} ON {} FROM {}: {} rule(s) removed",
+                        act, what, who, n
+                    ))
+                }
+            };
+            match result {
+                Ok(msg) => {
+                    audit_log(
+                        audit,
+                        AuthEvent::AclChanged {
+                            rule: msg.clone(),
+                            by: actor.to_string(),
+                        },
+                    );
+                    result_message(msg)
+                }
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Statement::ShowAcl => {
+            let rows = mgr
+                .acl()
+                .rules()
+                .iter()
+                .map(|r| {
+                    let (who, what, act) = describe_acl(&r.subject, &r.resource, r.action);
+                    let permission = match r.permission {
+                        crate::auth::AclPermission::Allow => "GRANT",
+                        crate::auth::AclPermission::Deny => "DENY",
+                    };
+                    HashMap::from([
+                        ("subject".to_string(), serde_json::Value::String(who)),
+                        ("resource".to_string(), serde_json::Value::String(what)),
+                        ("action".to_string(), serde_json::Value::String(act)),
+                        (
+                            "permission".to_string(),
+                            serde_json::Value::String(permission.to_string()),
+                        ),
+                    ])
+                })
+                .collect();
+            Response::Result { rows }
         }
         Statement::ShowUsers => {
             let rows: Vec<HashMap<String, serde_json::Value>> = mgr
@@ -821,7 +975,7 @@ impl SharedManagers {
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
-        self.execute_with_params(graph, stmt, HashMap::new(), is_write, record_wal)
+        self.execute_with_params(graph, stmt, HashMap::new(), is_write, record_wal, None)
     }
 
     /// [`execute`](Self::execute) with `$name` query parameters.
@@ -832,11 +986,12 @@ impl SharedManagers {
         params: HashMap<String, Value>,
         is_write: bool,
         record_wal: bool,
+        policy: Option<AccessPolicy>,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
-        let (result, wal, _) = self.run(graph, stmt, params, is_write, record_wal, false);
+        let (result, wal, _) = self.run(graph, stmt, params, is_write, record_wal, false, policy);
         (result, wal)
     }
 
@@ -850,14 +1005,16 @@ impl SharedManagers {
         stmt: maharit_query::ast::Statement,
         params: HashMap<String, Value>,
         record_wal: bool,
+        policy: Option<AccessPolicy>,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
         Vec<UndoRecord>,
     ) {
-        self.run(graph, stmt, params, true, record_wal, true)
+        self.run(graph, stmt, params, true, record_wal, true, policy)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         graph: &ConcurrentGraph,
@@ -866,6 +1023,7 @@ impl SharedManagers {
         is_write: bool,
         record_wal: bool,
         capture_undo: bool,
+        policy: Option<AccessPolicy>,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
@@ -895,8 +1053,11 @@ impl SharedManagers {
             // midway can be undone: a statement either applies completely or
             // not at all (bug/160).
             let mut recorder = RecordingGraph::new(graph, record_wal).with_undo();
+            // スキーマ変更（索引・制約）は ACL を通さずに全ノードを対象にする
+            let policy = if is_ddl { None } else { policy };
             let result =
                 Executor::new_with_backend_exclusive(&mut recorder, &mut cm, &mut fm, &mut pi)
+                    .with_access_policy(policy)
                     .execute_with_params(stmt, params);
             let (mut wal, mut undo) = recorder.into_parts();
             if result.is_err() {
@@ -929,7 +1090,8 @@ impl SharedManagers {
                 .unwrap_or_else(|e| e.into_inner());
             // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
             // executor uses the raw pointer only during this synchronous call.
-            let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) };
+            let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) }
+                .with_access_policy(policy);
             (
                 executor.execute_with_params(stmt, params),
                 Vec::new(),
@@ -1552,6 +1714,7 @@ where
                             // span can be closed on another worker thread.
                             let span = tracing::info_span!("query", query = %query);
                             let params = params_from_json(&params);
+                            let policy = session_policy(&auth, config.require_auth, role, &user);
                             async {
                                 let start = std::time::Instant::now();
                                 let resp = match tx_id {
@@ -1565,16 +1728,21 @@ where
                                             &managers,
                                             sinks,
                                             &ast_cache,
+                                            policy,
                                         )
                                         .await
                                     }
                                     None => {
                                         execute_query(
                                             &graph, &query, params, &managers, sinks, &ast_cache,
+                                            policy,
                                         )
                                         .await
                                     }
                                 };
+                                if is_access_denied(&resp) {
+                                    audit_denied(audit, &user, "acl_write");
+                                }
                                 tracing::info!(
                                     duration_us = start.elapsed().as_micros() as u64,
                                     "query completed"
@@ -1604,9 +1772,10 @@ where
                     {
                         reject_write_on_follower(follower.as_deref(), &ast_cache, &query).unwrap()
                     }
-                    Ok(_) => {
+                    Ok((role, user)) => {
                         stats.total_queries.fetch_add(1, Ordering::SeqCst);
                         tracing::info!(query = %query, "streaming query");
+                        let policy = session_policy(&auth, config.require_auth, role, &user);
                         // Execute streaming query
                         if let Err(e) = execute_streaming_query(
                             &mut socket,
@@ -1619,6 +1788,7 @@ where
                             &managers,
                             sinks,
                             &ast_cache,
+                            policy,
                         )
                         .await
                         {
@@ -1905,6 +2075,7 @@ async fn execute_streaming_query<S: AsyncWrite + Unpin>(
     managers: &SharedManagers,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    policy: Option<AccessPolicy>,
 ) -> std::io::Result<()> {
     // Parse the query (reusing a cached AST when available). Bind the result to
     // a local so the mutex guard is released before any `.await` below.
@@ -1929,7 +2100,7 @@ async fn execute_streaming_query<S: AsyncWrite + Unpin>(
     };
 
     let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, sinks.record());
+        managers.execute_with_params(graph, stmt, params, is_write, sinks.record(), policy);
     let ticket = sinks.publish(wal).await;
     drop(write_guard);
     let durable = match ticket {
@@ -2021,6 +2192,7 @@ async fn execute_query_with_tx(
     managers: &SharedManagers,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    policy: Option<AccessPolicy>,
 ) -> Response {
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
         Ok(s) => s,
@@ -2034,7 +2206,7 @@ async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, params, managers, sinks, ast_cache).await;
+        return execute_query(graph, query, params, managers, sinks, ast_cache, policy).await;
     }
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
@@ -2056,7 +2228,8 @@ async fn execute_query_with_tx(
         };
     }
 
-    let (exec_result, wal, undo) = managers.execute_in_tx(graph, stmt, params, sinks.record());
+    let (exec_result, wal, undo) =
+        managers.execute_in_tx(graph, stmt, params, sinks.record(), policy);
     // A failed statement has already been undone (no undo records left).
     if let Err(e) = tx_manager.record_undo(tx_id, undo) {
         tracing::error!(tx_id, error = %e, "failed to record undo log");
@@ -2104,6 +2277,7 @@ async fn execute_query(
     managers: &SharedManagers,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
+    policy: Option<AccessPolicy>,
 ) -> Response {
     // Reuse a previously parsed AST for identical query text.
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
@@ -2125,7 +2299,7 @@ async fn execute_query(
     };
 
     let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, sinks.record());
+        managers.execute_with_params(graph, stmt, params, is_write, sinks.record(), policy);
     let ticket = sinks.publish(wal).await;
     drop(write_guard);
     let durable = match ticket {
@@ -2838,6 +3012,117 @@ mod tests {
         } else {
             panic!("expected Result");
         }
+    }
+
+    /// ACL over TCP: hidden labels, write denial with rollback, admin bypass,
+    /// and GRANT / DENY / REVOKE / SHOW ACL restricted to admin (server/173).
+    #[tokio::test]
+    async fn integration_acl_over_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = TcpServer::new(ServerConfig {
+            bind_address: addr.to_string(),
+            require_auth: true,
+            ..Default::default()
+        })
+        .with_auth(crate::auth::AuthManager::with_admin_password("adminpw"));
+        tokio::spawn(async move {
+            server.start_with_listener(listener).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        async fn login(stream: &mut TcpStream, user: &str, pw: &str) -> String {
+            let req = Request::Login {
+                username: user.to_string(),
+                password: pw.to_string(),
+            };
+            match send_recv(stream, &req).await {
+                Response::LoggedIn { session_token, .. } => session_token,
+                other => panic!("login failed: {:?}", other),
+            }
+        }
+        async fn q(stream: &mut TcpStream, token: &str, query: &str) -> Response {
+            let req = Request::Query {
+                query: query.to_string(),
+                params: HashMap::new(),
+                tx_id: None,
+                session_token: Some(token.to_string()),
+            };
+            send_recv(stream, &req).await
+        }
+        async fn count(stream: &mut TcpStream, token: &str, query: &str) -> i64 {
+            match q(stream, token, query).await {
+                Response::Result { rows } => rows[0].values().next().unwrap().as_i64().unwrap(),
+                other => panic!("{query}: {:?}", other),
+            }
+        }
+
+        let admin = login(&mut stream, "admin", "adminpw").await;
+        for stmt in [
+            "CREATE (:Public {name: 'a'}), (:Secret {name: 's'}), (:Locked {name: 'l'})",
+            "CREATE USER w SET PASSWORD 'wpw' ROLE writer",
+            "DENY READ ON :Secret TO ROLE writer",
+            "DENY WRITE ON :Locked TO USER w",
+        ] {
+            let resp = q(&mut stream, &admin, stmt).await;
+            assert!(
+                matches!(resp, Response::Result { .. }),
+                "{stmt}: {:?}",
+                resp
+            );
+        }
+        // 存在しないユーザーへの規則はエラー
+        let resp = q(&mut stream, &admin, "DENY READ ON :X TO USER nobody").await;
+        assert!(matches!(resp, Response::Error { .. }), "{:?}", resp);
+
+        let w = login(&mut stream, "w", "wpw").await;
+        assert_eq!(
+            count(&mut stream, &w, "MATCH (n) RETURN count(*) AS c").await,
+            2
+        );
+        assert_eq!(
+            count(&mut stream, &admin, "MATCH (n) RETURN count(*) AS c").await,
+            3
+        );
+
+        // 書き込みの拒否は文全体を取り消す
+        let resp = q(
+            &mut stream,
+            &w,
+            "CREATE (:Public {name: 'b'}), (:Locked {name: 'm'})",
+        )
+        .await;
+        match &resp {
+            Response::Error { message } => assert!(message.contains("access denied"), "{message}"),
+            other => panic!("expected access denied, got {:?}", other),
+        }
+        assert_eq!(
+            count(&mut stream, &admin, "MATCH (n) RETURN count(*) AS c").await,
+            3
+        );
+        let resp = q(&mut stream, &w, "CREATE (:Public {name: 'b'})").await;
+        assert!(matches!(resp, Response::Result { .. }), "{:?}", resp);
+
+        // ACL 文は admin だけ
+        let resp = q(&mut stream, &w, "SHOW ACL").await;
+        assert!(matches!(resp, Response::AuthError { .. }), "{:?}", resp);
+        match q(&mut stream, &admin, "SHOW ACL").await {
+            Response::Result { rows } => assert_eq!(rows.len(), 2, "{:?}", rows),
+            other => panic!("{:?}", other),
+        }
+
+        let resp = q(
+            &mut stream,
+            &admin,
+            "REVOKE READ ON :Secret FROM ROLE writer",
+        )
+        .await;
+        assert!(matches!(resp, Response::Result { .. }), "{:?}", resp);
+        assert_eq!(
+            count(&mut stream, &w, "MATCH (n) RETURN count(*) AS c").await,
+            4
+        );
     }
 
     async fn query(stream: &mut TcpStream, q: &str) -> Response {
