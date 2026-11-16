@@ -495,6 +495,68 @@ mod tests {
         );
     }
 
+    /// プロパティ索引は読めないノード・値も持っているが、ACL のあるセッションで
+    /// 索引を使っても、読めないものには一致しない。
+    #[test]
+    fn index_lookups_respect_read_rules() {
+        let mut g = Graph::new();
+        let mut setup = Executor::new(&mut g);
+        for q in [
+            "CREATE INDEX FOR (n:Account) ON (n.name)",
+            "CREATE INDEX FOR (n:Account) ON (n.level)",
+            "CREATE INDEX FOR (n:Secret) ON (n.name)",
+            "CREATE (:Account {name: 'u', level: 5})",
+            "CREATE (:Account {name: 'v', level: 9})",
+            "CREATE (:Secret {name: 'u'})",
+            // 読めるラベルと読めないラベルの両方を持つノード
+            "CREATE (:Account:Secret {name: 'w', level: 7})",
+        ] {
+            setup.execute_with_params(parse(q), HashMap::new()).unwrap();
+        }
+        let mut policy = read_deny(&["Secret"]);
+        policy
+            .read
+            .properties
+            .entry("Account".to_string())
+            .or_default()
+            .insert("level".to_string());
+        let mut ex = setup.with_access_policy(Some(policy));
+        let mut names = |q: &str| {
+            let mut v: Vec<String> = ex
+                .execute_with_params(parse(q), HashMap::new())
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|r| format!("{:?}", r.columns[0]))
+                .collect();
+            v.sort();
+            v
+        };
+        let s = |v: &str| format!("{:?}", Value::String(v.into()));
+
+        // 読めるノードは索引で引ける
+        assert_eq!(
+            names("MATCH (n:Account {name: 'u'}) RETURN n.name"),
+            [s("u")]
+        );
+        assert_eq!(
+            names("MATCH (n:Account) WHERE n.name = 'v' RETURN n.name"),
+            [s("v")]
+        );
+        // 読めないラベルのノードは、索引に載っていても一致しない
+        assert!(names("MATCH (n:Secret {name: 'u'}) RETURN n.name").is_empty());
+        assert!(names("MATCH (n:Account {name: 'w'}) RETURN n.name").is_empty());
+        // 読めないプロパティは、等値でも範囲でも一致しない
+        assert!(names("MATCH (n:Account {level: 5}) RETURN n.name").is_empty());
+        assert!(names("MATCH (n:Account) WHERE n.level = 5 RETURN n.name").is_empty());
+        assert!(names("MATCH (n:Account) WHERE n.level > 0 RETURN n.name").is_empty());
+        // 読めるプロパティの範囲検索は、読めるノードだけを返す
+        assert_eq!(
+            names("MATCH (n:Account) WHERE n.name >= 'a' RETURN n.name"),
+            [s("u"), s("v")]
+        );
+    }
+
     #[test]
     fn deny_all_with_label_exception() {
         let mut g = sample();

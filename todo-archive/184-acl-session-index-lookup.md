@@ -17,3 +17,12 @@ ACL の規則が 1 つでもあるセッションは、プロパティ索引で�
 
 - `read_acl/filter/eq_indexed` が ACL なしと同じ桁になる
 - 変更の前後を `scripts/perf_check.py` で比べ、他の項目が遅くなっていないこと
+
+## 結果（2026-11-16）
+
+索引の結果は候補でしかなく、`node_matches_pattern` がラベルとプロパティの値を
+`graph_ref()`（ACL 適用中は ACL のラッパー）越しに確かめ直している。そのため、読めないプロパティの
+索引も含めて、ACL 適用中に索引を使っても結果は変わらない。`index_lookup_allowed` を削除した。
+
+- `read_acl/filter/eq_indexed`: 3.07 ms → 2.5 µs
+- テスト: `acl::tests::index_lookups_respect_read_rules`（読めないラベル・複数ラベル・読めないプロパティの等値と範囲）

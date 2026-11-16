@@ -114,7 +114,7 @@ A node with several labels is hidden if any one of its labels cannot be read.
 - Relationships to hidden nodes are hidden as well
 - Hidden nodes do not appear in `CALL db.labels()`, the algorithm procedures (`db.pageRank` and others) or full-text search (`db.index.fulltext.search`). Full-text search also leaves out nodes whose indexed properties include one the user cannot read
 - An unreadable property is `null` for `n.prop` and is left out of `keys(n)` / `properties(n)`. `WHERE n.prop = …` and `{prop: …}` do not match it either
-- Sessions with ACL rules do not narrow candidates with property indexes (an index would match on values the user cannot read). Results are the same, but queries can be slower
+- Property indexes are used in sessions with ACL rules as well. Nodes and property values the user cannot read never match, with or without an index
 
 ### Denied writes
 

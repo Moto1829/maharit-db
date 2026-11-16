@@ -668,12 +668,6 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// 索引で候補を絞ってよいか。ACL 適用中は使わない
-    /// （読めないプロパティの値で一致してしまうため）。
-    fn index_lookup_allowed(&self) -> bool {
-        self.acl.is_none()
-    }
-
     /// Return a shared reference to the graph backend.
     ///
     /// Safe to call in both writable and read-only mode.
@@ -2943,7 +2937,7 @@ impl<'a> Executor<'a> {
         // an index to fire, so without one this collection is pure overhead on
         // every WHERE query.
         self.range_hints = match &segment.where_clause {
-            Some(w) if self.property_index.has_any_index() && self.index_lookup_allowed() => {
+            Some(w) if self.property_index.has_any_index() => {
                 let mut v = Vec::new();
                 Self::collect_range_predicates(w, &mut v);
                 v
@@ -3621,12 +3615,13 @@ impl<'a> Executor<'a> {
             // Try index-based lookup first: if the pattern has a label and at least one
             // property that is indexed and has a literal value, use the index to avoid
             // a full scan.
+            //
+            // The index holds every node, including ones an ACL session cannot
+            // read. That is fine: index hits are only candidates, and
+            // `node_matches_pattern` re-checks labels and property values
+            // through `graph_ref()`, which is the ACL view when one is active.
             let mut used_index = false;
-            if let Some(label) = pattern
-                .labels
-                .first()
-                .filter(|_| self.index_lookup_allowed())
-            {
+            if let Some(label) = pattern.labels.first() {
                 'index_loop: for (prop_key, prop_expr) in &pattern.properties {
                     if self.property_index.has_index(label, prop_key)
                         && let Expression::Literal(lit) = prop_expr
