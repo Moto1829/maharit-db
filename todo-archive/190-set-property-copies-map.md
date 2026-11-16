@@ -16,3 +16,14 @@
 
 - `write/unwind_create_1000` と `write/set_indexed_property_all` が短くなる
 - 変更の前後を `scripts/perf_check.py` で比べ、他の項目が遅くなっていないこと
+
+## 結果（2026-11-16）
+
+`set_node_property` / `set_edge_property` を `Arc::make_mut` にした（削除はもとから `make_mut`）。
+ベンチのノードはプロパティが 2〜4 個なので、効果は 1 割前後だった。プロパティが多いノードほど効く。
+
+| 項目 | 前 | 後 |
+|---|---:|---:|
+| write/create_node | 2.66 µs | 2.28 µs |
+| write/unwind_create_1000 | 1.72 ms | 1.57 ms |
+| write/set_indexed_property_all | 28.6 ms | 25.9 ms |

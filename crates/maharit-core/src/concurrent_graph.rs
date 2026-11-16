@@ -399,18 +399,16 @@ impl ConcurrentGraph {
     /// Set a property on a node.
     pub fn set_node_property(&self, id: NodeId, key: &str, value: PropertyValue) {
         if let Some(mut node) = self.nodes.get_mut(&id) {
-            let mut props = (*node.properties).clone();
-            props.insert(key.to_string(), value);
-            node.properties = Arc::new(props);
+            // Copies the map only while a reader still holds the old one.
+            Arc::make_mut(&mut node.properties).insert(key.to_string(), value);
         }
     }
 
     /// Set a property on an edge.
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: PropertyValue) {
         if let Some(mut edge) = self.edges.get_mut(&id) {
-            let mut props = (*edge.properties).clone();
-            props.insert(key.to_string(), value);
-            edge.properties = Arc::new(props);
+            // Copies the map only while a reader still holds the old one.
+            Arc::make_mut(&mut edge.properties).insert(key.to_string(), value);
         }
     }
 
