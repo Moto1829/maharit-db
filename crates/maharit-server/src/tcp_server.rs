@@ -2072,7 +2072,7 @@ async fn execute_streaming_query<S: AsyncWrite + Unpin>(
     params: HashMap<String, Value>,
     chunk_size: usize,
     write_timeout: Duration,
-    managers: &SharedManagers,
+    managers: &Arc<SharedManagers>,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
     policy: Option<AccessPolicy>,
@@ -2099,8 +2099,11 @@ async fn execute_streaming_query<S: AsyncWrite + Unpin>(
         None
     };
 
-    let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, sinks.record(), policy);
+    let record = sinks.record();
+    let (exec_result, wal) = run_statement(graph, managers, move |graph, managers| {
+        managers.execute_with_params(graph, stmt, params, is_write, record, policy)
+    })
+    .await;
     let ticket = sinks.publish(wal).await;
     drop(write_guard);
     let durable = match ticket {
@@ -2179,6 +2182,33 @@ fn params_from_json(params: &HashMap<String, serde_json::Value>) -> HashMap<Stri
         .collect()
 }
 
+/// Run a statement on the blocking thread pool and wait for it.
+///
+/// Statements run synchronously and may take seconds. Running them on the async
+/// worker threads would stall every other connection (queries, pings, new
+/// connections, replication heartbeats) once as many heavy statements as there
+/// are workers are in flight, so they get their own threads instead.
+///
+/// A writer keeps holding `write_gate` while it waits here, so writes are still
+/// applied one at a time and in the order their WAL entries are published.
+async fn run_statement<R, F>(
+    graph: &Arc<ConcurrentGraph>,
+    managers: &Arc<SharedManagers>,
+    f: F,
+) -> R
+where
+    R: Send + 'static,
+    F: FnOnce(&ConcurrentGraph, &SharedManagers) -> R + Send + 'static,
+{
+    let graph = Arc::clone(graph);
+    let managers = Arc::clone(managers);
+    match tokio::task::spawn_blocking(move || f(&graph, &managers)).await {
+        Ok(result) => result,
+        // The statement panicked: keep the panic instead of inventing a result.
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
+}
+
 // ── Transaction-aware query execution ────────────────────────────────────────
 
 /// Execute a write query within a transaction: execute → record undo log → replicate.
@@ -2189,7 +2219,7 @@ async fn execute_query_with_tx(
     params: HashMap<String, Value>,
     tx_id: u64,
     tx_manager: &TransactionManager,
-    managers: &SharedManagers,
+    managers: &Arc<SharedManagers>,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
     policy: Option<AccessPolicy>,
@@ -2228,8 +2258,11 @@ async fn execute_query_with_tx(
         };
     }
 
-    let (exec_result, wal, undo) =
-        managers.execute_in_tx(graph, stmt, params, sinks.record(), policy);
+    let record = sinks.record();
+    let (exec_result, wal, undo) = run_statement(graph, managers, move |graph, managers| {
+        managers.execute_in_tx(graph, stmt, params, record, policy)
+    })
+    .await;
     // A failed statement has already been undone (no undo records left).
     if let Err(e) = tx_manager.record_undo(tx_id, undo) {
         tracing::error!(tx_id, error = %e, "failed to record undo log");
@@ -2274,7 +2307,7 @@ async fn execute_query(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
     params: HashMap<String, Value>,
-    managers: &SharedManagers,
+    managers: &Arc<SharedManagers>,
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
     policy: Option<AccessPolicy>,
@@ -2298,8 +2331,11 @@ async fn execute_query(
         None
     };
 
-    let (exec_result, wal) =
-        managers.execute_with_params(graph, stmt, params, is_write, sinks.record(), policy);
+    let record = sinks.record();
+    let (exec_result, wal) = run_statement(graph, managers, move |graph, managers| {
+        managers.execute_with_params(graph, stmt, params, is_write, record, policy)
+    })
+    .await;
     let ticket = sinks.publish(wal).await;
     drop(write_guard);
     let durable = match ticket {
