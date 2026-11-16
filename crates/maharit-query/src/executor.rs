@@ -3226,6 +3226,7 @@ impl<'a> Executor<'a> {
         // No aggregation: project bindings row-by-row
         let mut result: Vec<Bindings> = Vec::new();
         let mut keys: Vec<Vec<Value>> = Vec::new();
+        let mut order_slots: Option<Vec<Option<usize>>> = None;
 
         for binding in &bindings {
             let mut new_binding = Bindings::new();
@@ -3270,7 +3271,9 @@ impl<'a> Executor<'a> {
                 // aliases (e.g. `WITH r AS rel ORDER BY rel.since`).
                 let mut scope = binding.clone();
                 scope.extend(new_binding.iter().map(|(k, v)| (k.clone(), v.clone())));
-                keys.push(self.order_keys(order_by, &col_names, &row, Some(&scope))?);
+                let slots =
+                    order_slots.get_or_insert_with(|| self.order_key_slots(order_by, &col_names));
+                keys.push(self.order_keys(order_by, slots, &row, Some(&scope))?);
             }
             result.push(new_binding);
         }
@@ -4310,6 +4313,44 @@ impl<'a> Executor<'a> {
             .map(|item| self.return_item_to_column_name(item))
             .collect();
 
+        // Resolve SKIP and LIMIT expressions (integer literal or $parameter)
+        let resolved_skip = return_clause
+            .skip
+            .as_ref()
+            .map(|e| self.resolve_skip_limit(e))
+            .transpose()?;
+        let resolved_limit = return_clause
+            .limit
+            .as_ref()
+            .map(|e| self.resolve_skip_limit(e))
+            .transpose()?;
+        // With ORDER BY and LIMIT, only the first `needed` rows are kept.
+        let needed = match (resolved_skip, resolved_limit) {
+            (Some(skip), Some(limit)) => Some(skip.saturating_add(limit) as usize),
+            (None, Some(limit)) => Some(limit as usize),
+            _ => None,
+        };
+        let order_slots = return_clause
+            .order_by
+            .as_ref()
+            .map(|order_by| self.order_key_slots(order_by, &columns));
+
+        // ORDER BY ... LIMIT without DISTINCT: sort on the keys alone and
+        // evaluate the RETURN items only for the rows that remain. (DISTINCT
+        // needs every row's values before it can drop duplicates.)
+        if let (Some(order_by), Some(slots), Some(needed)) =
+            (&return_clause.order_by, &order_slots, needed)
+            && !return_clause.distinct
+            && needed < bindings_list.len()
+        {
+            let mut rows =
+                self.build_top_rows(return_clause, order_by, slots, bindings_list, needed)?;
+            if let Some(skip) = resolved_skip {
+                rows.drain(..(skip as usize).min(rows.len()));
+            }
+            return Ok(ResultSet::new(columns, rows));
+        }
+
         // Build rows (and ORDER BY keys, which may refer to values that are
         // not returned, e.g. `RETURN n.name ORDER BY n.age`).
         let mut rows = Vec::new();
@@ -4325,8 +4366,8 @@ impl<'a> Executor<'a> {
             let row = Row {
                 columns: row_values,
             };
-            if let Some(ref order_by) = return_clause.order_by {
-                keys.push(self.order_keys(order_by, &columns, &row, Some(bindings))?);
+            if let (Some(order_by), Some(slots)) = (&return_clause.order_by, &order_slots) {
+                keys.push(self.order_keys(order_by, slots, &row, Some(bindings))?);
             }
             rows.push(row);
         }
@@ -4349,26 +4390,8 @@ impl<'a> Executor<'a> {
             keys = kept_keys;
         }
 
-        // Resolve SKIP and LIMIT expressions (integer literal or $parameter)
-        let resolved_skip = return_clause
-            .skip
-            .as_ref()
-            .map(|e| self.resolve_skip_limit(e))
-            .transpose()?;
-        let resolved_limit = return_clause
-            .limit
-            .as_ref()
-            .map(|e| self.resolve_skip_limit(e))
-            .transpose()?;
-
         // Apply ORDER BY with optional LIMIT optimization
         if let Some(ref order_by) = return_clause.order_by {
-            // Calculate how many rows we actually need
-            let needed = match (resolved_skip, resolved_limit) {
-                (Some(skip), Some(limit)) => Some((skip + limit) as usize),
-                (None, Some(limit)) => Some(limit as usize),
-                _ => None,
-            };
             rows = self.sort_rows_by_keys(rows, keys, order_by, needed);
         }
 
@@ -4404,27 +4427,93 @@ impl<'a> Executor<'a> {
     /// バインディング `source` から評価する（`RETURN n.name ORDER BY n.age`）。
     /// `source` が無い（集計後）場合に返却列でないキーはエラーにする。以前は
     /// 列が見つからないキーを黙って無視し、並べ替えずに結果を返していた。
+    ///
+    /// `slots` は [`order_key_slots`](Self::order_key_slots) の結果（行ごとに
+    /// 列名を作って探さないよう、呼び出し側が 1 回だけ求める）。
     fn order_keys(
         &self,
         order_by: &OrderByClause,
-        columns: &[String],
+        slots: &[Option<usize>],
         row: &Row,
         source: Option<&Bindings>,
     ) -> Result<Vec<Value>, ExecuteError> {
         order_by
             .items
             .iter()
-            .map(|item| {
-                let name = self.return_item_to_column_name(&item.expression);
-                if let Some(idx) = columns.iter().position(|c| *c == name) {
-                    return Ok(row.columns[idx].clone());
+            .zip(slots)
+            .map(|(item, slot)| {
+                if let Some(idx) = slot {
+                    return Ok(row.columns[*idx].clone());
                 }
                 match source {
                     Some(bindings) => self.evaluate_return_item(&item.expression, bindings),
                     None => Err(ExecuteError::TypeError(format!(
-                        "ORDER BY {name}: with aggregation, ORDER BY can only refer to returned columns (add it to RETURN or use an alias)"
+                        "ORDER BY {}: with aggregation, ORDER BY can only refer to returned columns (add it to RETURN or use an alias)",
+                        self.return_item_to_column_name(&item.expression)
                     ))),
                 }
+            })
+            .collect()
+    }
+
+    /// ORDER BY の各キーが返却列のどれに当たるか（当たらなければ `None`）。
+    fn order_key_slots(&self, order_by: &OrderByClause, columns: &[String]) -> Vec<Option<usize>> {
+        order_by
+            .items
+            .iter()
+            .map(|item| {
+                let name = self.return_item_to_column_name(&item.expression);
+                columns.iter().position(|c| *c == name)
+            })
+            .collect()
+    }
+
+    /// `ORDER BY … LIMIT` で残る行だけを組み立てる。
+    ///
+    /// 全行について並べ替えキーだけを求め、上位 `needed` 件を選んでから、その行の
+    /// RETURN の式を評価する。残らない行の RETURN の式は評価しない。
+    fn build_top_rows(
+        &self,
+        return_clause: &ReturnClause,
+        order_by: &OrderByClause,
+        slots: &[Option<usize>],
+        bindings_list: &[Bindings],
+        needed: usize,
+    ) -> Result<Vec<Row>, ExecuteError> {
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let mut keyed: Vec<(Vec<Value>, usize)> = Vec::with_capacity(bindings_list.len());
+        for (i, bindings) in bindings_list.iter().enumerate() {
+            let key = order_by
+                .items
+                .iter()
+                .zip(slots)
+                .map(|(item, slot)| match slot {
+                    Some(idx) => self.evaluate_return_item(&return_clause.items[*idx], bindings),
+                    None => self.evaluate_return_item(&item.expression, bindings),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            keyed.push((key, i));
+        }
+        // 同じキーの行は入力の順に並べる（全件を安定ソートしたときと同じ結果にする）
+        let cmp = |a: &(Vec<Value>, usize), b: &(Vec<Value>, usize)| {
+            self.compare_keys(&a.0, &b.0, order_by).then(a.1.cmp(&b.1))
+        };
+        if needed < keyed.len() {
+            keyed.select_nth_unstable_by(needed, cmp);
+            keyed.truncate(needed);
+        }
+        keyed.sort_unstable_by(cmp);
+        keyed
+            .into_iter()
+            .map(|(_, i)| {
+                let columns = return_clause
+                    .items
+                    .iter()
+                    .map(|item| self.evaluate_return_item(item, &bindings_list[i]))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Row { columns })
             })
             .collect()
     }
@@ -5989,9 +6078,10 @@ impl<'a> Executor<'a> {
 
             // After grouping there is no single source row per result row,
             // so keys must refer to returned columns.
+            let slots = self.order_key_slots(order_by, &columns);
             let keys = rows
                 .iter()
-                .map(|row| self.order_keys(order_by, &columns, row, None))
+                .map(|row| self.order_keys(order_by, &slots, row, None))
                 .collect::<Result<Vec<_>, _>>()?;
             rows = self.sort_rows_by_keys(rows, keys, order_by, needed);
 
@@ -8404,6 +8494,44 @@ mod tests {
         assert_eq!(result.rows[0].columns[1], Value::Int(100)); // age 100
         assert_eq!(result.rows[1].columns[1], Value::Int(90)); // age 90
         assert_eq!(result.rows[2].columns[1], Value::Int(80)); // age 80
+    }
+
+    /// `ORDER BY … LIMIT` は残る行だけを組み立てる。全件を並べてから切った結果と
+    /// 同じになること（同じキーの行の順序、SKIP、別名や返さない値での並べ替えを含む）。
+    #[test]
+    fn test_topn_matches_full_sort() {
+        let mut graph = Graph::new();
+        execute(
+            &mut graph,
+            "UNWIND range(1, 40) AS i CREATE (:T {id: i, grp: i % 4, name: 'n' + toString(i % 7)})",
+        )
+        .unwrap();
+        let rows = |graph: &mut Graph, q: &str| -> Vec<String> {
+            execute(graph, q)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|r| format!("{:?}", r.columns))
+                .collect()
+        };
+        for (ret, order) in [
+            ("n.id", "n.grp"),
+            ("n.id", "n.grp DESC, n.name"),
+            ("n.id AS id, n.grp AS g", "g DESC"),
+            ("n.name, n.id", "n.name DESC"),
+            ("n.id + 1 AS next", "n.grp, next DESC"),
+        ] {
+            let base = format!("MATCH (n:T) RETURN {ret} ORDER BY {order}");
+            let all = rows(&mut graph, &base);
+            assert_eq!(all.len(), 40);
+            for (skip, limit) in [(0, 1), (0, 5), (3, 5), (38, 5), (50, 5), (0, 0), (0, 39)] {
+                let got = rows(&mut graph, &format!("{base} SKIP {skip} LIMIT {limit}"));
+                let want: Vec<String> = all.iter().skip(skip).take(limit).cloned().collect();
+                assert_eq!(got, want, "{base} SKIP {skip} LIMIT {limit}");
+            }
+            let got = rows(&mut graph, &format!("{base} LIMIT 7"));
+            assert_eq!(got, all[..7], "{base} LIMIT 7");
+        }
     }
 
     #[test]
