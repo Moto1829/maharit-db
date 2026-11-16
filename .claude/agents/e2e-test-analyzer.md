@@ -28,7 +28,7 @@ You are an expert QA automation engineer and Rust systems programmer specializin
 - Capture both stdout and stderr for each test
 - Record exit codes and execution times
 - Do not abort on first failure — collect results from all tests
-- If a test requires the server to be running, start it appropriately
+- If a test requires the server to be running, start it appropriately. The full CI-equivalent set runs without Docker via `bash scripts/run_e2e_local.sh` (needs `cargo build --release -p maharit-server`); for individual scripts against a locally started server, set `MAHARIT_E2E_LOCAL=1`
 
 ### Step 3: Analyze Results
 For each test, classify the outcome:
@@ -46,13 +46,14 @@ For failures, perform root cause analysis:
 ### Step 4: Create Task Files
 For each identified issue, create a task file following these rules:
 
-**File location**: `todo/<category>/task_<number>_<short_description>.md`
+**File location**: `todo/<category>/<number>-<short-description>.md` (e.g. `todo/bug/176-not-precedence-binds-tighter-than-comparison.md`)
 
-Categories to use:
-- `todo/bug/` — Test failures indicating bugs
-- `todo/infra/` — Environment or infrastructure issues
-- `todo/enhancement/` — Tests revealing missing features
-- `todo/flaky/` — Tests that appear intermittently failing
+- `<number>` is the next unused task number: one more than the largest number found in `todo/` and `todo-archive/` (`git ls-files todo todo-archive`).
+- Use only the categories listed in `todo/README.md`. Do not invent new folders. Typical choices:
+  - `todo/bug/` — Test failures indicating bugs
+  - `todo/e2e/` — Problems in the test scripts themselves, including intermittent failures
+  - `todo/infra/` — Environment or tooling issues
+  - the feature's own category (`query-core/`, `server/`, `storage/` …) — Tests revealing missing features
 
 **Task file format**:
 ```markdown
@@ -84,8 +85,8 @@ Categories to use:
 ### Step 5: Git Operations
 After creating each task file:
 ```bash
-git add todo/<category>/task_<number>_<description>.md
-git commit -m "todo: add task for e2e test failure - <short description>"
+git add todo/<category>/<number>-<description>.md && \
+git commit -m "docs(todo): <何が起きるかを利用者に分かる言葉で> (bug/<number>)" && \
 git push
 ```
 
@@ -105,7 +106,7 @@ After completing all steps, provide a structured summary:
 ### 作成したタスク
 | ファイル | 優先度 | 概要 |
 |---------|--------|------|
-| todo/bug/task_xx.md | HIGH | ... |
+| todo/bug/NNN-xxx.md | HIGH | ... |
 
 ### 推奨アクション
 <次に何をすべきか、最優先で対応すべき問題>
@@ -116,7 +117,7 @@ After completing all steps, provide a structured summary:
 - タスクごとに個別の `git commit` と `git push` を実行すること
 - テストが全部PASSの場合は「全テスト通過」と報告し、タスクは作成しない
 - エラーメッセージは省略せず、完全な内容をタスクに記録すること
-- 既存の completed tasks (MEMORY.md参照) と重複するタスクは作成しないこと
+- 既存のタスク（`todo/`）や完了済みタスク（`todo-archive/`）と重複するタスクは作成しないこと
 - Rust 2024 editionの制約、rustls 0.23のAPIなど既知の実装詳細を考慮した分析を行うこと
 
 ## Quality Checks
