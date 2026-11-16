@@ -85,7 +85,20 @@ python3 scripts/replication_test.py
 python3 scripts/failover_test.py
 ```
 
-ベンチ結果は `benchmark_reports/bench_<timestamp>.md` に保存される。`benchmark_reports/baseline.json` が基準値。ベンチ実行後は `analyze-benchmark` スキルでレポートを分析できる。
+### ベンチマーク
+
+```bash
+bash scripts/run_bench_local.sh --name before        # エンジン単体 + サーバー（Docker 不要、サーバーは自動で起動）
+bash scripts/run_bench_local.sh --engine-only        # エンジン単体だけ
+cargo bench -p maharit-query --bench engine -- read/hop   # 項目を名前で絞る
+python3 scripts/perf_check.py benchmark_reports/engine_before.json benchmark_reports/engine_after.json
+```
+
+- エンジン単体（`crates/maharit-query/benches/engine.rs`、criterion）: パーサーとエグゼキュータだけの時間。TCP・JSON・WAL を含まない。エグゼキュータの変更はまずこれで確かめる。
+- サーバー（`scripts/benchmark.py`）: TCP 経由の時間、複数接続でのスループット（`PARALLEL`）、重いクエリや書き込みが走っている間の軽いクエリの応答時間（`LAT`）。
+- 結果は `benchmark_reports/engine_<名前>.md|json` と `server_<名前>.md|json`（git 管理外）。変更の前後で `--name` を変えて取り、`perf_check.py` で比べる。
+
+`benchmark.py` を単体で実行した結果は `benchmark_reports/bench_<timestamp>.md` に保存される。`benchmark_reports/baseline.json` が基準値。ベンチ実行後は `analyze-benchmark` スキルでレポートを分析できる。
 
 ## アーキテクチャ
 

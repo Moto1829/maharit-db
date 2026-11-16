@@ -12,3 +12,11 @@ regex.workspace = true
 unicode-normalization.workspace = true
 rayon = "1.10"
 serde_json.workspace = true
+
+[dev-dependencies]
+# ベンチ専用。グラフ描画（plotters）と rayon は使わないので既定の feature を外す。
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "engine"
+harness = false
