@@ -3577,8 +3577,10 @@ impl<'a> Executor<'a> {
     ) -> Result<Vec<Bindings>, ExecuteError> {
         let mut result = Vec::new();
 
-        // Candidate node set for the scan path, computed once and reused across
-        // input bindings.
+        // Candidate node set for the scan path, computed on first use and reused
+        // across input bindings. It is built lazily because bound variables and
+        // property-index lookups never scan: listing every node of the label
+        // would then dominate the cost of a point lookup.
         //
         // Priority:
         // 1. A WHERE range predicate on an indexed numeric property → use the
@@ -3590,12 +3592,17 @@ impl<'a> Executor<'a> {
         // `node_matches_pattern` re-verifies labels/properties and the WHERE
         // retain re-checks the exact predicate, so a candidate *superset* is
         // always safe.
-        let all_node_ids: Vec<NodeId> =
-            self.range_index_candidates(pattern)
-                .unwrap_or_else(|| match pattern.labels.first() {
-                    Some(label) => self.graph_ref().nodes_by_label(label),
-                    None => self.graph_ref().node_ids(),
-                });
+        let scan_candidates = std::cell::OnceCell::new();
+        let scan_candidates = || -> &Vec<NodeId> {
+            scan_candidates.get_or_init(|| {
+                self.range_index_candidates(pattern).unwrap_or_else(|| {
+                    match pattern.labels.first() {
+                        Some(label) => self.graph_ref().nodes_by_label(label),
+                        None => self.graph_ref().node_ids(),
+                    }
+                })
+            })
+        };
 
         for bindings in current_bindings {
             // Check if variable is already bound
@@ -3654,6 +3661,7 @@ impl<'a> Executor<'a> {
             // match the label/property predicates. Property expression evaluation
             // only reads the graph, so sharing `&self` across threads is safe here
             // through the pattern closure.
+            let all_node_ids = scan_candidates();
             if all_node_ids.len() >= PARALLEL_MATCH_THRESHOLD {
                 // Phase 1 (parallel): determine which node IDs pass label + property filters.
                 // Note: evaluate_expression needs &self; we wrap it in a closure that
@@ -3684,7 +3692,7 @@ impl<'a> Executor<'a> {
                 }
             } else {
                 // Sequential path for small graphs.
-                for &node_id in &all_node_ids {
+                for &node_id in all_node_ids {
                     if self.node_matches_pattern(node_id, pattern, &bindings)? {
                         let mut new_bindings = bindings.clone();
                         if let Some(var) = &pattern.variable {
