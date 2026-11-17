@@ -1,6 +1,4 @@
-//! RETURN の評価、ORDER BY
-//!  SKIP
-//!  LIMIT、結果表の組み立て。
+//! RETURN の評価、ORDER BY / SKIP / LIMIT、結果表の組み立て。
 
 use super::*;
 

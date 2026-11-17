@@ -1,6 +1,4 @@
-//! CALL サブクエリ、プロシージャ呼び出し（YIELD とその後に続く句）、EXISTS
-//!  COUNT
-//!  COLLECT サブクエリ。
+//! CALL サブクエリ、プロシージャ呼び出し（YIELD とその後に続く句）、EXISTS / COUNT / COLLECT サブクエリ。
 
 use super::*;
 

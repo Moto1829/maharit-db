@@ -1,6 +1,5 @@
 //! セッションの確認、ロールによる権限判定、ACL の適用と、
-//! ユーザー管理・ACL の文（CREATE USER
-//!  GRANT など）の処理。
+//! ユーザー管理・ACL の文（CREATE USER / GRANT など）の処理。
 
 use super::*;
 

@@ -1,10 +1,4 @@
-//! CREATE
-//!  DELETE
-//!  SET
-//!  MERGE
-//!  REMOVE
-//!  UNWIND
-//!  FOREACH の実行と、
+//! CREATE / DELETE / SET / MERGE / REMOVE / UNWIND / FOREACH の実行と、
 //! 書き込み句を連ねた文（パイプライン）の処理。
 
 use super::*;

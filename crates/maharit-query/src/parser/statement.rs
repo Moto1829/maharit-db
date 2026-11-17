@@ -1,15 +1,5 @@
-//! 文と句（CREATE
-//!  MATCH
-//!  WITH
-//!  RETURN
-//!  ORDER BY
-//!  SET
-//!  DELETE
-//!  REMOVE
-//!  MERGE
-//!  UNWIND
-//!  FOREACH）の構文解析と、
-//! 句を連ねた文・UNION の組み立て。
+//! 文と句（CREATE / MATCH / WITH / RETURN / ORDER BY / SET / DELETE / REMOVE / MERGE /
+//! UNWIND / FOREACH）の構文解析と、句を連ねた文・UNION の組み立て。
 
 use super::*;
 

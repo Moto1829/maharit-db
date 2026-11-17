@@ -1,7 +1,4 @@
-//! 集約（count
-//!  sum
-//!  collect
-//!  percentile など）を含む RETURN の結果表の組み立て。
+//! 集約（count / sum / collect / percentile など）を含む RETURN の結果表の組み立て。
 
 use super::*;
 

@@ -1,5 +1,4 @@
-//! EXPLAIN
-//!  PROFILE の実行。
+//! EXPLAIN / PROFILE の実行。
 
 use super::*;
 

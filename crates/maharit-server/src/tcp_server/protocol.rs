@@ -1,5 +1,4 @@
-//! ワイヤプロトコルのメッセージ型（`Request`
-//!  `Response`）。
+//! ワイヤプロトコルのメッセージ型（`Request` / `Response`）。
 
 use super::*;
 
