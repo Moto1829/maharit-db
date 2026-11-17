@@ -31,9 +31,9 @@ AI はファイル全体を読めないので部分読みになり、既存の�
   - `subquery.rs`（CALL / EXISTS / COUNT / COLLECT）
   - `schema.rs`（制約・索引）
 - [x] 各ファイルの先頭に、何が入っているかを 2〜3 行の `//!` で書く
-- [ ] `parser.rs` も文・式・パターンで分ける
-- [ ] `tcp_server.rs` を、接続処理・メッセージの振り分け・クエリ実行に分ける
-- [ ] CLAUDE.md の「maharit-query: クエリパイプライン」節を新しい構成に合わせる
+- [x] `parser.rs` も文・式・パターンで分ける
+- [x] `tcp_server.rs` を、接続処理・メッセージの振り分け・クエリ実行に分ける
+- [x] CLAUDE.md の「maharit-query: クエリパイプライン」節を新しい構成に合わせる
 
 ## 注意
 - タスク 188（slot-based bindings）は executor を広く書き換える。どちらを先にやるか決め、同時に進めない

@@ -120,12 +120,14 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 
 - `ast.rs`: `Statement` enum がトップレベル文（Create / Match / Merge / Unwind / Foreach / CreateConstraint / CreateFulltextIndex / Explain / Profile 等）。`Expression` enum は値計算（ScalarFunction / BinaryOp / Property / Map / ListPredicate / ExistsSubquery 等）。`is_read_only(&Statement)` で読み取り専用判定。
 - `lexer.rs`: トークンベース。キーワードは大文字小文字を区別しない。
-- `parser.rs`: 再帰下降。`parse()` は最初のトークンで分岐するが、`CREATE CONSTRAINT` / `CREATE FULLTEXT INDEX` は peek-ahead で識別。
+- `parser.rs` + `parser/`: 再帰下降。`parser.rs` は `Parser` 本体・文の振り分け（`parse_statement`）・トークン操作。`statement.rs`（句と文）/ `expr.rs`（式・関数呼び出し）/ `pattern.rs`（パターン）/ `schema.rs`（制約・索引・ユーザー・ACL）/ `subquery.rs`（CALL・サブクエリ）。`CREATE CONSTRAINT` / `CREATE FULLTEXT INDEX` は peek-ahead で識別。
 - `planner.rs`: `QueryPlan` / `PlanNode` を構築。EXPLAIN / PROFILE で使用。`GraphStats` を元にフィルタプッシュダウン・インデックス選択・JOIN 順序・カラムプルーニングを行う。
-- `executor.rs`: `Executor<'a>` は `*mut Graph`（生ポインタ）+ `readonly: bool` + `ConstraintManager` + `FulltextManager` を保持。`graph_ref()` / `graph_mut()` でアクセス。読み取り並列実行のため `unsafe new_readonly(&Graph)` と `unsafe impl Sync` を持つ。Bindings は `HashMap<String, BindingValue>` で `BindingValue = Node | Edge | Path | Scalar`。
+- `executor.rs` + `executor/`: `executor.rs` は `Executor<'a>`（グラフバックエンドへの生ポインタ + 制約・全文・プロパティ索引のマネージャ）、コンストラクタ、文の振り分け（`execute`）だけ。メソッドは機能ごとのファイルにある: `query.rs`（読み取り文・WITH・押し下げ）/ `match_.rs`（パターン照合）/ `write.rs`（CREATE / SET / DELETE / MERGE / REMOVE / UNWIND / FOREACH）/ `expr.rs`（式）/ `functions.rs`（スカラー関数）/ `aggregate.rs`（集約）/ `result.rs`（RETURN・ORDER BY・LIMIT）/ `schema.rs` / `procedure.rs` / `algo.rs` / `explain.rs`。型は `value.rs`（`Value` / `Row` / `ResultSet`）、`bindings.rs`（`Bindings = HashMap<Arc<str>, BindingValue>`、`BindingValue = Node | Edge | Path | Scalar`）、`error.rs`。ファイルをまたいで呼ぶメソッドは `pub(super)`（クレート外へ広げない）。
 - `cache.rs`: `AstCache` / `PlanCache` / `QueryCache`。PlanCache は LRU + 統計スナップショット（node_count / edge_count）による無効化。
 
-**新ステートメント追加の典型手順**: `Statement` enum 追加 → AST 型追加 → `lexer.rs` にキーワード登録 → `parser.rs` にパーサーメソッド追加 → `executor.rs` に実行メソッド追加 → `planner.rs` に case 追加。
+**新ステートメント追加の典型手順**: `Statement` enum 追加 → AST 型追加 → `lexer.rs` にキーワード登録 → `parser/` にパーサーメソッド追加 → `executor/` に実行メソッド追加 → `planner.rs` に case 追加。
+
+テストは各モジュールの `tests/` ディレクトリ（`executor/tests/` など）に分野ごとに置く。共通ヘルパーは `tests/mod.rs`。
 
 ### maharit-core: グラフエンジン
 
@@ -148,7 +150,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 ### maharit-server: TCP / HTTP / 認証
 
 - `main.rs`: CLI のエントリーポイント。サブコマンドなしで REPL、`server` で TCP サーバー、`backup` / `restore` / `admin` あり。
-- `tcp_server.rs`: 4 バイト長プレフィックス + JSON プロトコル。`streamQuery` 型は複数レスポンスをストリーミング。
+- `tcp_server.rs` + `tcp_server/`: 4 バイト長プレフィックス + JSON プロトコル。`tcp_server.rs` は `TcpServer` と起動処理。`protocol.rs`（`Request` / `Response`）/ `connection.rs`（1 接続の処理と振り分け）/ `query.rs`（クエリ実行・WAL・レプリケーション送出）/ `session.rs`（認証・権限・ユーザー管理）/ `state.rs`（永続化・共有マネージャ）。`streamQuery` 型は複数レスポンスをストリーミング。
 - `http_server.rs`: 軽量 tokio TCP。`/metrics`（Prometheus）、`/health`、`/health/live`、`/health/ready`。
 - `auth.rs`: ユーザー・セッション管理、RBAC（admin / writer / reader）、`CREATE USER` / `DROP USER` / `ALTER USER` を SQL ライクに処理。
 - `tls.rs`: rustls 0.23（証明書ホットリロード対応）。`builder_with_protocol_versions` を使う（`versions` フィールドは private）。
