@@ -10,7 +10,7 @@
 //! - 書き込みが拒否されたノード・プロパティを変更すると、その文はエラーになる
 //!   （呼び出し側が文の変更をすべて取り消す）。
 
-use maharit_core::{Edge, EdgeId, GraphBackend, GraphError, Node, NodeId, PropertyValue};
+use maharit_core::{Edge, EdgeEnds, EdgeId, GraphBackend, GraphError, Node, NodeId, PropertyValue};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -294,6 +294,27 @@ impl GraphBackend for AclBackend<'_> {
             .into_iter()
             .filter(|e| self.node_visible(e.from))
             .collect()
+    }
+
+    fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<EdgeEnds>,
+    ) {
+        if !self.node_visible(node_id) {
+            return;
+        }
+        let mut found = Vec::new();
+        self.raw()
+            .adjacent_edges(node_id, outgoing, types, &mut found);
+        // 相手側のノードが見えないリレーションシップは隠す（outgoing_edges と同じ）
+        out.extend(
+            found
+                .into_iter()
+                .filter(|e| self.node_visible(if outgoing { e.to } else { e.from })),
+        );
     }
 
     fn has_incident_edges(&self, node_id: NodeId) -> bool {

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use maharit_core::{
-    ConcurrentGraph, Constraint, ConstraintError, ConstraintManager, ConstraintType, Edge,
-    FulltextError, FulltextManager, Graph, GraphBackend, IndexDefinition, NodeId, PropertyIndex,
-    PropertyType, PropertyValue, traversal,
+    ConcurrentGraph, Constraint, ConstraintError, ConstraintManager, ConstraintType, EdgeEnds,
+    EdgeId, FulltextError, FulltextManager, Graph, GraphBackend, IndexDefinition, NodeId,
+    PropertyIndex, PropertyType, PropertyValue, traversal,
 };
 use rayon::prelude::*;
 use regex::Regex;
@@ -380,20 +380,24 @@ impl<'a> Executor<'a> {
         unsafe { &*self.graph }
     }
 
+    /// ノードに接続しているエッジの本数（自己ループは 1 本と数える）。
+    fn incident_edge_count(&self, node_id: NodeId) -> i64 {
+        let graph = self.graph_ref();
+        let mut edges = Vec::new();
+        graph.adjacent_edges(node_id, true, &[], &mut edges);
+        graph.adjacent_edges(node_id, false, &[], &mut edges);
+        edges
+            .iter()
+            .map(|e| e.id)
+            .collect::<HashSet<EdgeId>>()
+            .len() as i64
+    }
+
     /// Return an exclusive reference to the graph backend.
     ///
     /// Must only be called when `self.readonly == false`.  For `ConcurrentGraph`
     /// this is always safe because writes use DashMap interior mutability.
     #[inline]
-    /// ノードに接続しているエッジの本数（自己ループは 1 本と数える）。
-    fn incident_edge_count(&self, node_id: NodeId) -> i64 {
-        let graph = self.graph_ref();
-        let mut ids: HashSet<maharit_core::EdgeId> =
-            graph.outgoing_edges(node_id).iter().map(|e| e.id).collect();
-        ids.extend(graph.incoming_edges(node_id).iter().map(|e| e.id));
-        ids.len() as i64
-    }
-
     fn graph_mut(&mut self) -> &mut dyn GraphBackend {
         debug_assert!(
             !self.readonly,

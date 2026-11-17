@@ -437,14 +437,10 @@ impl<'a> Executor<'a> {
             .ok_or_else(|| ExecuteError::UndefinedVariable(prev_var.clone()))?;
 
         // Get edges from previous node
-        let edges = self.get_edges_by_direction(prev_id, segment.edge.direction);
+        let edges = self.adjacent_edges(prev_id, &segment.edge);
 
         for edge in edges {
-            // Check edge type
-            if !segment.edge.matches_type(&edge.label) {
-                continue;
-            }
-            if !self.edge_matches_properties(&edge, &segment.edge, bindings)? {
+            if !self.edge_matches_properties(edge.id, &segment.edge, bindings)? {
                 continue;
             }
 
@@ -460,7 +456,7 @@ impl<'a> Executor<'a> {
             }
 
             // Get the other node
-            let next_id = self.get_next_node(prev_id, &edge, segment.edge.direction);
+            let next_id = self.get_next_node(prev_id, edge, segment.edge.direction);
 
             // Check if next node matches pattern
             if self.node_matches_pattern(next_id, &segment.node, bindings)? {
@@ -520,18 +516,14 @@ impl<'a> Executor<'a> {
                 }
 
                 // Get edges and explore neighbors
-                let edges = self.get_edges_by_direction(current_id, segment.edge.direction);
+                let edges = self.adjacent_edges(current_id, &segment.edge);
 
                 for edge in edges {
-                    // Check edge type
-                    if !segment.edge.matches_type(&edge.label) {
-                        continue;
-                    }
-                    if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
+                    if !self.edge_matches_properties(edge.id, &segment.edge, &bindings)? {
                         continue;
                     }
 
-                    let next_id = self.get_next_node(current_id, &edge, segment.edge.direction);
+                    let next_id = self.get_next_node(current_id, edge, segment.edge.direction);
 
                     // Avoid cycles: don't revisit nodes already in the current path
                     if visited_nodes.contains(&next_id) {
@@ -634,14 +626,11 @@ impl<'a> Executor<'a> {
                 }
                 let mut next = Vec::new();
                 for &node in &frontier {
-                    for edge in self.get_edges_by_direction(node, segment.edge.direction) {
-                        if !segment.edge.matches_type(&edge.label) {
+                    for edge in self.adjacent_edges(node, &segment.edge) {
+                        if !self.edge_matches_properties(edge.id, &segment.edge, &bindings)? {
                             continue;
                         }
-                        if !self.edge_matches_properties(&edge, &segment.edge, &bindings)? {
-                            continue;
-                        }
-                        let to = self.get_next_node(node, &edge, segment.edge.direction);
+                        let to = self.get_next_node(node, edge, segment.edge.direction);
                         match dist.get(&to) {
                             None => {
                                 dist.insert(to, depth + 1);
@@ -710,26 +699,27 @@ impl<'a> Executor<'a> {
         done
     }
 
-    pub(super) fn get_edges_by_direction(
-        &self,
-        node_id: NodeId,
-        direction: EdgeDirection,
-    ) -> Vec<Edge> {
-        match direction {
-            EdgeDirection::Outgoing => self.graph_ref().outgoing_edges(node_id),
-            EdgeDirection::Incoming => self.graph_ref().incoming_edges(node_id),
+    /// `node_id` に接続し、パターンの向きと種別に合うリレーションシップ（ID と両端）。
+    /// 向きが無指定なら出る向き → 入る向きの順に並ぶ（自己ループは両方に現れる）。
+    pub(super) fn adjacent_edges(&self, node_id: NodeId, pattern: &EdgePattern) -> Vec<EdgeEnds> {
+        let graph = self.graph_ref();
+        let types = &pattern.edge_types;
+        let mut edges = Vec::new();
+        match pattern.direction {
+            EdgeDirection::Outgoing => graph.adjacent_edges(node_id, true, types, &mut edges),
+            EdgeDirection::Incoming => graph.adjacent_edges(node_id, false, types, &mut edges),
             EdgeDirection::Both => {
-                let mut edges = self.graph_ref().outgoing_edges(node_id);
-                edges.extend(self.graph_ref().incoming_edges(node_id));
-                edges
+                graph.adjacent_edges(node_id, true, types, &mut edges);
+                graph.adjacent_edges(node_id, false, types, &mut edges);
             }
         }
+        edges
     }
 
     pub(super) fn get_next_node(
         &self,
         current_id: NodeId,
-        edge: &Edge,
+        edge: EdgeEnds,
         direction: EdgeDirection,
     ) -> NodeId {
         match direction {
@@ -850,13 +840,16 @@ impl<'a> Executor<'a> {
     /// リレーションシップがパターンのインラインプロパティ（`-[r {w: 1}]-`）を満たすか。
     pub(super) fn edge_matches_properties(
         &self,
-        edge: &Edge,
+        edge_id: EdgeId,
         pattern: &EdgePattern,
         bindings: &Bindings,
     ) -> Result<bool, ExecuteError> {
         if pattern.properties.is_empty() && pattern.properties_param.is_none() {
             return Ok(true);
         }
+        let Some(edge) = self.graph_ref().get_edge(edge_id) else {
+            return Ok(false);
+        };
         for (key, expected_expr) in
             self.pattern_property_exprs(&pattern.properties, &pattern.properties_param)?
         {

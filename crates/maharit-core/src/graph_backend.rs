@@ -6,7 +6,7 @@
 
 use crate::GraphError;
 use crate::concurrent_graph::ConcurrentGraph;
-use crate::graph::{Edge, EdgeId, Graph, Node, NodeId};
+use crate::graph::{Edge, EdgeEnds, EdgeId, Graph, Node, NodeId};
 use crate::property::PropertyValue;
 
 /// グラフ操作の抽象インターフェース。
@@ -68,6 +68,36 @@ pub trait GraphBackend: Send + Sync {
 
     /// 指定ノードに隣接エッジが 1 本以上あるか。
     fn has_incident_edges(&self, node_id: NodeId) -> bool;
+
+    /// 指定ノードから出る（`outgoing` が false なら入る）エッジの ID と両端を `out` に追加する。
+    /// `types` が空でなければ、その種別のエッジだけを返す。
+    ///
+    /// 種別名やプロパティを複製しないので、パターンを辿るときは `outgoing_edges` よりこちらを使う。
+    /// 既定の実装は `outgoing_edges` / `incoming_edges` から作る（読み取りを制限する
+    /// ラッパーでも、そのラッパーの見え方がそのまま反映される）。
+    fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<EdgeEnds>,
+    ) {
+        let edges = if outgoing {
+            self.outgoing_edges(node_id)
+        } else {
+            self.incoming_edges(node_id)
+        };
+        out.extend(
+            edges
+                .iter()
+                .filter(|e| types.is_empty() || types.contains(&e.label))
+                .map(|e| EdgeEnds {
+                    id: e.id,
+                    from: e.from,
+                    to: e.to,
+                }),
+        );
+    }
 
     /// ライブなノード数を返す。
     fn node_count(&self) -> usize;
@@ -182,6 +212,29 @@ impl GraphBackend for Graph {
     fn has_incident_edges(&self, node_id: NodeId) -> bool {
         Graph::get_outgoing_edges(self, node_id).next().is_some()
             || Graph::get_incoming_edges(self, node_id).next().is_some()
+    }
+
+    fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<EdgeEnds>,
+    ) {
+        let edges: Box<dyn Iterator<Item = &Edge>> = if outgoing {
+            Box::new(Graph::get_outgoing_edges(self, node_id))
+        } else {
+            Box::new(Graph::get_incoming_edges(self, node_id))
+        };
+        out.extend(
+            edges
+                .filter(|e| types.is_empty() || types.contains(&e.label))
+                .map(|e| EdgeEnds {
+                    id: e.id,
+                    from: e.from,
+                    to: e.to,
+                }),
+        );
     }
 
     fn node_count(&self) -> usize {
@@ -317,7 +370,17 @@ impl GraphBackend for ConcurrentGraph {
     }
 
     fn has_incident_edges(&self, node_id: NodeId) -> bool {
-        !self.get_outgoing_edges(node_id).is_empty() || !self.get_incoming_edges(node_id).is_empty()
+        ConcurrentGraph::has_incident_edges(self, node_id)
+    }
+
+    fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<EdgeEnds>,
+    ) {
+        ConcurrentGraph::adjacent_edges(self, node_id, outgoing, types, out)
     }
 
     fn node_count(&self) -> usize {

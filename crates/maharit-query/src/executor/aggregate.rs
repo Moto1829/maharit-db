@@ -10,11 +10,10 @@ impl<'a> Executor<'a> {
             let from = window[0];
             let to = window[1];
             // Find edge from 'from' to 'to'
-            for edge in self.graph_ref().outgoing_edges(from) {
-                if edge.to == to {
-                    edges.push(edge.id);
-                    break;
-                }
+            let mut out = Vec::new();
+            self.graph_ref().adjacent_edges(from, true, &[], &mut out);
+            if let Some(edge) = out.iter().find(|e| e.to == to) {
+                edges.push(edge.id);
             }
         }
         edges

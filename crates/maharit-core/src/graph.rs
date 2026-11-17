@@ -67,6 +67,16 @@ pub struct Edge {
     pub properties: Arc<HashMap<String, PropertyValue>>,
 }
 
+/// A relationship's ID and endpoints, without its type name or properties.
+/// Returned by [`GraphBackend::adjacent_edges`](crate::GraphBackend::adjacent_edges)
+/// so traversals need not copy whole edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeEnds {
+    pub id: EdgeId,
+    pub from: NodeId,
+    pub to: NodeId,
+}
+
 impl Edge {
     /// プロパティを設定
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) {

@@ -19,7 +19,7 @@ pub use constraint::{
     Constraint, ConstraintError, ConstraintManager, ConstraintType, PropertyType,
 };
 pub use fulltext::{FulltextError, FulltextIndex, FulltextManager, SearchResult};
-pub use graph::{Edge, EdgeId, Graph, Node, NodeId};
+pub use graph::{Edge, EdgeEnds, EdgeId, Graph, Node, NodeId};
 pub use graph_backend::GraphBackend;
 pub use index::LabelIndex;
 pub use property::{PropertyValue, temporal};

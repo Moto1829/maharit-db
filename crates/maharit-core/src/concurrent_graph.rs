@@ -13,7 +13,9 @@
 //!
 //! - No free-list reuse of deleted IDs (IDs are monotonically increasing).
 //! - Adjacency sets (`outgoing_edges`, `incoming_edges`) still use `DashMap`
-//!   shards, giving the same per-entry concurrency.
+//!   shards, giving the same per-entry concurrency. Each node's adjacency is
+//!   grouped by relationship type and keeps the other endpoint, so
+//!   `-[:TYPE]->` traversals touch only that type and need no edge lookup.
 //!
 //! # Usage
 //!
@@ -29,14 +31,14 @@
 //! assert_eq!(g.edge_count(), 1);
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 
 use crate::GraphError;
-use crate::graph::{Edge, EdgeId, Node, NodeId};
+use crate::graph::{Edge, EdgeEnds, EdgeId, Node, NodeId};
 use crate::property::PropertyValue;
 
 /// A lock-free, concurrent graph backed by [`DashMap`].
@@ -45,14 +47,17 @@ use crate::property::PropertyValue;
 pub struct ConcurrentGraph {
     nodes: Arc<DashMap<NodeId, Node>>,
     edges: Arc<DashMap<EdgeId, Edge>>,
-    /// Outgoing edge-id sets per node.
-    outgoing: Arc<DashMap<NodeId, HashSet<EdgeId>>>,
-    /// Incoming edge-id sets per node.
-    incoming: Arc<DashMap<NodeId, HashSet<EdgeId>>>,
+    /// Outgoing edges per node, grouped by type (edge id → target node).
+    outgoing: Arc<DashMap<NodeId, Adjacency>>,
+    /// Incoming edges per node, grouped by type (edge id → source node).
+    incoming: Arc<DashMap<NodeId, Adjacency>>,
     /// Label → set of NodeIds carrying that label. Lets `MATCH (n:Label)`
     /// enumerate only matching nodes instead of scanning every node.
     /// Maintained on create/delete/label changes; rebuilt from creates on load.
     label_index: Arc<DashMap<String, HashSet<NodeId>>>,
+    /// Relationship type names shared by every node's adjacency, so a node
+    /// holds a reference count instead of its own copy of each name.
+    edge_types: Arc<DashMap<String, Arc<str>>>,
     next_node_id: AtomicU64,
     next_edge_id: AtomicU64,
 }
@@ -72,6 +77,7 @@ impl ConcurrentGraph {
             outgoing: Arc::new(DashMap::new()),
             incoming: Arc::new(DashMap::new()),
             label_index: Arc::new(DashMap::new()),
+            edge_types: Arc::new(DashMap::new()),
             next_node_id: AtomicU64::new(0),
             next_edge_id: AtomicU64::new(0),
         }
@@ -86,6 +92,7 @@ impl ConcurrentGraph {
         self.incoming.clear();
         self.nodes.clear();
         self.label_index.clear();
+        self.edge_types.clear();
         self.next_node_id.store(0, Ordering::SeqCst);
         self.next_edge_id.store(0, Ordering::SeqCst);
     }
@@ -177,8 +184,8 @@ impl ConcurrentGraph {
                 properties: Arc::new(std::collections::HashMap::new()),
             },
         );
-        self.outgoing.insert(id, HashSet::new());
-        self.incoming.insert(id, HashSet::new());
+        self.outgoing.insert(id, Adjacency::default());
+        self.incoming.insert(id, Adjacency::default());
         id
     }
 
@@ -244,23 +251,23 @@ impl ConcurrentGraph {
         self.label_index_remove(id, &node.labels);
 
         // Remove all outgoing edges
-        if let Some((_, out_ids)) = self.outgoing.remove(&id) {
-            for eid in out_ids {
+        if let Some((_, out)) = self.outgoing.remove(&id) {
+            for eid in out.ids() {
                 if let Some((_, edge)) = self.edges.remove(&eid)
                     && let Some(mut inc) = self.incoming.get_mut(&edge.to)
                 {
-                    inc.remove(&eid);
+                    inc.remove(&edge.label, eid);
                 }
             }
         }
 
         // Remove all incoming edges
-        if let Some((_, in_ids)) = self.incoming.remove(&id) {
-            for eid in in_ids {
+        if let Some((_, inc)) = self.incoming.remove(&id) {
+            for eid in inc.ids() {
                 if let Some((_, edge)) = self.edges.remove(&eid)
                     && let Some(mut out) = self.outgoing.get_mut(&edge.from)
                 {
-                    out.remove(&eid);
+                    out.remove(&edge.label, eid);
                 }
             }
         }
@@ -297,18 +304,7 @@ impl ConcurrentGraph {
         }
 
         let id = self.next_edge_id.fetch_add(1, Ordering::SeqCst);
-        self.edges.insert(
-            id,
-            Edge {
-                id,
-                label: label.into(),
-                from,
-                to,
-                properties: Arc::new(std::collections::HashMap::new()),
-            },
-        );
-        self.outgoing.entry(from).or_default().insert(id);
-        self.incoming.entry(to).or_default().insert(id);
+        self.insert_edge(id, from, to, label.into());
         Ok(id)
     }
 
@@ -341,19 +337,42 @@ impl ConcurrentGraph {
                 Err(updated) => current = updated,
             }
         }
+        self.insert_edge(id, from, to, label.into());
+        Ok(id)
+    }
+
+    /// Store the edge record first, then link it from both endpoints, so a
+    /// reader that finds the edge through adjacency can always look it up.
+    fn insert_edge(&self, id: EdgeId, from: NodeId, to: NodeId, label: String) {
+        let edge_type = self.intern_edge_type(&label);
         self.edges.insert(
             id,
             Edge {
                 id,
-                label: label.into(),
+                label,
                 from,
                 to,
                 properties: Arc::new(std::collections::HashMap::new()),
             },
         );
-        self.outgoing.entry(from).or_default().insert(id);
-        self.incoming.entry(to).or_default().insert(id);
-        Ok(id)
+        self.outgoing
+            .entry(from)
+            .or_default()
+            .insert(&edge_type, id, to);
+        self.incoming
+            .entry(to)
+            .or_default()
+            .insert(&edge_type, id, from);
+    }
+
+    fn intern_edge_type(&self, label: &str) -> Arc<str> {
+        if let Some(name) = self.edge_types.get(label) {
+            return name.clone();
+        }
+        self.edge_types
+            .entry(label.to_string())
+            .or_insert_with(|| Arc::from(label))
+            .clone()
     }
 
     /// Read-only access to an edge via a closure.
@@ -374,14 +393,15 @@ impl ConcurrentGraph {
 
     /// Remove an edge by ID. Returns the removed edge.
     pub fn delete_edge(&self, id: EdgeId) -> Option<Edge> {
-        let (_, edge) = self.edges.remove(&id)?;
-        if let Some(mut out) = self.outgoing.get_mut(&edge.from) {
-            out.remove(&id);
+        // Unlink before removing the record (see `insert_edge`).
+        let (from, to, label) = self.with_edge(id, |e| (e.from, e.to, e.label.clone()))?;
+        if let Some(mut out) = self.outgoing.get_mut(&from) {
+            out.remove(&label, id);
         }
-        if let Some(mut inc) = self.incoming.get_mut(&edge.to) {
-            inc.remove(&id);
+        if let Some(mut inc) = self.incoming.get_mut(&to) {
+            inc.remove(&label, id);
         }
-        Some(edge)
+        self.edges.remove(&id).map(|(_, e)| e)
     }
 
     /// Number of live edges.
@@ -428,7 +448,7 @@ impl ConcurrentGraph {
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.outgoing
             .get(&node_id)
-            .map(|s| s.iter().copied().collect())
+            .map(|a| a.ids().collect())
             .unwrap_or_default()
     }
 
@@ -436,8 +456,98 @@ impl ConcurrentGraph {
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.incoming
             .get(&node_id)
-            .map(|s| s.iter().copied().collect())
+            .map(|a| a.ids().collect())
             .unwrap_or_default()
+    }
+
+    /// Whether the node has any outgoing or incoming edge.
+    pub fn has_incident_edges(&self, node_id: NodeId) -> bool {
+        self.outgoing.get(&node_id).is_some_and(|a| !a.is_empty())
+            || self.incoming.get(&node_id).is_some_and(|a| !a.is_empty())
+    }
+
+    /// Append the edges leaving (`outgoing`) or entering the node to `out`,
+    /// only those of `types` when it is not empty. Reads no edge record.
+    pub fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<EdgeEnds>,
+    ) {
+        let map = if outgoing {
+            &self.outgoing
+        } else {
+            &self.incoming
+        };
+        let Some(adj) = map.get(&node_id) else {
+            return;
+        };
+        let ends = |(&id, &other): (&EdgeId, &NodeId)| {
+            if outgoing {
+                EdgeEnds {
+                    id,
+                    from: node_id,
+                    to: other,
+                }
+            } else {
+                EdgeEnds {
+                    id,
+                    from: other,
+                    to: node_id,
+                }
+            }
+        };
+        if types.is_empty() {
+            for (_, edges) in &adj.by_type {
+                out.extend(edges.iter().map(ends));
+            }
+        } else {
+            for (label, edges) in &adj.by_type {
+                if types.iter().any(|t| **t == **label) {
+                    out.extend(edges.iter().map(ends));
+                }
+            }
+        }
+    }
+}
+
+/// One node's edges in one direction, grouped by relationship type.
+/// Each edge maps to the node at its other end. Nodes rarely have many
+/// relationship types, so a small `Vec` is searched linearly.
+#[derive(Debug, Default)]
+struct Adjacency {
+    by_type: Vec<(Arc<str>, HashMap<EdgeId, NodeId>)>,
+}
+
+impl Adjacency {
+    fn insert(&mut self, label: &Arc<str>, id: EdgeId, other: NodeId) {
+        match self.by_type.iter_mut().find(|(l, _)| l == label) {
+            Some((_, edges)) => {
+                edges.insert(id, other);
+            }
+            None => self
+                .by_type
+                .push((label.clone(), HashMap::from([(id, other)]))),
+        }
+    }
+
+    fn remove(&mut self, label: &str, id: EdgeId) {
+        if let Some(pos) = self.by_type.iter().position(|(l, _)| **l == *label) {
+            let edges = &mut self.by_type[pos].1;
+            edges.remove(&id);
+            if edges.is_empty() {
+                self.by_type.swap_remove(pos);
+            }
+        }
+    }
+
+    fn ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.by_type.iter().flat_map(|(_, e)| e.keys().copied())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_type.is_empty()
     }
 }
 
@@ -601,5 +711,41 @@ mod tests {
         assert_eq!(g.edge_count(), 0);
         assert!(g.nodes_by_label("A").is_empty());
         assert_eq!(g.create_node("C"), 0);
+    }
+
+    #[test]
+    fn adjacent_edges_filter_by_type_and_follow_deletes() {
+        let g = ConcurrentGraph::new();
+        let a = g.create_node("N");
+        let b = g.create_node("N");
+        let c = g.create_node("N");
+        let ab = g.create_edge(a, b, "KNOWS").unwrap();
+        let ac = g.create_edge(a, c, "LIKES").unwrap();
+        let aa = g.create_edge(a, a, "KNOWS").unwrap();
+
+        let ids = |node, outgoing, types: &[&str]| {
+            let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            let mut out = Vec::new();
+            g.adjacent_edges(node, outgoing, &types, &mut out);
+            let mut v: Vec<_> = out.iter().map(|e| (e.id, e.from, e.to)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(a, true, &[]), vec![(ab, a, b), (ac, a, c), (aa, a, a)]);
+        assert_eq!(ids(a, true, &["KNOWS"]), vec![(ab, a, b), (aa, a, a)]);
+        assert_eq!(ids(a, true, &["LIKES", "NONE"]), vec![(ac, a, c)]);
+        assert_eq!(ids(c, false, &["LIKES"]), vec![(ac, a, c)]);
+        assert_eq!(ids(a, false, &[]), vec![(aa, a, a)]);
+        assert!(ids(b, false, &["LIKES"]).is_empty());
+
+        g.delete_edge(ac);
+        assert!(ids(a, true, &["LIKES"]).is_empty());
+        assert!(ids(c, false, &[]).is_empty());
+        assert!(!g.has_incident_edges(c));
+
+        g.delete_node(a);
+        assert!(ids(b, false, &[]).is_empty());
+        assert!(!g.has_incident_edges(b));
+        assert_eq!(g.edge_count(), 0);
     }
 }

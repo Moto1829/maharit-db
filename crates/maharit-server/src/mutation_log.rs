@@ -220,6 +220,16 @@ impl GraphBackend for RecordingGraph<'_> {
         self.graph.incoming_edges(node_id)
     }
 
+    fn adjacent_edges(
+        &self,
+        node_id: NodeId,
+        outgoing: bool,
+        types: &[String],
+        out: &mut Vec<maharit_core::EdgeEnds>,
+    ) {
+        self.graph.adjacent_edges(node_id, outgoing, types, out)
+    }
+
     fn has_incident_edges(&self, node_id: NodeId) -> bool {
         self.graph.has_incident_edges(node_id)
     }
