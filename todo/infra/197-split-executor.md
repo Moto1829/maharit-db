@@ -22,7 +22,7 @@ AI はファイル全体を読めないので部分読みになり、既存の�
 
 - [x] 第 1 段: テストをファイルの外へ出す（`executor/tests/` に分野ごと。`parser.rs` と `tcp_server.rs` も同様）。これだけで本体ファイルが半分になる
 - [x] 第 2 段: `executor.rs` の型定義を分ける（`value.rs`: `Value` / `Row` / `ResultSet` と変換、`bindings.rs`: `BindingValue`）
-- [ ] 第 3 段: `impl Executor` を機能ごとのファイルに分ける。目安:
+- [x] 第 3 段: `impl Executor` を機能ごとのファイルに分ける。目安:
   - `match_.rs`（パターン照合）
   - `write.rs`（CREATE / SET / DELETE / MERGE / REMOVE / FOREACH）
   - `expr.rs`（式の評価）
@@ -30,7 +30,7 @@ AI はファイル全体を読めないので部分読みになり、既存の�
   - `aggregate.rs`（集約）
   - `subquery.rs`（CALL / EXISTS / COUNT / COLLECT）
   - `schema.rs`（制約・索引）
-- [ ] 各ファイルの先頭に、何が入っているかを 2〜3 行の `//!` で書く
+- [x] 各ファイルの先頭に、何が入っているかを 2〜3 行の `//!` で書く
 - [ ] `parser.rs` も文・式・パターンで分ける
 - [ ] `tcp_server.rs` を、接続処理・メッセージの振り分け・クエリ実行に分ける
 - [ ] CLAUDE.md の「maharit-query: クエリパイプライン」節を新しい構成に合わせる
