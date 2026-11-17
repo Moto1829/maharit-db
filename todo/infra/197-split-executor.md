@@ -21,7 +21,7 @@ AI はファイル全体を読めないので部分読みになり、既存の�
 挙動は変えない。1 段ごとに 1 コミットにし、毎回 `bash scripts/check.sh` を通す。
 
 - [x] 第 1 段: テストをファイルの外へ出す（`executor/tests/` に分野ごと。`parser.rs` と `tcp_server.rs` も同様）。これだけで本体ファイルが半分になる
-- [ ] 第 2 段: `executor.rs` の型定義を分ける（`value.rs`: `Value` / `Row` / `ResultSet` と変換、`bindings.rs`: `BindingValue`）
+- [x] 第 2 段: `executor.rs` の型定義を分ける（`value.rs`: `Value` / `Row` / `ResultSet` と変換、`bindings.rs`: `BindingValue`）
 - [ ] 第 3 段: `impl Executor` を機能ごとのファイルに分ける。目安:
   - `match_.rs`（パターン照合）
   - `write.rs`（CREATE / SET / DELETE / MERGE / REMOVE / FOREACH）
