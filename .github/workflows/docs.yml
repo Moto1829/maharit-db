@@ -50,9 +50,9 @@ jobs:
         run: pip install -r requirements-docs.txt
 
       - name: Check translation freshness
-        # 日本語だけが更新された英語ページを警告する（まだ失敗にはしない。
-        # source_commit が無い・不正なときだけ失敗）。結果はジョブのサマリーに出る。
-        run: python3 scripts/check_docs_i18n.py --github
+        # 日本語だけが更新された英語ページがあれば失敗にする（task170。日本語を直したら
+        # 同じコミットで英語も直す）。結果はジョブのサマリーに出る。
+        run: python3 scripts/check_docs_i18n.py --github --strict
 
       - name: Build MkDocs (ja + en)
         # --strict: 壊れたリンクや設定の誤りを警告ではなく失敗にする

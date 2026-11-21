@@ -125,7 +125,7 @@ if [ "$stage" != lint ]; then
 fi
 
 if [ "$stage" = all ] && [ "$docs_changed" = 1 ]; then
-    run docs-i18n python3 scripts/check_docs_i18n.py
+    run docs-i18n python3 scripts/check_docs_i18n.py --strict
 fi
 
 echo
