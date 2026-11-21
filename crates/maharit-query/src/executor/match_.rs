@@ -183,6 +183,7 @@ impl<'a> Executor<'a> {
             })
         };
 
+        let var_name: Option<Arc<str>> = pattern.variable.as_deref().map(Arc::from);
         for bindings in current_bindings {
             // Check if variable is already bound
             if let Some(var) = &pattern.variable
@@ -217,11 +218,9 @@ impl<'a> Executor<'a> {
                         for node_id in candidate_ids {
                             if self.node_matches_pattern(node_id, pattern, &bindings)? {
                                 let mut new_bindings = bindings.clone();
-                                if let Some(var) = &pattern.variable {
-                                    new_bindings.insert(
-                                        Arc::from(var.as_str()),
-                                        BindingValue::Node(node_id),
-                                    );
+                                if let Some(var) = &var_name {
+                                    new_bindings
+                                        .insert(Arc::clone(var), BindingValue::Node(node_id));
                                 }
                                 result.push(new_bindings);
                             }
@@ -265,8 +264,8 @@ impl<'a> Executor<'a> {
                         None => continue,
                     };
                     let mut new_bindings = bindings.clone();
-                    if let Some(var) = &pattern.variable {
-                        new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
+                    if let Some(var) = &var_name {
+                        new_bindings.insert(Arc::clone(var), BindingValue::Node(node_id));
                     }
                     result.push(new_bindings);
                 }
@@ -275,9 +274,8 @@ impl<'a> Executor<'a> {
                 for &node_id in all_node_ids {
                     if self.node_matches_pattern(node_id, pattern, &bindings)? {
                         let mut new_bindings = bindings.clone();
-                        if let Some(var) = &pattern.variable {
-                            new_bindings
-                                .insert(Arc::from(var.as_str()), BindingValue::Node(node_id));
+                        if let Some(var) = &var_name {
+                            new_bindings.insert(Arc::clone(var), BindingValue::Node(node_id));
                         }
                         result.push(new_bindings);
                     }
@@ -488,12 +486,15 @@ impl<'a> Executor<'a> {
             );
         }
 
-        // Single-hop matching
+        // Single-hop matching. The variable names are turned into `Arc<str>`
+        // once here, not once per produced row.
         let mut result = Vec::new();
-
+        let names = HopNames {
+            node: segment.node.variable.as_deref().map(Arc::from),
+            edge: segment.edge.variable.as_deref().map(Arc::from),
+        };
         for bindings in current_bindings {
-            let matches = self.match_single_hop(segment, prev_pattern, &bindings)?;
-            result.extend(matches);
+            self.match_single_hop(segment, prev_pattern, &bindings, &names, &mut result)?;
         }
 
         Ok(result)
@@ -504,9 +505,9 @@ impl<'a> Executor<'a> {
         segment: &PathSegment,
         prev_pattern: &NodePattern,
         bindings: &Bindings,
-    ) -> Result<Vec<Bindings>, ExecuteError> {
-        let mut result = Vec::new();
-
+        names: &HopNames,
+        result: &mut Vec<Bindings>,
+    ) -> Result<(), ExecuteError> {
         // Get the previous node
         let prev_var = prev_pattern
             .variable
@@ -544,18 +545,18 @@ impl<'a> Executor<'a> {
             if self.node_matches_pattern(next_id, &segment.node, bindings)? {
                 let mut new_bindings = bindings.clone();
 
-                if let Some(var) = &segment.node.variable {
-                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Node(next_id));
+                if let Some(var) = &names.node {
+                    new_bindings.insert(Arc::clone(var), BindingValue::Node(next_id));
                 }
-                if let Some(var) = &segment.edge.variable {
-                    new_bindings.insert(Arc::from(var.as_str()), BindingValue::Edge(edge.id));
+                if let Some(var) = &names.edge {
+                    new_bindings.insert(Arc::clone(var), BindingValue::Edge(edge.id));
                 }
 
                 result.push(new_bindings);
             }
         }
 
-        Ok(result)
+        Ok(())
     }
 
     pub(super) fn match_variable_length_segment(
@@ -991,4 +992,10 @@ pub(super) fn reverse_path(pattern: &PathPattern) -> PathPattern {
         segments,
         shortest: None,
     }
+}
+
+/// Variable names of one hop, as `Arc<str>` made once per segment.
+pub(super) struct HopNames {
+    node: Option<Arc<str>>,
+    edge: Option<Arc<str>>,
 }

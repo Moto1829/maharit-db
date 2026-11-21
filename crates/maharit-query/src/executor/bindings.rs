@@ -40,7 +40,7 @@ impl BindingValue {
 /// 文字列のハッシュ計算が要らなくなる。変数名は `Arc<str>` なので複製は参照カウントだけ。
 ///
 /// `HashMap` と同じ名前のメソッドを持つ（呼び出し側は前と同じに書ける）。
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct Bindings {
     entries: Vec<(Arc<str>, BindingValue)>,
 }
@@ -93,6 +93,16 @@ impl Bindings {
 
     pub(super) fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+/// 複製した行には、たいてい直後に変数を 1〜2 個足すので、その分の容量を先に取っておく
+/// （足すたびの確保し直しを避ける）。
+impl Clone for Bindings {
+    fn clone(&self) -> Self {
+        let mut entries = Vec::with_capacity(self.entries.len() + 2);
+        entries.extend(self.entries.iter().cloned());
+        Self { entries }
     }
 }
 
