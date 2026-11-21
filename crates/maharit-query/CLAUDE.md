@@ -31,6 +31,6 @@ Cypher のクエリパイプライン: **lexer → parser → planner → execut
 
 - 単体テストは各モジュールの `tests/`（`executor/tests/` など）に分野ごと。ヘルパーは `tests/mod.rs`（`execute(&mut graph, q)`、状態を持つ Executor が要るときは `execute_with`）
 - 結果の順序はハッシュに依存するので、ORDER BY の無いクエリは並べ替えてから比べる
-- 標準の Cypher としての意味は `conformance_tests.rs` の表で確かめる（未対応は `KNOWN_UNSUPPORTED`。対応したら消す）
+- 標準の Cypher としての意味は `conformance_tests.rs` の表と、openCypher TCK（`tests/tck.rs`、シナリオは `tests/tck/features/`）で確かめる。TCK の未対応は `tests/tck_known_failures.txt`。対応して通るようになると一覧から消せとテストが失敗する（作り直しは `MAHARIT_TCK_WRITE=1 cargo test -p maharit-query --test tck`）
 - docs の ```cypher は `tests/docs_cypher_examples.rs` でパースされる。未対応は `tests/docs_cypher_known_failures.txt`
 - 性能は `benches/engine.rs`（`cargo bench -p maharit-query --bench engine -- <名前>`）
