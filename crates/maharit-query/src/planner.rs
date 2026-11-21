@@ -899,6 +899,28 @@ fn estimate_node_scan(np: &NodePattern, node_count: u64) -> u64 {
     }
 }
 
+/// Rows a path would start from at this node (same idea as the executor's
+/// `start_estimate`): an indexed literal property → 1, another property filter
+/// → a tenth of the label, otherwise the label count.
+fn estimate_start_with_stats(np: &NodePattern, stats: &GraphStats) -> u64 {
+    let base = estimate_node_scan_with_stats(np, stats);
+    let Some(label) = np.labels.first() else {
+        return base;
+    };
+    if np.properties.iter().any(|(k, e)| {
+        matches!(e, Expression::Literal(_))
+            && stats
+                .indexed_properties
+                .contains(&(label.clone(), k.clone()))
+    }) {
+        1
+    } else if np.properties.is_empty() && np.properties_param.is_none() {
+        base
+    } else {
+        base / 10 + 1
+    }
+}
+
 fn estimate_node_scan_with_stats(np: &NodePattern, stats: &GraphStats) -> u64 {
     if let Some(label) = np.labels.first() {
         // Use the first label for estimation (most selective)
@@ -1126,94 +1148,60 @@ fn plan_match_with_stats(m: &MatchStatement, stats: &GraphStats) -> Vec<PlanNode
                         ));
                     }
                     Pattern::Path(pp) => {
-                        let est_start = estimate_node_scan_with_stats(&pp.start, stats);
-
-                        // Join order optimization: for single-segment paths, check if
-                        // starting from the end node would be cheaper (smaller label count)
-                        if pp.segments.len() == 1 {
-                            let end_node = &pp.segments[0].node;
-                            let est_end = estimate_node_scan_with_stats(end_node, stats);
-
-                            let start_label = if pp.start.labels.is_empty() {
-                                String::new()
-                            } else {
-                                pp.start
-                                    .labels
-                                    .iter()
-                                    .map(|l| format!(":{}", l))
-                                    .collect::<String>()
-                            };
-                            let end_label = if end_node.labels.is_empty() {
-                                String::new()
-                            } else {
-                                end_node
-                                    .labels
-                                    .iter()
-                                    .map(|l| format!(":{}", l))
-                                    .collect::<String>()
-                            };
-                            let edge_info = pp.segments[0].edge.type_display();
-
-                            if est_end < est_start && !end_node.labels.is_empty() {
-                                // Reverse: scan end node first, expand backward
-                                nodes.push(PlanNode::new(
-                                    "NodeByLabelScan",
-                                    est_end,
-                                    est_end / 10 + 1,
-                                    &format!("{} (reordered)", end_label),
-                                ));
-                                let expand_est =
-                                    (est_end * stats.edge_count / stats.node_count.max(1)).max(1);
+                        // Same rule as the executor (`reversed_if_cheaper`): a plain
+                        // fixed-length path without a path variable starts from its
+                        // end when that end has clearly fewer candidates (task187).
+                        let est_start = estimate_start_with_stats(&pp.start, stats);
+                        let labels_of = |n: &NodePattern| {
+                            n.labels.iter().map(|l| format!(":{l}")).collect::<String>()
+                        };
+                        let end_node = pp.segments.last().map(|s| &s.node);
+                        let reversible = pp.variable.is_none()
+                            && pp.shortest.is_none()
+                            && pp.segments.iter().all(|s| s.edge.length_range.is_none());
+                        let reorder = match end_node {
+                            Some(end) if reversible && !end.labels.is_empty() => {
+                                let est_end = estimate_start_with_stats(end, stats);
+                                (est_end.saturating_mul(2) < est_start).then_some((end, est_end))
+                            }
+                            _ => None,
+                        };
+                        if let Some((end, est_end)) = reorder {
+                            nodes.push(PlanNode::new(
+                                "NodeByLabelScan",
+                                est_end,
+                                est_end / 10 + 1,
+                                &format!("{} (reordered)", labels_of(end)),
+                            ));
+                            let expand_est =
+                                (est_end * stats.edge_count / stats.node_count.max(1)).max(1);
+                            for seg in pp.segments.iter().rev() {
                                 nodes.push(PlanNode::new(
                                     "ExpandReverse",
                                     expand_est,
                                     expand_est / 5 + 1,
                                     &format!(
                                         "{} (join reordered: {} < {})",
-                                        edge_info, end_label, start_label
+                                        seg.edge.type_display(),
+                                        labels_of(end),
+                                        labels_of(&pp.start)
                                     ),
-                                ));
-                            } else {
-                                // Normal order
-                                nodes.push(PlanNode::new(
-                                    "NodeByLabelScan",
-                                    est_start,
-                                    est_start / 10 + 1,
-                                    &start_label,
-                                ));
-                                let est_expand = stats.edge_count.max(1);
-                                nodes.push(PlanNode::new(
-                                    "Expand",
-                                    est_expand,
-                                    est_expand / 5 + 1,
-                                    &edge_info,
                                 ));
                             }
                         } else {
-                            // Multi-segment path: use original ordering
-                            let start_label = if pp.start.labels.is_empty() {
-                                String::new()
-                            } else {
-                                pp.start
-                                    .labels
-                                    .iter()
-                                    .map(|l| format!(":{}", l))
-                                    .collect::<String>()
-                            };
                             nodes.push(PlanNode::new(
                                 "NodeByLabelScan",
                                 est_start,
                                 est_start / 10 + 1,
-                                &start_label,
+                                &labels_of(&pp.start),
                             ));
                             for seg in &pp.segments {
                                 let est_expand = stats.edge_count.max(1);
-                                let edge_info = seg.edge.type_display();
                                 nodes.push(PlanNode::new(
                                     "Expand",
                                     est_expand,
                                     est_expand / 5 + 1,
-                                    &edge_info,
+                                    &seg.edge.type_display(),
                                 ));
                             }
                         }

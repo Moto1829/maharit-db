@@ -328,6 +328,16 @@ impl<'a> Executor<'a> {
             pattern
         };
 
+        // Start from whichever end has fewer candidates (task187).
+        let reversed;
+        let pattern = match self.reversed_if_cheaper(pattern, current_bindings.first()) {
+            Some(r) => {
+                reversed = r;
+                &reversed
+            }
+            None => pattern,
+        };
+
         let mut bindings = self.match_node_pattern(&pattern.start, current_bindings)?;
         let mut prev = &pattern.start;
         for segment in &pattern.segments {
@@ -351,6 +361,78 @@ impl<'a> Executor<'a> {
             }
         }
         Ok(bindings)
+    }
+
+    /// How many nodes a node pattern would start from, roughly: 1 if its
+    /// variable is bound, the index hits for an indexed property, otherwise the
+    /// label's node count (or every node).
+    fn start_estimate(&self, node: &NodePattern, sample: Option<&Bindings>) -> usize {
+        if let Some(var) = &node.variable
+            && sample.is_some_and(|b| b.contains_key(var.as_str()))
+        {
+            return 1;
+        }
+        let graph = self.graph_ref();
+        let Some(label) = node.labels.first() else {
+            return graph.node_count();
+        };
+        for (key, expr) in &node.properties {
+            if self.property_index.has_index(label, key)
+                && let Expression::Literal(lit) = expr
+            {
+                return self
+                    .property_index
+                    .find_by_property(key, &PropertyValue::from(lit.clone()))
+                    .len();
+            }
+        }
+        let count = graph.count_nodes_by_label(label);
+        // An unindexed property filter still has to scan the label, but keeps
+        // few of the nodes, so later hops cost less.
+        if node.properties.is_empty() && node.properties_param.is_none() {
+            count
+        } else {
+            count / 10 + 1
+        }
+    }
+
+    /// The same path pattern matched from its other end, when that end has
+    /// clearly fewer candidates. Only plain fixed-length paths without a path
+    /// variable are reversed: those produce the same rows in either direction
+    /// (only their order changes).
+    pub(super) fn reversed_if_cheaper(
+        &self,
+        pattern: &PathPattern,
+        sample: Option<&Bindings>,
+    ) -> Option<PathPattern> {
+        if pattern.variable.is_some()
+            || pattern.shortest.is_some()
+            || pattern.segments.is_empty()
+            || pattern
+                .segments
+                .iter()
+                .any(|s| s.edge.length_range.is_some())
+        {
+            return None;
+        }
+        let end = &pattern.segments.last()?.node;
+        let bound = |n: &NodePattern| {
+            n.variable
+                .as_deref()
+                .is_some_and(|v| sample.is_some_and(|b| b.contains_key(v)))
+        };
+        // An unbound end without a label starts from every node: never cheaper.
+        // A bound start is already the cheapest. Skip the estimates (they look
+        // up indexes) in these common cases.
+        if bound(&pattern.start) || (end.labels.is_empty() && !bound(end)) {
+            return None;
+        }
+        let from_end = self.start_estimate(end, sample);
+        let from_start = self.start_estimate(&pattern.start, sample);
+        if from_end.saturating_mul(2) >= from_start {
+            return None;
+        }
+        Some(reverse_path(pattern))
     }
 
     /// Build the value of a path variable from the node / relationship
@@ -881,5 +963,32 @@ impl<'a> Executor<'a> {
             }
             _ => false,
         }
+    }
+}
+
+/// `(a)-[r1]->(b)<-[r2]-(c)` → `(c)-[r2]->(b)<-[r1]-(a)`.
+pub(super) fn reverse_path(pattern: &PathPattern) -> PathPattern {
+    let mut nodes = vec![pattern.start.clone()];
+    nodes.extend(pattern.segments.iter().map(|s| s.node.clone()));
+    let mut edges: Vec<EdgePattern> = pattern.segments.iter().map(|s| s.edge.clone()).collect();
+    for edge in &mut edges {
+        edge.direction = match edge.direction {
+            EdgeDirection::Outgoing => EdgeDirection::Incoming,
+            EdgeDirection::Incoming => EdgeDirection::Outgoing,
+            EdgeDirection::Both => EdgeDirection::Both,
+        };
+    }
+    let start = nodes.pop().unwrap_or_else(|| pattern.start.clone());
+    let segments = edges
+        .into_iter()
+        .rev()
+        .zip(nodes.into_iter().rev())
+        .map(|(edge, node)| PathSegment { edge, node })
+        .collect();
+    PathPattern {
+        variable: None,
+        start,
+        segments,
+        shortest: None,
     }
 }

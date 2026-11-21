@@ -192,6 +192,10 @@ impl GraphBackend for RecordingGraph<'_> {
         GraphBackend::nodes_by_label(self.graph, label)
     }
 
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        GraphBackend::count_nodes_by_label(self.graph, label)
+    }
+
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
         self.graph.get_edge(id)
     }

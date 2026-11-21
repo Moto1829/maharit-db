@@ -126,6 +126,11 @@ impl ConcurrentGraph {
             .unwrap_or_default()
     }
 
+    /// Number of nodes carrying `label` (without collecting their IDs).
+    pub fn count_nodes_by_label(&self, label: &str) -> usize {
+        self.label_index.get(label).map_or(0, |set| set.len())
+    }
+
     /// Add a label to a node and update the label index.
     pub fn add_node_label(&self, id: NodeId, label: String) {
         let added = self

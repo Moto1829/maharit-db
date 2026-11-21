@@ -242,6 +242,14 @@ impl GraphBackend for AclBackend<'_> {
             .collect()
     }
 
+    // 見積もり用なので、見えないノードも数える（数を数えるために全件を ACL で確かめない）
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        if self.policy.read.label_denied(label) {
+            return 0;
+        }
+        self.raw().count_nodes_by_label(label)
+    }
+
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
         self.raw().get_edge(id).filter(|e| self.edge_visible(e))
     }

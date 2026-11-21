@@ -1840,3 +1840,91 @@ fn test_union_column_count_mismatch() {
 }
 
 // ========== MATCH + CREATE tests ==========
+
+/// task187: 終点の方が絞り込めるパスは終点から辿る。行の集合は変わらない。
+#[test]
+fn path_matched_from_the_selective_end_gives_the_same_rows() {
+    let mut graph = Graph::new();
+    execute(&mut graph, "UNWIND range(1, 30) AS i CREATE (:P {i: i})").unwrap();
+    execute(&mut graph, "CREATE (:C {name: 'x'}), (:C {name: 'y'})").unwrap();
+    execute(
+        &mut graph,
+        "MATCH (p:P), (c:C {name: 'x'}) WHERE p.i <= 3 CREATE (p)-[:IN]->(c)",
+    )
+    .unwrap();
+    execute(
+        &mut graph,
+        "MATCH (p:P), (c:C {name: 'y'}) WHERE p.i > 28 CREATE (c)-[:HAS]->(p)",
+    )
+    .unwrap();
+
+    let names = |graph: &mut Graph, q: &str| {
+        let mut v: Vec<String> = execute(graph, q)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| {
+                r.columns
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        names(
+            &mut graph,
+            "MATCH (p:P)-[:IN]->(c:C {name: 'x'}) RETURN p.i"
+        ),
+        vec!["1", "2", "3"]
+    );
+    assert_eq!(
+        names(
+            &mut graph,
+            "MATCH (p:P)-[:IN]->(c:C) WHERE c.name = 'x' RETURN p.i, c.name"
+        ),
+        vec!["1,\"x\"", "2,\"x\"", "3,\"x\""]
+    );
+    // 逆向きの矢印・向きなしも同じ
+    assert_eq!(
+        names(
+            &mut graph,
+            "MATCH (p:P)<-[:HAS]-(c:C {name: 'y'}) RETURN p.i"
+        ),
+        vec!["29", "30"]
+    );
+    assert_eq!(
+        names(
+            &mut graph,
+            "MATCH (p:P)-[r]-(c:C {name: 'y'}) RETURN p.i, type(r)"
+        ),
+        vec!["29,\"HAS\"", "30,\"HAS\""]
+    );
+    // 2 ホップ（中間のノード・リレーションシップの変数も正しく束縛される）
+    execute(
+        &mut graph,
+        "MATCH (c:C {name: 'x'}) CREATE (c)-[:NEXT]->(:Z {k: 1})",
+    )
+    .unwrap();
+    assert_eq!(
+        names(
+            &mut graph,
+            "MATCH (p:P)-[a:IN]->(c:C)-[b:NEXT]->(z:Z {k: 1}) RETURN p.i, c.name, type(a), type(b)"
+        ),
+        vec![
+            "1,\"x\",\"IN\",\"NEXT\"",
+            "2,\"x\",\"IN\",\"NEXT\"",
+            "3,\"x\",\"IN\",\"NEXT\""
+        ]
+    );
+    // パス変数があるときは逆にしない（パスの向きが変わるため）
+    let rs = execute(
+        &mut graph,
+        "MATCH path = (p:P {i: 1})-[:IN]->(c:C {name: 'x'}) RETURN nodes(path)[0].i",
+    )
+    .unwrap();
+    assert_eq!(first_column(&rs), vec![Value::Int(1)]);
+}

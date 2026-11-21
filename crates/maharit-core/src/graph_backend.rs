@@ -45,6 +45,12 @@ pub trait GraphBackend: Send + Sync {
     /// `MATCH (n:Label)` のスキャン起点を該当ラベルのノードだけに絞るために使う。
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId>;
 
+    /// ラベルを持つノードの数。パターンをどちらの端から辿るかの見積もりに使う。
+    /// 既定の実装は `nodes_by_label` の件数（索引を持つ実装は数だけを返す）。
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        self.nodes_by_label(label).len()
+    }
+
     /// エッジを所有値として取得する（存在しない場合は `None`）。
     fn get_edge(&self, id: EdgeId) -> Option<Edge>;
 
@@ -179,6 +185,10 @@ impl GraphBackend for Graph {
 
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
         Graph::nodes_by_label(self, label)
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        Graph::count_nodes_by_label(self, label)
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
@@ -333,6 +343,10 @@ impl GraphBackend for ConcurrentGraph {
 
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
         ConcurrentGraph::nodes_by_label(self, label)
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        ConcurrentGraph::count_nodes_by_label(self, label)
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {

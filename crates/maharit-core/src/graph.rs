@@ -159,6 +159,11 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    /// ラベルを持つノードの数（ID を集めない）。
+    pub fn count_nodes_by_label(&self, label: &str) -> usize {
+        self.label_index.get(label).map_or(0, |set| set.len())
+    }
+
     /// ノードにラベルを追加し、索引も更新する。
     pub fn add_node_label(&mut self, id: NodeId, label: String) {
         let added = if let Some(Some(node)) = self.nodes.get_mut(id as usize) {
