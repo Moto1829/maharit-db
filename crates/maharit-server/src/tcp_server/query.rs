@@ -65,21 +65,9 @@ pub(super) async fn execute_streaming_query<S: AsyncWrite + Unpin>(
         }
     };
 
-    // Convert rows to HashMap<String, serde_json::Value> 型情報維持
-    let all_rows: Vec<HashMap<String, serde_json::Value>> = result
-        .rows
-        .into_iter()
-        .map(|row| {
-            result
-                .columns
-                .iter()
-                .zip(row.columns.iter())
-                .map(|(col, val)| (col.clone(), val.to_json()))
-                .collect()
-        })
-        .collect();
-
-    let total_rows = all_rows.len();
+    let total_rows = result.rows.len();
+    let columns = result.columns;
+    let mut rows = result.rows.into_iter();
     let stream_id = stats.next_stream_id();
 
     // Send StreamStart
@@ -96,13 +84,30 @@ pub(super) async fn execute_streaming_query<S: AsyncWrite + Unpin>(
         chunk_size
     };
 
-    for (chunk_index, chunk) in all_rows.chunks(chunk_size).enumerate() {
+    // Convert each chunk only when it is sent (no full copy of all rows).
+    let mut chunk_index = 0;
+    loop {
+        let chunk: Vec<HashMap<String, serde_json::Value>> = rows
+            .by_ref()
+            .take(chunk_size)
+            .map(|row| {
+                columns
+                    .iter()
+                    .zip(row.columns.iter())
+                    .map(|(col, val)| (col.clone(), val.to_json()))
+                    .collect()
+            })
+            .collect();
+        if chunk.is_empty() {
+            break;
+        }
         let chunk_response = Response::StreamChunk {
             stream_id,
             chunk_index,
-            rows: chunk.to_vec(),
+            rows: chunk,
         };
         send_response(socket, &chunk_response, write_timeout).await?;
+        chunk_index += 1;
     }
 
     // Send StreamEnd
@@ -152,6 +157,35 @@ where
     }
 }
 
+/// 実行結果を応答にする。
+pub(super) fn result_response(result: maharit_query::ResultSet, format: RowFormat) -> Response {
+    match format {
+        RowFormat::Map => {
+            let columns = result.columns;
+            let rows = result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    columns
+                        .iter()
+                        .zip(row.columns.iter())
+                        .map(|(col, val)| (col.clone(), val.to_json()))
+                        .collect()
+                })
+                .collect();
+            Response::Result { rows }
+        }
+        RowFormat::Array => Response::Table {
+            rows: result
+                .rows
+                .iter()
+                .map(|row| row.columns.iter().map(Value::to_json).collect())
+                .collect(),
+            columns: result.columns,
+        },
+    }
+}
+
 // ── Transaction-aware query execution ────────────────────────────────────────
 
 /// Execute a write query within a transaction: execute → record undo log → replicate.
@@ -166,6 +200,7 @@ pub(super) async fn execute_query_with_tx(
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
     policy: Option<AccessPolicy>,
+    format: RowFormat,
 ) -> Response {
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
         Ok(s) => s,
@@ -179,7 +214,10 @@ pub(super) async fn execute_query_with_tx(
     let is_write = !is_read_only(&stmt);
 
     if !is_write {
-        return execute_query(graph, query, params, managers, sinks, ast_cache, policy).await;
+        return execute_query(
+            graph, query, params, managers, sinks, ast_cache, policy, format,
+        )
+        .await;
     }
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
@@ -221,21 +259,7 @@ pub(super) async fn execute_query_with_tx(
     }
 
     match exec_result {
-        Ok(result) => {
-            let rows: Vec<HashMap<String, serde_json::Value>> = result
-                .rows
-                .into_iter()
-                .map(|row| {
-                    result
-                        .columns
-                        .iter()
-                        .zip(row.columns.iter())
-                        .map(|(col, val)| (col.clone(), val.to_json()))
-                        .collect()
-                })
-                .collect();
-            Response::Result { rows }
-        }
+        Ok(result) => result_response(result, format),
         Err(e) => Response::Error {
             message: format!("Execution error: {}", e),
         },
@@ -246,6 +270,7 @@ pub(super) async fn execute_query_with_tx(
 ///
 /// ConcurrentGraph has interior mutability via DashMap, so both read and write
 /// queries use `Executor::new_concurrent` without any async locking.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_query(
     graph: &Arc<ConcurrentGraph>,
     query: &str,
@@ -254,6 +279,7 @@ pub(super) async fn execute_query(
     sinks: WriteSinks<'_>,
     ast_cache: &Arc<Mutex<AstCache>>,
     policy: Option<AccessPolicy>,
+    format: RowFormat,
 ) -> Response {
     // Reuse a previously parsed AST for identical query text.
     let stmt = match ast_cache.lock().unwrap().get_or_parse(query) {
@@ -290,22 +316,7 @@ pub(super) async fn execute_query(
     }
 
     match exec_result {
-        Ok(result) => {
-            let rows: Vec<HashMap<String, serde_json::Value>> = result
-                .rows
-                .into_iter()
-                .map(|row| {
-                    result
-                        .columns
-                        .iter()
-                        .zip(row.columns.iter())
-                        .map(|(col, val)| (col.clone(), val.to_json()))
-                        .collect()
-                })
-                .collect();
-
-            Response::Result { rows }
-        }
+        Ok(result) => result_response(result, format),
         Err(e) => Response::Error {
             message: format!("Execution error: {}", e),
         },

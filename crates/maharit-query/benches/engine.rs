@@ -178,6 +178,16 @@ fn to_response_json(result: &ResultSet) -> Vec<u8> {
     serde_json::to_vec(&rows).unwrap()
 }
 
+/// `rowFormat: "array"` の応答（列名 1 回 + 値の配列、task191）。
+fn to_table_json(result: &ResultSet) -> Vec<u8> {
+    let rows: Vec<Vec<serde_json::Value>> = result
+        .rows
+        .iter()
+        .map(|row| row.columns.iter().map(|v| v.to_json()).collect())
+        .collect();
+    serde_json::to_vec(&serde_json::json!({"columns": result.columns, "rows": rows})).unwrap()
+}
+
 const PARSE_QUERIES: &[(&str, &str)] = &[
     (
         "point_lookup",
@@ -356,6 +366,10 @@ fn bench_read(c: &mut Criterion) {
         let result = fx.read(&parse(query), None);
         assert_eq!(result.rows.len(), PERSONS as usize);
         group.bench_function(name, |b| b.iter(|| to_response_json(black_box(&result))));
+        let table_name = name.replace("json_", "table_");
+        group.bench_function(&table_name, |b| {
+            b.iter(|| to_table_json(black_box(&result)))
+        });
     }
     group.finish();
 }

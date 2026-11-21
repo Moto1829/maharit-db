@@ -25,6 +25,7 @@ async fn integration_user_management_over_tcp() {
         params: HashMap::new(),
         tx_id: None,
         session_token: None,
+        row_format: Default::default(),
     };
 
     // CREATE USER (test's `SET PASSWORD .. SET ROLE '..'` grammar).
@@ -109,6 +110,7 @@ async fn integration_acl_over_tcp() {
             params: HashMap::new(),
             tx_id: None,
             session_token: Some(token.to_string()),
+            row_format: Default::default(),
         };
         send_recv(stream, &req).await
     }
@@ -589,6 +591,7 @@ async fn integration_property_index_persists_across_requests() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -599,6 +602,7 @@ async fn integration_property_index_persists_across_requests() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -613,6 +617,7 @@ async fn integration_property_index_persists_across_requests() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -636,6 +641,7 @@ async fn integration_repeated_query_uses_ast_cache_correctly() {
         params: HashMap::new(),
         tx_id: None,
         session_token: None,
+        row_format: Default::default(),
     };
 
     // First run against an empty graph.
@@ -654,6 +660,7 @@ async fn integration_repeated_query_uses_ast_cache_correctly() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -682,6 +689,7 @@ async fn integration_create_and_match_node() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -699,6 +707,7 @@ async fn integration_create_and_match_node() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -728,6 +737,7 @@ async fn integration_property_types() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -751,6 +761,7 @@ async fn integration_property_types() {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -771,6 +782,7 @@ async fn integration_property_types() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -801,6 +813,7 @@ async fn integration_edge_traversal() {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -820,6 +833,7 @@ async fn integration_edge_traversal() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -844,6 +858,7 @@ async fn integration_syntax_error_returns_error_response() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -884,6 +899,7 @@ async fn integration_delete_node() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -896,6 +912,7 @@ async fn integration_delete_node() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -913,6 +930,7 @@ async fn integration_delete_node() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -940,6 +958,7 @@ async fn test_concurrent_writes() {
                         params: HashMap::new(),
                         tx_id: None,
                         session_token: None,
+                        row_format: Default::default(),
                     },
                 )
                 .await;
@@ -964,6 +983,7 @@ async fn test_concurrent_writes() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -994,6 +1014,7 @@ async fn test_concurrent_read_write_mix() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1011,6 +1032,7 @@ async fn test_concurrent_read_write_mix() {
                     params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
+                    row_format: Default::default(),
                 },
             )
             .await;
@@ -1032,6 +1054,7 @@ async fn test_concurrent_read_write_mix() {
                     params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
+                    row_format: Default::default(),
                 },
             )
             .await;
@@ -1133,6 +1156,7 @@ async fn test_transaction_isolation() {
             params: HashMap::new(),
             tx_id: Some(tx_a),
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1149,6 +1173,7 @@ async fn test_transaction_isolation() {
             params: HashMap::new(),
             tx_id: Some(tx_b),
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1194,6 +1219,7 @@ async fn test_transaction_isolation() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1231,6 +1257,7 @@ async fn integration_pipeline_multiple_queries_single_connection() {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -1250,6 +1277,7 @@ async fn integration_pipeline_multiple_queries_single_connection() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1272,6 +1300,7 @@ async fn integration_pipeline_multiple_queries_single_connection() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -1282,4 +1311,59 @@ async fn integration_pipeline_multiple_queries_single_connection() {
         }
         other => panic!("expected Result, got {:?}", other),
     }
+}
+
+/// task191: `rowFormat: "array"` は列名 1 回 + 値の配列（`table`）で返す。既定は従来どおり `result`。
+#[tokio::test]
+async fn integration_row_format_array_returns_table() {
+    let addr = start_test_server().await;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    query(
+        &mut stream,
+        "CREATE (:P {name: 'a', age: 1}), (:P {name: 'b'})",
+    )
+    .await;
+
+    let resp = send_recv(
+        &mut stream,
+        &Request::Query {
+            query: "MATCH (n:P) RETURN n.name AS name, n.age AS age ORDER BY name".to_string(),
+            params: HashMap::new(),
+            tx_id: None,
+            session_token: None,
+            row_format: RowFormat::Array,
+        },
+    )
+    .await;
+    match resp {
+        Response::Table { columns, rows } => {
+            assert_eq!(columns, vec!["name", "age"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![serde_json::json!("a"), serde_json::json!(1)],
+                    vec![serde_json::json!("b"), serde_json::Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected a table, got {other:?}"),
+    }
+
+    // 指定しなければ従来の形式
+    let raw = serde_json::json!({"type": "query", "query": "MATCH (n:P {name: 'a'}) RETURN n.age"});
+    let json = serde_json::to_vec(&raw).unwrap();
+    stream
+        .write_all(&(json.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&json).await.unwrap();
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).await.unwrap();
+    let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut buf).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"type": "result", "rows": [{"n.age": 1}]})
+    );
 }

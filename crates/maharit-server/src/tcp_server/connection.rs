@@ -157,6 +157,7 @@ where
                     params,
                     tx_id,
                     session_token,
+                    row_format,
                 } => match check_session_user(config.require_auth, &auth, &session_token) {
                     Err(resp) => resp,
                     Ok((role, user)) => {
@@ -199,13 +200,14 @@ where
                                             sinks,
                                             &ast_cache,
                                             policy,
+                                            row_format,
                                         )
                                         .await
                                     }
                                     None => {
                                         execute_query(
                                             &graph, &query, params, &managers, sinks, &ast_cache,
-                                            policy,
+                                            policy, row_format,
                                         )
                                         .await
                                     }

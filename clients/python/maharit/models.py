@@ -155,3 +155,39 @@ class Edge:
             f"Edge(id={self.id}, type={self.type!r}, "
             f"{self.start_node_id}->{self.end_node_id}, {self.properties})"
         )
+
+
+class TableResult:
+    """Result of ``execute_table``: column names once, rows as lists of values.
+
+    Sent with ``rowFormat: "array"``, so large results are smaller than the
+    default format (which repeats every column name on every row).
+    """
+
+    def __init__(self, columns, rows) -> None:
+        self.columns = list(columns)
+        self.rows = rows
+
+    def __iter__(self):
+        return iter(self.rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int):
+        return self.rows[index]
+
+    def as_dicts(self):
+        """The rows as ``{column: value}`` dictionaries (the default format)."""
+        return [dict(zip(self.columns, row)) for row in self.rows]
+
+    def to_dataframe(self):
+        """Convert to a pandas DataFrame (requires pandas)."""
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for to_dataframe(). Install it with: pip install pandas"
+            ) from e
+        return pd.DataFrame(self.rows, columns=self.columns)
+

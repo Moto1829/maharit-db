@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
 from ._tls import SslOption, make_ssl_context
+from .models import TableResult
 from .exceptions import ConnectionError, MaharitError, QueryError, TransactionError
 
 
@@ -256,6 +257,25 @@ class AsyncClient:
         separately from the query text and never parsed as Cypher.
         """
         return await self._execute_query(query, params=params)
+
+    async def execute_table(
+        self, query: str, params: Optional[Dict[str, Any]] = None
+    ) -> TableResult:
+        """Execute a query and receive rows as lists in column order.
+
+        Uses ``rowFormat: "array"``: column names are sent once instead of on
+        every row, which makes large results smaller and faster to decode.
+        """
+        payload: dict = {"type": "query", "query": query, "rowFormat": "array"}
+        if params:
+            payload["params"] = params
+        await self._send(payload)
+        response = await self._recv()
+        if response.get("type") == "error":
+            raise QueryError(response.get("message", "Query failed"))
+        if response.get("type") != "table":
+            raise QueryError(f"Unexpected response type: {response.get('type')}")
+        return TableResult(response.get("columns", []), response.get("rows", []))
 
     async def query(
         self, query: str, params: Optional[Dict[str, Any]] = None

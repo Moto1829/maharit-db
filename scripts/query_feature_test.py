@@ -493,6 +493,20 @@ def test_unwind(client: MaharitClient):
     check("UNWIND + CREATE で 2 件作成された", len(rows) == 2, f"rows={len(rows)}")
 
 
+def test_row_format_array(client: MaharitClient):
+    section("rowFormat: array（列名 1 回 + 値の配列）")
+    run_query(client, "CREATE (:RowFmt {name: 'a', age: 1}), (:RowFmt {name: 'b'})")
+    resp = client.send({
+        "type": "query",
+        "query": "MATCH (n:RowFmt) RETURN n.name AS name, n.age AS age ORDER BY name",
+        "rowFormat": "array",
+    })
+    check("rowFormat array で table が返る", resp.get("type") == "table", str(resp))
+    check("table の columns", resp.get("columns") == ["name", "age"], str(resp))
+    check("table の rows", resp.get("rows") == [["a", 1], ["b", None]], str(resp))
+    run_query(client, "MATCH (n:RowFmt) DELETE n")
+
+
 def test_with_pipeline(client: MaharitClient):
     section("WITH（パイプライン）")
 
@@ -638,6 +652,7 @@ def main():
         test_merge(client)
         test_unwind(client)
         test_with_pipeline(client)
+        test_row_format_array(client)
         test_union(client)
         test_explain_profile(client)
     finally:

@@ -55,6 +55,7 @@ async fn query(stream: &mut TcpStream, q: &str) -> Response {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await
@@ -68,6 +69,7 @@ async fn tx_query(stream: &mut TcpStream, tx_id: u64, q: &str) -> Response {
             params: HashMap::new(),
             tx_id: Some(tx_id),
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await

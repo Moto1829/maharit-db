@@ -36,7 +36,7 @@ TCP ソケット（オプションで TLS）の上で、長さプレフィック
 
 | `type` | 説明 | フィールド |
 |--------|------|-----------|
-| `query` | クエリを実行し、結果をまとめて返す | `query`、`params`?、`txId`?、`sessionToken`? |
+| `query` | クエリを実行し、結果をまとめて返す | `query`、`params`?、`txId`?、`sessionToken`?、`rowFormat`?（`map` 既定 / `array`） |
 | `streamQuery` | クエリを実行し、結果を分割して返す | `query`、`params`?、`chunkSize`?（既定 100）、`txId`?、`sessionToken`? |
 | `login` | ログインしてセッショントークンを得る | `username`、`password` |
 | `begin` | トランザクションを開始する | `readOnly`?（既定 `false`）、`sessionToken`? |
@@ -54,6 +54,7 @@ TCP ソケット（オプションで TLS）の上で、長さプレフィック
 | `type` | 対応するリクエスト | フィールド |
 |--------|-------------------|-----------|
 | `result` | `query` | `rows` |
+| `table` | `query`（`rowFormat: "array"`） | `columns`、`rows` |
 | `streamStart` / `streamChunk` / `streamEnd` | `streamQuery` | 下記 |
 | `loggedIn` | `login` | `sessionToken`、`role`、`expiresAt` |
 | `transactionBegun` | `begin` | `txId` |
@@ -90,6 +91,29 @@ TCP ソケット（オプションで TLS）の上で、長さプレフィック
 - `rows` は行の配列で、各行は「列名 → 値」のオブジェクト
 - 値は JSON の型を保つ（文字列・数値・真偽値・`null`・配列・オブジェクト）。ノード、パス、日付・日時・期間は文字列で返る
 - 書き込みクエリは件数を返す（例: `{"created_nodes": 1, "created_edges": 0}`、`{"properties_set": 1}`）
+
+### 行を配列で受け取る（`rowFormat`）
+
+`"rowFormat": "array"` を付けると、列名を 1 回だけ送り、各行を値の配列（`columns` と同じ順）で返します。
+行ごとに列名を繰り返さないので、行の多い結果では応答が小さく、作るのも読むのも速くなります。
+付けない場合（`"map"`）は従来どおり `result` を返します。
+
+```json
+{"type": "query", "query": "MATCH (n:Person) RETURN n.name AS name, n.age AS age", "rowFormat": "array"}
+```
+
+```json
+{
+  "type": "table",
+  "columns": ["name", "age"],
+  "rows": [
+    ["Alice", 30],
+    ["Bob", null]
+  ]
+}
+```
+
+Rust クライアントは `query_table`、Python クライアントは `execute_table` で使えます。
 
 ### クエリパラメータ（`params`）
 

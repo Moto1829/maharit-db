@@ -3,10 +3,11 @@
 from .client import Client, QueryResult, Transaction
 from .async_client import AsyncClient, AsyncQueryResult, AsyncTransaction
 from .exceptions import MaharitError, ConnectionError, QueryError, TransactionError
-from .models import Edge, Node
+from .models import Edge, Node, TableResult
 from .pool import AsyncConnectionPool, ConnectionPool
 
 __all__ = [
+    "TableResult",
     "Client",
     "QueryResult",
     "Transaction",

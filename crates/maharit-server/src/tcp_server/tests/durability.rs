@@ -14,6 +14,7 @@ async fn test_durable_wal_survives_crash_across_checkpoint() {
         params: HashMap::new(),
         tx_id: None,
         session_token: None,
+        row_format: Default::default(),
     };
     for q in [
         "UNWIND range(1, 6) AS i CREATE (:N {i: i})",
@@ -110,6 +111,7 @@ async fn test_query_params_over_tcp() {
         params: serde_json::from_value(params).unwrap(),
         tx_id,
         session_token: None,
+        row_format: Default::default(),
     };
 
     // A value containing quotes is data, not query text.
@@ -188,6 +190,7 @@ async fn test_constraint_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -205,6 +208,7 @@ async fn test_constraint_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -222,6 +226,7 @@ async fn test_constraint_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -239,6 +244,7 @@ async fn test_constraint_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -267,6 +273,7 @@ async fn test_fulltext_index_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;
@@ -284,6 +291,7 @@ async fn test_fulltext_index_persists_across_queries() {
             params: HashMap::new(),
             tx_id: None,
             session_token: None,
+            row_format: Default::default(),
         },
     )
     .await;

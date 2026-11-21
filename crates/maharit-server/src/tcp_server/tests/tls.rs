@@ -19,6 +19,7 @@ async fn tls_server_serves_queries_and_rejects_plaintext() {
         params: HashMap::new(),
         tx_id: None,
         session_token: None,
+        row_format: Default::default(),
     };
     assert!(matches!(
         send_recv(&mut stream, &create).await,

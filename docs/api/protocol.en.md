@@ -37,7 +37,7 @@ Field names are case-sensitive. Optional fields may be omitted.
 
 | `type` | Description | Fields |
 |--------|------|-----------|
-| `query` | Run a query and return all results at once | `query`, `params`?, `txId`?, `sessionToken`? |
+| `query` | Run a query and return all results at once | `query`, `params`?, `txId`?, `sessionToken`?, `rowFormat`? (`map` default / `array`) |
 | `streamQuery` | Run a query and return the results in chunks | `query`, `params`?, `chunkSize`? (default 100), `txId`?, `sessionToken`? |
 | `login` | Log in and get a session token | `username`, `password` |
 | `begin` | Begin a transaction | `readOnly`? (default `false`), `sessionToken`? |
@@ -55,6 +55,7 @@ Field names are case-sensitive. Optional fields may be omitted.
 | `type` | In reply to | Fields |
 |--------|-------------------|-----------|
 | `result` | `query` | `rows` |
+| `table` | `query` (`rowFormat: "array"`) | `columns`, `rows` |
 | `streamStart` / `streamChunk` / `streamEnd` | `streamQuery` | See below |
 | `loggedIn` | `login` | `sessionToken`, `role`, `expiresAt` |
 | `transactionBegun` | `begin` | `txId` |
@@ -91,6 +92,29 @@ Field names are case-sensitive. Optional fields may be omitted.
 - `rows` is an array of rows; each row is an object mapping column names to values
 - Values keep their JSON types (string, number, boolean, `null`, array, object). Nodes, paths, dates, datetimes, and durations are returned as strings
 - Write queries return counts (for example `{"created_nodes": 1, "created_edges": 0}`, `{"properties_set": 1}`)
+
+### Receiving rows as arrays (`rowFormat`)
+
+With `"rowFormat": "array"` the column names are sent once and each row is an array of values (in the order of `columns`).
+Column names are not repeated on every row, so responses with many rows are smaller and faster to build and read.
+Without it (`"map"`) the server returns `result` as before.
+
+```json
+{"type": "query", "query": "MATCH (n:Person) RETURN n.name AS name, n.age AS age", "rowFormat": "array"}
+```
+
+```json
+{
+  "type": "table",
+  "columns": ["name", "age"],
+  "rows": [
+    ["Alice", 30],
+    ["Bob", null]
+  ]
+}
+```
+
+The Rust client offers this as `query_table` and the Python client as `execute_table`.
 
 ### Query parameters (`params`)
 

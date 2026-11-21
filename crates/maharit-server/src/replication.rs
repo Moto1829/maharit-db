@@ -2011,6 +2011,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2027,6 +2028,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2065,6 +2067,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2081,6 +2084,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2100,6 +2104,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2136,6 +2141,7 @@ mod tests {
                     params: HashMap::new(),
                     tx_id: None,
                     session_token: None,
+                    row_format: Default::default(),
                 },
             )
             .await;
@@ -2152,6 +2158,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2184,6 +2191,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2196,6 +2204,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;
@@ -2211,6 +2220,7 @@ mod tests {
                 params: HashMap::new(),
                 tx_id: None,
                 session_token: None,
+                row_format: Default::default(),
             },
         )
         .await;

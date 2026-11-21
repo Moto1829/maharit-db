@@ -258,6 +258,9 @@ enum Request {
         tx_id: Option<TxId>,
         #[serde(rename = "sessionToken", skip_serializing_if = "Option::is_none")]
         session_token: Option<String>,
+        /// `Some("array")` で行を値の配列（`table` 応答）で受け取る
+        #[serde(rename = "rowFormat", skip_serializing_if = "Option::is_none")]
+        row_format: Option<&'static str>,
     },
 
     #[serde(rename = "streamQuery")]
@@ -314,6 +317,12 @@ enum Response {
     #[serde(rename = "result")]
     Result {
         rows: Vec<HashMap<String, serde_json::Value>>,
+    },
+
+    #[serde(rename = "table")]
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
     },
 
     #[serde(rename = "error")]
@@ -474,6 +483,20 @@ impl<'a> StreamingResult<'a> {
             all_rows.extend(chunk);
         }
         Ok(all_rows)
+    }
+}
+
+/// Result of [`Client::query_table`]: column names once, rows as value arrays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+impl TableResult {
+    /// Index of a column by name.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c == name)
     }
 }
 
@@ -799,12 +822,34 @@ impl Client {
             params: params.clone(),
             tx_id,
             session_token: self.session_token.clone(),
+            row_format: None,
         };
 
         self.send_request(&request).await?;
 
         match self.receive_response().await? {
             Response::Result { rows } => Ok(QueryResult { rows }),
+            Response::Error { message } => Err(ClientError::Server(message)),
+            _ => Err(ClientError::Protocol(
+                "unexpected response type".to_string(),
+            )),
+        }
+    }
+
+    /// Execute a query and receive the rows as arrays of values in column order
+    /// (`rowFormat: "array"`). Column names are sent once instead of on every
+    /// row, so large results are smaller and faster than [`query`](Self::query).
+    pub async fn query_table(&mut self, query: &str, params: Params) -> Result<TableResult> {
+        let request = Request::Query {
+            query: query.to_string(),
+            params,
+            tx_id: None,
+            session_token: self.session_token.clone(),
+            row_format: Some("array"),
+        };
+        self.send_request(&request).await?;
+        match self.receive_response().await? {
+            Response::Table { columns, rows } => Ok(TableResult { columns, rows }),
             Response::Error { message } => Err(ClientError::Server(message)),
             _ => Err(ClientError::Protocol(
                 "unexpected response type".to_string(),
@@ -1458,6 +1503,7 @@ mod tests {
             params: Params::new(),
             tx_id: None,
             session_token: None,
+            row_format: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1473,6 +1519,7 @@ mod tests {
             params: Params::from([("name".to_string(), serde_json::json!("a\"b"))]),
             tx_id: None,
             session_token: None,
+            row_format: None,
         };
         let json: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(json["params"], serde_json::json!({"name": "a\"b"}));
@@ -1484,6 +1531,7 @@ mod tests {
             params: Params::new(),
             tx_id: None,
             session_token: None,
+            row_format: None,
         };
         assert!(!serde_json::to_string(&request).unwrap().contains("params"));
     }
@@ -1495,6 +1543,7 @@ mod tests {
             params: Params::new(),
             tx_id: Some(42),
             session_token: None,
+            row_format: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"query\""));
@@ -1792,6 +1841,7 @@ mod tests {
             params: Params::new(),
             tx_id: None,
             session_token: Some("abc-xyz".to_string()),
+            row_format: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"sessionToken\":\"abc-xyz\""));
@@ -1804,6 +1854,7 @@ mod tests {
             params: Params::new(),
             tx_id: None,
             session_token: None,
+            row_format: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         // skip_serializing_if により sessionToken はシリアライズされない

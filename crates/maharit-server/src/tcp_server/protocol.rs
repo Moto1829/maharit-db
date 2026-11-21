@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// 行の返し方（`Request::Query` の `rowFormat`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowFormat {
+    /// 各行を「列名 → 値」のオブジェクトにする（`result`）。既定
+    #[default]
+    Map,
+    /// 列名を 1 回だけ送り、各行を値の配列にする（`table`）
+    Array,
+}
+
+impl RowFormat {
+    pub fn is_map(&self) -> bool {
+        *self == RowFormat::Map
+    }
+}
+
 /// Request message from client
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -25,6 +42,13 @@ pub enum Request {
         /// Optional session token (required when server has `require_auth=true`)
         #[serde(rename = "sessionToken", default)]
         session_token: Option<String>,
+        /// How to return rows: `"map"` (default, `result`) or `"array"` (`table`).
+        #[serde(
+            rename = "rowFormat",
+            default,
+            skip_serializing_if = "RowFormat::is_map"
+        )]
+        row_format: RowFormat,
     },
 
     /// Execute a query with streaming results
@@ -139,6 +163,14 @@ pub enum Response {
     /// bool は JSON Boolean, null は JSON Null, リスト/マップは JSON Array/Object。
     Result {
         rows: Vec<HashMap<String, serde_json::Value>>,
+    },
+
+    /// クエリ結果（`rowFormat: "array"` のとき）。列名を 1 回だけ送り、各行は値の配列
+    /// （`columns` と同じ順）。行ごとに列名を繰り返さないので、`result` より小さく速い。
+    #[serde(rename = "table")]
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
     },
 
     /// Error response
