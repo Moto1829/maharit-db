@@ -81,6 +81,23 @@ RETURN n.name
 Precedence from highest to lowest: `NOT`, `AND`, `XOR`, `OR`.
 Comparisons (`=`, `<`, `IS NULL`, `STARTS WITH`, `IN` and so on) bind tighter than `NOT`, so `NOT n.age > 30` means `NOT (n.age > 30)`.
 
+## Null handling
+
+Comparisons and operations on a missing value (`null`) give `null` (unknown), and WHERE treats that as not holding, so the row is dropped.
+
+- `=` `<>` `<` `>` `<=` `>=`, `+` `-` `*` `/`, `STARTS WITH` and similar give `null` if either side is `null` (`null = null` is `null` too). Values of types that cannot be compared (`1 < 'a'`) also give `null`
+- `AND` / `OR` / `NOT` use three-valued logic: `false AND null` is `false`, `true OR null` is `true`, and other combinations with `null` are `null`
+- `x IN list` is `true` if an element matches. Otherwise it is `null` when `x` is `null` or the list contains `null`
+- Use `IS NULL` / `IS NOT NULL` to test for a missing value
+- `DISTINCT` and the grouping of aggregates treat `null`s as the same value
+
+```cypher
+// Nodes without age make n.age <> 30 null, so they are not returned
+MATCH (n:Person)
+WHERE n.age <> 30
+RETURN n.name
+```
+
 ## String predicates
 
 ```cypher

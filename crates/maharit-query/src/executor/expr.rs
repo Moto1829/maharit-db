@@ -411,8 +411,8 @@ impl<'a> Executor<'a> {
             let condition_value = self.evaluate_expression(&when_clause.condition, bindings)?;
 
             let matches = if let Some(ref op_val) = operand_value {
-                // Simple CASE: compare operand with condition value
-                self.values_equal(op_val, &condition_value)
+                // Simple CASE: `operand = value` が true のとき（null は一致しない）
+                self.cypher_equals(op_val, &condition_value) == Some(true)
             } else {
                 // Searched CASE: condition should evaluate to boolean
                 matches!(condition_value, Value::Bool(true))
@@ -437,20 +437,30 @@ impl<'a> Executor<'a> {
         op: BinaryOp,
         right: &Value,
     ) -> Result<Value, ExecuteError> {
+        // null を含む演算は null（AND / OR / XOR / IN は三値論理で個別に扱う）
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
+            match op {
+                BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::In => {}
+                _ => return Ok(Value::Null),
+            }
+        }
         match op {
-            BinaryOp::Eq => Ok(Value::Bool(self.values_equal(left, right))),
-            BinaryOp::Neq => Ok(Value::Bool(!self.values_equal(left, right))),
+            BinaryOp::Eq => Ok(bool_or_null(self.cypher_equals(left, right))),
+            BinaryOp::Neq => Ok(bool_or_null(self.cypher_equals(left, right).map(|b| !b))),
             BinaryOp::Lt => self.compare_values(left, right, |ord| ord.is_lt()),
             BinaryOp::Gt => self.compare_values(left, right, |ord| ord.is_gt()),
             BinaryOp::Lte => self.compare_values(left, right, |ord| ord.is_le()),
             BinaryOp::Gte => self.compare_values(left, right, |ord| ord.is_ge()),
-            BinaryOp::And => match (left, right) {
-                (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
-                _ => Err(ExecuteError::TypeError("AND requires booleans".to_string())),
+            // Kleene の三値論理: false AND null = false、true OR null = true、他の null 混じりは null
+            BinaryOp::And => match (truth(left, "AND")?, truth(right, "AND")?) {
+                (Some(false), _) | (_, Some(false)) => Ok(Value::Bool(false)),
+                (Some(true), Some(true)) => Ok(Value::Bool(true)),
+                _ => Ok(Value::Null),
             },
-            BinaryOp::Or => match (left, right) {
-                (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
-                _ => Err(ExecuteError::TypeError("OR requires booleans".to_string())),
+            BinaryOp::Or => match (truth(left, "OR")?, truth(right, "OR")?) {
+                (Some(true), _) | (_, Some(true)) => Ok(Value::Bool(true)),
+                (Some(false), Some(false)) => Ok(Value::Bool(false)),
+                _ => Ok(Value::Null),
             },
             BinaryOp::Xor => match (left, right) {
                 (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a ^ b)),
@@ -623,16 +633,69 @@ impl<'a> Executor<'a> {
                     "ENDS WITH requires string operands".to_string(),
                 )),
             },
+            // 一致があれば true。無くて、左辺が null かリストに比べられない要素（null）があれば null
             BinaryOp::In => match right {
-                Value::List(items) => Ok(Value::Bool(
-                    items.iter().any(|item| self.values_equal(left, item)),
-                )),
+                Value::List(items) if items.is_empty() => Ok(Value::Bool(false)),
+                Value::List(items) => {
+                    let mut unknown = false;
+                    for item in items {
+                        match self.cypher_equals(left, item) {
+                            Some(true) => return Ok(Value::Bool(true)),
+                            Some(false) => {}
+                            None => unknown = true,
+                        }
+                    }
+                    Ok(if unknown {
+                        Value::Null
+                    } else {
+                        Value::Bool(false)
+                    })
+                }
                 Value::Null => Ok(Value::Null),
                 _ => Ok(Value::Bool(false)),
             },
         }
     }
 
+    /// `=` の意味での比較。どちらかが null（リスト・マップの中の null を含む）で
+    /// 結果が決まらなければ `None`（null）。
+    pub(super) fn cypher_equals(&self, left: &Value, right: &Value) -> Option<bool> {
+        match (left, right) {
+            (Value::Null, _) | (_, Value::Null) => None,
+            (Value::List(a), Value::List(b)) => {
+                if a.len() != b.len() {
+                    return Some(false);
+                }
+                let mut unknown = false;
+                for (x, y) in a.iter().zip(b) {
+                    match self.cypher_equals(x, y) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                if a.len() != b.len() || a.keys().any(|k| !b.contains_key(k)) {
+                    return Some(false);
+                }
+                let mut unknown = false;
+                for (k, x) in a {
+                    match self.cypher_equals(x, &b[k]) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            _ => Some(self.values_equal(left, right)),
+        }
+    }
+
+    /// 同じ値か（null 同士も同じとみなす）。DISTINCT・グルーピングなど、値を区別するとき用。
+    /// `=` の評価には [`Self::cypher_equals`] を使う。
     pub(super) fn values_equal(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Null, Value::Null) => true,
@@ -643,7 +706,6 @@ impl<'a> Executor<'a> {
                 ((*a as f64) - b).abs() < f64::EPSILON
             }
             (Value::String(a), Value::String(b)) => a == b,
-            (Value::Node(a), Value::Node(b)) => a == b,
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::DateTime(a), Value::DateTime(b)) => a == b,
             (
@@ -661,6 +723,26 @@ impl<'a> Executor<'a> {
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.values_equal(x, y))
             }
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(k, x)| b.get(k).is_some_and(|y| self.values_equal(x, y)))
+            }
+            (Value::Edge(a), Value::Edge(b)) => a == b,
+            (
+                Value::Node(a) | Value::NodeData { id: a, .. },
+                Value::Node(b) | Value::NodeData { id: b, .. },
+            ) => a == b,
+            (
+                Value::Path {
+                    nodes: na,
+                    edges: ea,
+                },
+                Value::Path {
+                    nodes: nb,
+                    edges: eb,
+                },
+            ) => na == nb && ea == eb,
             _ => false,
         }
     }
@@ -688,7 +770,8 @@ impl<'a> Executor<'a> {
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Date(a), Value::Date(b)) => a.cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
-            _ => return Err(ExecuteError::TypeError("cannot compare values".to_string())),
+            // 比べられない組み合わせ（null を含む、型が違うなど）は null
+            _ => return Ok(Value::Null),
         };
 
         Ok(Value::Bool(pred(ordering)))
@@ -724,9 +807,11 @@ impl<'a> Executor<'a> {
         match op {
             UnaryOp::Not => match val {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
+                Value::Null => Ok(Value::Null),
                 _ => Err(ExecuteError::TypeError("NOT requires boolean".to_string())),
             },
             UnaryOp::Neg => match val {
+                Value::Null => Ok(Value::Null),
                 Value::Int(n) => n
                     .checked_neg()
                     .map(Value::Int)
@@ -739,6 +824,7 @@ impl<'a> Executor<'a> {
             UnaryOp::IsNull => Ok(Value::Bool(matches!(val, Value::Null))),
             UnaryOp::IsNotNull => Ok(Value::Bool(!matches!(val, Value::Null))),
             UnaryOp::IsNormalized => match val {
+                Value::Null => Ok(Value::Null),
                 Value::String(s) => {
                     use unicode_normalization::UnicodeNormalization;
                     let nfc: String = s.nfc().collect();
@@ -825,4 +911,17 @@ impl<'a> Executor<'a> {
             .filter(|s| !s.is_empty())
             .any(|token| levenshtein_distance(token, &term_lower) <= max_distance)
     }
+}
+
+/// 論理演算の引数を真偽値（null は `None`）として読む。
+fn truth(value: &Value, op: &str) -> Result<Option<bool>, ExecuteError> {
+    match value {
+        Value::Bool(b) => Ok(Some(*b)),
+        Value::Null => Ok(None),
+        _ => Err(ExecuteError::TypeError(format!("{op} requires booleans"))),
+    }
+}
+
+fn bool_or_null(value: Option<bool>) -> Value {
+    value.map_or(Value::Null, Value::Bool)
 }

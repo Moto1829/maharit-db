@@ -875,7 +875,7 @@ impl<'a> Executor<'a> {
             (PropertyValue::String(a), Value::String(e)) => a == e,
             // リスト・日付など: 値に直して比べる
             (PropertyValue::List(_), Value::List(_)) => {
-                self.values_equal(&Value::from(actual), expected)
+                self.cypher_equals(&Value::from(actual), expected) == Some(true)
             }
             _ => false,
         }

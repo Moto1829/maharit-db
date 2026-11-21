@@ -80,6 +80,23 @@ RETURN n.name
 優先順位は高い順に `NOT`、`AND`、`XOR`、`OR` です。
 比較（`=`、`<`、`IS NULL`、`STARTS WITH`、`IN` など）は `NOT` より強く結び付くので、`NOT n.age > 30` は `NOT (n.age > 30)` と同じ意味になります。
 
+## null の扱い
+
+値が無い（`null`）ときの比較や演算の結果は `null`（不明）になり、WHERE では成り立たないものとして行が除かれます。
+
+- `=` `<>` `<` `>` `<=` `>=`、`+` `-` `*` `/`、`STARTS WITH` などは、どちらかが `null` なら `null`（`null = null` も `null`）。型が違って比べられないとき（`1 < 'a'`）も `null`
+- `AND` / `OR` / `NOT` は三値論理です。`false AND null` は `false`、`true OR null` は `true`、それ以外の `null` を含む組み合わせは `null`
+- `x IN list` は一致する要素があれば `true`。無くて、`x` が `null` かリストに `null` があれば `null`
+- 値が無いことを確かめるには `IS NULL` / `IS NOT NULL` を使います
+- `DISTINCT` と集約のグループ分けでは、`null` 同士を同じ値として扱います
+
+```cypher
+// age の無いノードは n.age <> 30 が null になり、結果に含まれない
+MATCH (n:Person)
+WHERE n.age <> 30
+RETURN n.name
+```
+
 ## 文字列述語
 
 ```cypher

@@ -455,6 +455,65 @@ fn cases() -> Vec<Case> {
             Any,
             [["Bob"]]
         ),
+        // ── null and three-valued logic (bug/177) ─────────────────────────
+        case!(
+            "MATCH (n) WHERE n.name = 'Acme' OR n.age >= 30 RETURN n.name",
+            Any,
+            [["Acme"], ["Alice"], ["Carol"]]
+        ),
+        case!(
+            "MATCH (n) WHERE n.age <> 30 RETURN n.name",
+            Any,
+            [["Bob"], ["Carol"]]
+        ),
+        case!(
+            "MATCH (n) WHERE n.age IN [30, null] RETURN n.name",
+            Any,
+            [["Alice"]]
+        ),
+        case!("MATCH (n) WHERE n.age = null RETURN n.name", Any, []),
+        case!(
+            "MATCH (n) RETURN n.name, n.age > 28 AS old",
+            Any,
+            [["Acme", null], ["Alice", true], ["Bob", false], ["Carol", true]]
+        ),
+        case!(
+            "MATCH (n) RETURN n.name, n.age + 1 AS next",
+            Any,
+            [["Acme", null], ["Alice", 31], ["Bob", 26], ["Carol", 36]]
+        ),
+        case!("RETURN null = null AS x", Any, [[null]]),
+        case!("RETURN null <> 1 AS x", Any, [[null]]),
+        case!("RETURN 1 + null AS x", Any, [[null]]),
+        case!("RETURN 'a' + null AS x", Any, [[null]]),
+        case!("RETURN true OR null AS x", Any, [[true]]),
+        case!("RETURN false OR null AS x", Any, [[null]]),
+        case!("RETURN false AND null AS x", Any, [[false]]),
+        case!("RETURN true AND null AS x", Any, [[null]]),
+        case!("RETURN NOT null AS x", Any, [[null]]),
+        case!("RETURN null IN [1, 2] AS x", Any, [[null]]),
+        case!("RETURN null IN [] AS x", Any, [[false]]),
+        case!("RETURN 3 IN [1, null] AS x", Any, [[null]]),
+        case!("RETURN 1 IN [1, null] AS x", Any, [[true]]),
+        case!("RETURN [1, null] = [1, null] AS x", Any, [[null]]),
+        case!("RETURN [1, null] = [2, null] AS x", Any, [[false]]),
+        case!("RETURN null STARTS WITH 'a' AS x", Any, [[null]]),
+        case!("RETURN 1 < 'a' AS x", Any, [[null]]),
+        case!(
+            "RETURN CASE null WHEN null THEN 'matched' ELSE 'no' END AS x",
+            Any,
+            [["no"]]
+        ),
+        case!(
+            "UNWIND [null, null, 1] AS x RETURN DISTINCT x",
+            Any,
+            [[null], [1]]
+        ),
+        case!(
+            "UNWIND [null, null, 1] AS x RETURN x, count(*) AS c",
+            Any,
+            [[null, 2], [1, 1]]
+        ),
         case!(
             "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'P' RETURN label",
             Any,
