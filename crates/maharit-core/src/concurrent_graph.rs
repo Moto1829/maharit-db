@@ -31,7 +31,6 @@
 //! assert_eq!(g.edge_count(), 1);
 //! ```
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,22 +38,23 @@ use dashmap::DashMap;
 
 use crate::GraphError;
 use crate::graph::{Edge, EdgeEnds, EdgeId, Node, NodeId};
+use crate::id_hash::{IdBuildHasher, IdMap, IdSet};
 use crate::property::PropertyValue;
 
 /// A lock-free, concurrent graph backed by [`DashMap`].
 ///
 /// NodeIds and EdgeIds are assigned monotonically and never reused.
 pub struct ConcurrentGraph {
-    nodes: Arc<DashMap<NodeId, Node>>,
-    edges: Arc<DashMap<EdgeId, Edge>>,
+    nodes: Arc<DashMap<NodeId, Node, IdBuildHasher>>,
+    edges: Arc<DashMap<EdgeId, Edge, IdBuildHasher>>,
     /// Outgoing edges per node, grouped by type (edge id → target node).
-    outgoing: Arc<DashMap<NodeId, Adjacency>>,
+    outgoing: Arc<DashMap<NodeId, Adjacency, IdBuildHasher>>,
     /// Incoming edges per node, grouped by type (edge id → source node).
-    incoming: Arc<DashMap<NodeId, Adjacency>>,
+    incoming: Arc<DashMap<NodeId, Adjacency, IdBuildHasher>>,
     /// Label → set of NodeIds carrying that label. Lets `MATCH (n:Label)`
     /// enumerate only matching nodes instead of scanning every node.
     /// Maintained on create/delete/label changes; rebuilt from creates on load.
-    label_index: Arc<DashMap<String, HashSet<NodeId>>>,
+    label_index: Arc<DashMap<String, IdSet<NodeId>>>,
     /// Relationship type names shared by every node's adjacency, so a node
     /// holds a reference count instead of its own copy of each name.
     edge_types: Arc<DashMap<String, Arc<str>>>,
@@ -72,10 +72,10 @@ impl ConcurrentGraph {
     /// Create an empty concurrent graph.
     pub fn new() -> Self {
         Self {
-            nodes: Arc::new(DashMap::new()),
-            edges: Arc::new(DashMap::new()),
-            outgoing: Arc::new(DashMap::new()),
-            incoming: Arc::new(DashMap::new()),
+            nodes: Arc::new(DashMap::with_hasher(IdBuildHasher::default())),
+            edges: Arc::new(DashMap::with_hasher(IdBuildHasher::default())),
+            outgoing: Arc::new(DashMap::with_hasher(IdBuildHasher::default())),
+            incoming: Arc::new(DashMap::with_hasher(IdBuildHasher::default())),
             label_index: Arc::new(DashMap::new()),
             edge_types: Arc::new(DashMap::new()),
             next_node_id: AtomicU64::new(0),
@@ -522,7 +522,7 @@ impl ConcurrentGraph {
 /// relationship types, so a small `Vec` is searched linearly.
 #[derive(Debug, Default)]
 struct Adjacency {
-    by_type: Vec<(Arc<str>, HashMap<EdgeId, NodeId>)>,
+    by_type: Vec<(Arc<str>, IdMap<EdgeId, NodeId>)>,
 }
 
 impl Adjacency {
@@ -533,7 +533,7 @@ impl Adjacency {
             }
             None => self
                 .by_type
-                .push((label.clone(), HashMap::from([(id, other)]))),
+                .push((label.clone(), IdMap::from_iter([(id, other)]))),
         }
     }
 

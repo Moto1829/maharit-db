@@ -4,6 +4,7 @@ pub mod constraint;
 pub mod fulltext;
 mod graph;
 pub mod graph_backend;
+pub mod id_hash;
 mod index;
 mod property;
 mod property_index;
