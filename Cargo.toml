@@ -75,7 +75,7 @@ axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "trace", "cors"] }
 tower-cookies = "0.11"
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 
 # 全クレート共通の lint（各クレートの `[lints] workspace = true` で有効になる）。
 # 既存の違反は直してから足す。理由があって残すものは `#[expect(..., reason = "…")]` を付ける。
