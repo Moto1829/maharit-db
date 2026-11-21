@@ -184,11 +184,10 @@ impl<'a> Executor<'a> {
         match item {
             ReturnItem::Aggregate(agg) => match agg {
                 AggregateFunction::Count(inner) => {
-                    if inner.is_none() {
+                    let Some(inner) = inner.as_ref() else {
                         // COUNT(*)
                         return Ok(Value::Int(bindings_list.len() as i64));
-                    }
-                    let inner = inner.as_ref().unwrap();
+                    };
                     // Fast path: bound Node/Edge variables are always non-null in MATCH results
                     if let ReturnItem::Variable(var) = inner.as_ref() {
                         let is_always_bound = bindings_list

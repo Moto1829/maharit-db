@@ -1,3 +1,7 @@
+// テスト以外で unwrap を使わない（clippy.toml の allow-unwrap-in-tests でテストは除外）。
+// 入力しだいで panic する箇所を作らないため。
+#![deny(clippy::unwrap_used)]
+
 pub mod acl;
 pub mod ast;
 pub mod cache;

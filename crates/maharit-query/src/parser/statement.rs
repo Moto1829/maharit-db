@@ -332,7 +332,7 @@ impl Parser {
                 patterns,
                 where_clause: first_segment.where_clause,
                 set_clause,
-                delete_clause: delete_clause.unwrap(),
+                delete_clause: delete_clause.ok_or_else(|| self.unexpected_token("DELETE"))?,
             }));
         }
 

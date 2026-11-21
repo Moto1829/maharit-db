@@ -234,21 +234,22 @@ impl Parser {
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<Token, ParseError> {
-        if self.check(kind.clone()) {
-            Ok(self.advance().unwrap())
-        } else {
-            Err(self.unexpected_token(&format!("{}", kind)))
+        match self.peek() {
+            Some(t) if std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind) => {
+                let token = t.clone();
+                self.pos += 1;
+                Ok(token)
+            }
+            _ => Err(self.unexpected_token(&format!("{}", kind))),
         }
     }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
         match self.peek_kind() {
-            Some(TokenKind::Ident(_)) => {
-                if let TokenKind::Ident(s) = self.advance().unwrap().kind {
-                    Ok(s)
-                } else {
-                    unreachable!()
-                }
+            Some(TokenKind::Ident(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
             }
             _ => Err(self.unexpected_token("identifier")),
         }
@@ -256,12 +257,10 @@ impl Parser {
 
     fn expect_string(&mut self) -> Result<String, ParseError> {
         match self.peek_kind() {
-            Some(TokenKind::String(_)) => {
-                if let TokenKind::String(s) = self.advance().unwrap().kind {
-                    Ok(s)
-                } else {
-                    unreachable!()
-                }
+            Some(TokenKind::String(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
             }
             _ => Err(self.unexpected_token("string literal")),
         }

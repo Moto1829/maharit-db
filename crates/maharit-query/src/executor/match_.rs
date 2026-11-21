@@ -677,7 +677,9 @@ impl<'a> Executor<'a> {
         let mut done = Vec::new();
         let mut stack = vec![(vec![end], Vec::new())];
         while let Some((mut nodes, mut edges)) = stack.pop() {
-            let head = *nodes.last().unwrap();
+            let Some(&head) = nodes.last() else {
+                continue;
+            };
             if head == start {
                 nodes.reverse();
                 edges.reverse();

@@ -946,12 +946,10 @@ impl Parser {
                 let lit = self.parse_literal()?;
                 Ok(Expression::Literal(lit))
             }
-            Some(TokenKind::Parameter(_)) => {
-                if let TokenKind::Parameter(name) = self.advance().unwrap().kind {
-                    Ok(Expression::Parameter(name))
-                } else {
-                    unreachable!()
-                }
+            Some(TokenKind::Parameter(name)) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Expression::Parameter(name))
             }
             Some(_) => Err(self.unexpected_token("expression")),
             None => Err(ParseError::UnexpectedEof),

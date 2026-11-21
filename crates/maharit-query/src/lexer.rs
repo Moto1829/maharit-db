@@ -622,7 +622,10 @@ impl<'a> Lexer<'a> {
     fn read_string(&mut self) -> Result<TokenKind, LexerError> {
         let line = self.line;
         let column = self.column;
-        let quote = self.advance().unwrap(); // consume opening quote
+        // consume opening quote
+        let Some(quote) = self.advance() else {
+            return Err(LexerError::UnterminatedString(line, column));
+        };
         let mut value = String::new();
 
         loop {
