@@ -291,8 +291,20 @@ async fn run_seed(seed: u64, clients: u64, ops: usize) -> Result<(), String> {
             "leader property index disagrees with graph: {idx:?}"
         ));
     }
-    if repl.get_follower_count() != 1 {
-        problems.push("follower was disconnected".to_string());
+    // On a slow machine the leader may drop a follower whose WAL queue stays
+    // full (WAL_SEND_TIMEOUT) and the follower then reconnects and resyncs from
+    // a snapshot. That is the intended behaviour, so only fail if it is not
+    // connected again within a few seconds (bug/202).
+    let mut followers = repl.get_follower_count();
+    for _ in 0..100 {
+        if followers == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        followers = repl.get_follower_count();
+    }
+    if followers != 1 {
+        problems.push(format!("expected 1 connected follower, found {followers}"));
     }
 
     // Guard against a vacuous pass (e.g. every statement failing to parse).

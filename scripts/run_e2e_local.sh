@@ -86,6 +86,10 @@ for i in $(seq 1 "$REPLICATION_RUNS"); do
     if ! bash scripts/start_replication_local.sh --binary "$BINARY" > "$LOG_DIR/cluster_$i.log" 2>&1; then
         echo "  ✗ クラスター起動失敗（$LOG_DIR/cluster_$i.log）"
         FAILED+=("cluster_start_$i")
+        for n in leader follower1 follower2; do
+            cp "/tmp/maharit_$n.log" "$LOG_DIR/${n}_$i.log" 2>/dev/null || true
+        done
+        bash scripts/stop_replication_local.sh > /dev/null 2>&1
         continue
     fi
     run "replication_test_$i" python3 scripts/replication_test.py

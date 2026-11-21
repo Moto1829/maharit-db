@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use maharit_core::{ConcurrentGraph, Graph};
@@ -193,6 +193,23 @@ pub struct FollowerState {
     pub last_heartbeat: Instant,
     /// Whether the follower connection is considered healthy
     pub is_alive: bool,
+    /// Identifies the connection that registered this entry. A follower that
+    /// reconnects replaces the entry; the old connection's cleanup must then
+    /// leave the new entry alone (bug/202).
+    pub connection_id: u64,
+}
+
+/// Source of [`FollowerState::connection_id`].
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Recount the alive followers after changing `followers` (call with the write
+/// lock held), so [`LeaderReplicationManager::get_follower_count`] never has to
+/// take the lock.
+fn store_alive_count(followers: &HashMap<String, FollowerState>, alive: &AtomicUsize) {
+    alive.store(
+        followers.values().filter(|f| f.is_alive).count(),
+        Ordering::SeqCst,
+    );
 }
 
 /// Replication statistics snapshot
@@ -281,6 +298,9 @@ pub struct LeaderReplicationManager {
     lsn: Arc<AtomicU64>,
     /// Map of follower_id -> state for every connected follower
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
+    /// Number of alive entries in `followers`, kept up to date by the
+    /// connection handlers.
+    alive_followers: Arc<AtomicUsize>,
     /// Set to `true` to request an orderly shutdown
     shutdown: Arc<AtomicBool>,
     /// Per-follower WAL queues (one bounded channel per authenticated
@@ -305,6 +325,7 @@ impl LeaderReplicationManager {
             config,
             lsn: Arc::new(AtomicU64::new(0)),
             followers: Arc::new(RwLock::new(HashMap::new())),
+            alive_followers: Arc::new(AtomicUsize::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: None,
@@ -319,6 +340,7 @@ impl LeaderReplicationManager {
             config,
             lsn: Arc::new(AtomicU64::new(0)),
             followers: Arc::new(RwLock::new(HashMap::new())),
+            alive_followers: Arc::new(AtomicUsize::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
             wal_subscribers: Arc::new(AsyncMutex::new(Vec::new())),
             graph: Some(graph),
@@ -378,11 +400,10 @@ impl LeaderReplicationManager {
 
     /// Return the number of followers currently tracked as alive.
     pub fn get_follower_count(&self) -> usize {
-        // Try a non-blocking read; fall back to 0 if the lock is contended.
-        match self.followers.try_read() {
-            Ok(guard) => guard.values().filter(|f| f.is_alive).count(),
-            Err(_) => 0,
-        }
+        // Not computed from `followers`: its lock is taken for every ACK, and
+        // reporting 0 while it was contended made connected followers look
+        // disconnected (bug/202).
+        self.alive_followers.load(Ordering::SeqCst)
     }
 
     /// Return a statistics snapshot for this node.
@@ -419,6 +440,7 @@ impl LeaderReplicationManager {
         let config = self.config.clone();
         let lsn = Arc::clone(&self.lsn);
         let followers = Arc::clone(&self.followers);
+        let alive_followers = Arc::clone(&self.alive_followers);
         let shutdown = Arc::clone(&self.shutdown);
         let wal_subscribers = Arc::clone(&self.wal_subscribers);
         let graph = self.graph.clone();
@@ -439,6 +461,7 @@ impl LeaderReplicationManager {
                         let config2 = config.clone();
                         let lsn2 = Arc::clone(&lsn);
                         let followers2 = Arc::clone(&followers);
+                        let alive_followers2 = Arc::clone(&alive_followers);
                         let shutdown2 = Arc::clone(&shutdown);
                         let wal_subscribers2 = Arc::clone(&wal_subscribers);
                         let graph2 = graph.clone();
@@ -450,6 +473,7 @@ impl LeaderReplicationManager {
                                 config: config2,
                                 lsn: lsn2,
                                 followers: followers2,
+                                alive_followers: alive_followers2,
                                 shutdown: shutdown2,
                                 wal_subscribers: wal_subscribers2,
                                 graph: graph2,
@@ -599,6 +623,7 @@ struct LeaderConnection {
     config: ReplicationConfig,
     lsn: Arc<AtomicU64>,
     followers: Arc<RwLock<HashMap<String, FollowerState>>>,
+    alive_followers: Arc<AtomicUsize>,
     shutdown: Arc<AtomicBool>,
     wal_subscribers: WalSubscribers,
     graph: Option<Arc<RwLock<Graph>>>,
@@ -617,6 +642,7 @@ where
         config,
         lsn,
         followers,
+        alive_followers,
         shutdown,
         wal_subscribers,
         graph,
@@ -714,6 +740,7 @@ where
     }
 
     // Register the follower.
+    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::SeqCst);
     {
         let mut guard = followers.write().await;
         guard.insert(
@@ -723,8 +750,10 @@ where
                 last_lsn: follower_lsn,
                 last_heartbeat: Instant::now(),
                 is_alive: true,
+                connection_id,
             },
         );
+        store_alive_count(&guard, &alive_followers);
     }
 
     let heartbeat_interval = Duration::from_secs(config.heartbeat_interval_secs);
@@ -828,9 +857,13 @@ where
     // Mark the follower as disconnected.
     {
         let mut guard = followers.write().await;
-        if let Some(state) = guard.get_mut(&follower_id) {
+        // Leave the entry alone if the follower already reconnected.
+        if let Some(state) = guard.get_mut(&follower_id)
+            && state.connection_id == connection_id
+        {
             state.is_alive = false;
         }
+        store_alive_count(&guard, &alive_followers);
     }
 
     Ok(())
@@ -2349,6 +2382,61 @@ mod tests {
             1,
             "follower must stay connected"
         );
+    }
+
+    /// The follower count must not drop to 0 while the follower table is
+    /// locked (e.g. while an ACK is being recorded), nor when a follower
+    /// reconnects before its old connection is cleaned up (bug/202).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_follower_count_survives_lock_and_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leader_addr = listener.local_addr().unwrap();
+        let leader = LeaderReplicationManager::new(ReplicationConfig::default());
+        leader.start_with_listener(listener).await.unwrap();
+
+        let connect = || async {
+            let mut stream = TcpStream::connect(leader_addr).await.unwrap();
+            send_message(
+                &mut stream,
+                &ReplicationMessage::Handshake {
+                    follower_id: "f-same".to_string(),
+                    current_lsn: 0,
+                    auth_token: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                recv_message(&mut stream).await,
+                Ok(ReplicationMessage::HandshakeAck { .. })
+            ));
+            stream
+        };
+        let wait_for = |want: usize| {
+            let leader = &leader;
+            async move {
+                for _ in 0..100 {
+                    if leader.get_follower_count() == want {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                panic!("follower count stayed at {}", leader.get_follower_count());
+            }
+        };
+
+        let old = connect().await;
+        wait_for(1).await;
+        {
+            let _held = leader.followers.write().await;
+            assert_eq!(leader.get_follower_count(), 1);
+        }
+
+        // Same follower ID reconnects, then the old connection goes away.
+        let _new = connect().await;
+        drop(old);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(leader.get_follower_count(), 1);
     }
 
     /// A burst of WAL entries must all reach a real follower. The leader used to

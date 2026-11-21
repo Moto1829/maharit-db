@@ -55,6 +55,19 @@ if [[ -f "$PIDFILE" ]]; then
     sleep 1
 fi
 
+# ── ポートが空いているか ──────────────────────────────────────────────────────
+# 前のクラスターがまだ終わっていないと、起動に失敗するか、古いリーダーに繋がってしまう。
+for port in 7687 7688 7689 7690; do
+    for _ in $(seq 1 30); do
+        python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $port), 0.5)" 2>/dev/null || break
+        sleep 0.5
+    done
+    if python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $port), 0.5)" 2>/dev/null; then
+        echo "エラー: port $port が使われています（前のクラスターや他のサーバーを止めてください）"
+        exit 1
+    fi
+done
+
 # ── データファイルをリセット ───────────────────────────────────────────────────
 rm -f /tmp/maharit_leader.db /tmp/maharit_follower1.db /tmp/maharit_follower2.db /tmp/maharit_leader.db.wal /tmp/maharit_follower1.db.wal /tmp/maharit_follower2.db.wal
 
