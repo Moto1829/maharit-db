@@ -918,6 +918,7 @@ mod tests {
         assert_eq!(config.key_path, "/env/key.pem");
 
         // Clean up
+        // SAFETY: 上で設定した変数を戻すだけ。これらの変数を読むテストは同時に動かない前提（上と同じ）。
         unsafe {
             std::env::remove_var("MAHARIT_TLS_CERT");
             std::env::remove_var("MAHARIT_TLS_KEY");

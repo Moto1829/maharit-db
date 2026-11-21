@@ -19,3 +19,6 @@ thiserror.workspace = true
 lindera = { version = "6.2", features = ["embed-ipadic"], optional = true }
 rayon = "1.10"
 serde.workspace = true
+
+[lints]
+workspace = true

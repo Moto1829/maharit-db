@@ -17,3 +17,6 @@ webpki-roots.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

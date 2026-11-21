@@ -77,6 +77,18 @@ tower-http = { version = "0.7", features = ["fs", "trace", "cors"] }
 tower-cookies = "0.11"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 
+# 全クレート共通の lint（各クレートの `[lints] workspace = true` で有効になる）。
+# 既存の違反は直してから足す。理由があって残すものは `#[expect(..., reason = "…")]` を付ける。
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# unsafe には `// SAFETY:` で前提を書く
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 [package]
 name = "maharit-db"
 version.workspace = true
@@ -112,3 +124,6 @@ path = "examples/visualization.rs"
 [[example]]
 name = "algorithms"
 path = "examples/algorithms.rs"
+
+[lints]
+workspace = true

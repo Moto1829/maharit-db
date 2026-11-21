@@ -86,6 +86,7 @@ pub(crate) struct AclBackend<'a> {
 // SAFETY: `inner` は Executor の `graph` と同じポインタで、Executor と同じ規則
 // （読み取りは共有、書き込みは呼び出し側が排他を保証）でしか使わない。
 unsafe impl Send for AclBackend<'_> {}
+// SAFETY: 上と同じ。共有参照からは読み取りしかしない（違反の記録は `Mutex` で守る）。
 unsafe impl Sync for AclBackend<'_> {}
 
 impl<'a> AclBackend<'a> {

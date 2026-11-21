@@ -20,3 +20,6 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "engine"
 harness = false
+
+[lints]
+workspace = true

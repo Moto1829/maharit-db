@@ -54,9 +54,12 @@ fn macos_memory_usage() -> u64 {
         suspend_count: i32,
     }
 
+    // SAFETY: MachTaskBasicInfo は整数だけからなる repr(C) の構造体で、全ビット 0 は有効な値。
     let mut info: MachTaskBasicInfo = unsafe { mem::zeroed() };
     let mut count = (mem::size_of::<MachTaskBasicInfo>() / mem::size_of::<i32>()) as u32;
 
+    // SAFETY: `info` と `count` は呼び出しの間有効な可変参照で、`count` には `info` の大きさ
+    // （i32 単位）を渡している。task_info はその範囲にしか書き込まない。
     let result = unsafe {
         task_info(
             mach_task_self(),

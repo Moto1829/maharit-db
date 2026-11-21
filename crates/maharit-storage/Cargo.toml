@@ -17,3 +17,6 @@ serde.workspace = true
 tokio = { version = "1", features = ["full"] }
 futures-util.workspace = true
 maharit-core.workspace = true
+
+[lints]
+workspace = true

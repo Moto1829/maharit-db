@@ -23,3 +23,6 @@ tracing-subscriber.workspace = true
 [[bin]]
 name = "maharit-viz"
 path = "src/bin/viz.rs"
+
+[lints]
+workspace = true

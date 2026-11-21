@@ -334,6 +334,7 @@ mod tests {
         assert_eq!(level, TracingLevel::INFO);
         // Restore
         if let Some(val) = prev {
+            // SAFETY: 上の remove_var と同じ前提で、元の値に戻すだけ。
             unsafe { std::env::set_var("RUST_LOG", val) };
         }
     }

@@ -40,3 +40,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 maharit-client = { path = "../maharit-client" }
+
+[lints]
+workspace = true
