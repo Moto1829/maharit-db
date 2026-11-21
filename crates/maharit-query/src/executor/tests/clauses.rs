@@ -1032,3 +1032,35 @@ fn keyword_names_keep_their_spelling() {
     let rs = execute(&mut graph, "MATCH (a:user) RETURN a").unwrap();
     assert!(rs.rows.is_empty());
 }
+
+/// 深く入れ子にした式でスタックを使い切って落ちない（リリースは panic=abort なのでサーバーごと落ちていた）。
+#[test]
+fn deeply_nested_expressions_do_not_overflow_the_stack() {
+    let mut graph = Graph::new();
+    let depth = 400;
+    let q = format!("RETURN {}{} AS x", "[".repeat(depth), "]".repeat(depth));
+    let rs = execute(&mut graph, &q).unwrap();
+    assert_eq!(rs.rows.len(), 1);
+    let q = format!("RETURN {}1{} AS x", "(".repeat(depth), ")".repeat(depth));
+    assert_eq!(
+        first_column(&execute(&mut graph, &q).unwrap()),
+        vec![Value::Int(1)]
+    );
+    let q = format!("RETURN {}true AS x", "NOT ".repeat(depth));
+    assert_eq!(
+        first_column(&execute(&mut graph, &q).unwrap()),
+        vec![Value::Bool(true)]
+    );
+
+    // 上限を超える入れ子は、落ちずにエラーになる
+    let too_deep = crate::parser::MAX_EXPRESSION_DEPTH + 10;
+    let q = format!(
+        "RETURN {}{} AS x",
+        "[".repeat(too_deep),
+        "]".repeat(too_deep)
+    );
+    assert!(matches!(
+        Parser::new(&q).unwrap().parse(),
+        Err(crate::parser::ParseError::TooDeep(_))
+    ));
+}

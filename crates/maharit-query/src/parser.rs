@@ -26,7 +26,18 @@ pub enum ParseError {
 
     #[error("lexer error: {0}")]
     LexerError(#[from] crate::lexer::LexerError),
+
+    #[error("expression is nested too deeply (more than {0} levels)")]
+    TooDeep(usize),
 }
+
+/// 式の入れ子の上限。これを超える式はエラーにする（メモリと時間を際限なく使わせない）。
+pub const MAX_EXPRESSION_DEPTH: usize = 1_000;
+
+/// 再帰の途中で、残りのスタックがこれを下回ったらスタックを伸ばす。
+pub(crate) const STACK_RED_ZONE: usize = 128 * 1024;
+/// 伸ばすときに確保する大きさ。
+pub(crate) const STACK_GROW: usize = 2 * 1024 * 1024;
 
 /// パースの結果。成功した場合は Statement が含まれ、エラーが発生した場合は
 /// errors に収集されたエラーのリストが含まれる。
@@ -124,6 +135,8 @@ pub struct Parser {
     pos: usize,
     /// 元の入力。キーワードと同じ綴りの名前（`:User`、`n.order`）を、書かれたとおりに取り出すのに使う。
     source: String,
+    /// いま解析中の式の入れ子の深さ（[`MAX_EXPRESSION_DEPTH`] を超えたらエラー）
+    depth: usize,
 }
 
 impl Parser {
@@ -133,6 +146,7 @@ impl Parser {
             tokens,
             pos: 0,
             source: input.to_string(),
+            depth: 0,
         })
     }
 

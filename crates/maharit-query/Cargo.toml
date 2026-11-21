@@ -12,6 +12,8 @@ regex.workspace = true
 unicode-normalization.workspace = true
 rayon = "1.10"
 serde_json.workspace = true
+# 深く入れ子にした式でスタックを使い切らないよう、再帰の途中でスタックを伸ばす
+stacker = "0.1"
 
 [dev-dependencies]
 # ベンチ専用。グラフ描画（plotters）と rayon は使わないので既定の feature を外す。

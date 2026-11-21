@@ -490,7 +490,21 @@ impl Parser {
     // ========== Expression ==========
 
     pub(super) fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        self.parse_or_expression()
+        self.nested(Self::parse_or_expression)
+    }
+
+    /// 入れ子を 1 段深くして `f` を呼ぶ。深さの上限を検査し、スタックが残り少なければ伸ばす。
+    pub(super) fn nested(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<Expression, ParseError>,
+    ) -> Result<Expression, ParseError> {
+        if self.depth >= super::MAX_EXPRESSION_DEPTH {
+            return Err(ParseError::TooDeep(super::MAX_EXPRESSION_DEPTH));
+        }
+        self.depth += 1;
+        let result = stacker::maybe_grow(super::STACK_RED_ZONE, super::STACK_GROW, || f(self));
+        self.depth -= 1;
+        result
     }
 
     pub(super) fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
@@ -534,7 +548,7 @@ impl Parser {
     pub(super) fn parse_not(&mut self) -> Result<Expression, ParseError> {
         if self.check(TokenKind::Not) {
             self.advance();
-            let expr = self.parse_not()?;
+            let expr = self.nested(Self::parse_not)?;
             return Ok(Expression::UnaryOp(UnaryOp::Not, Box::new(expr)));
         }
         self.parse_comparison()
@@ -691,7 +705,7 @@ impl Parser {
     pub(super) fn parse_unary(&mut self) -> Result<Expression, ParseError> {
         if self.check(TokenKind::Dash) {
             self.advance();
-            let expr = self.parse_unary()?;
+            let expr = self.nested(Self::parse_unary)?;
             return Ok(Expression::UnaryOp(UnaryOp::Neg, Box::new(expr)));
         }
 

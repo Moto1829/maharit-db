@@ -60,6 +60,19 @@ impl<'a> Executor<'a> {
         expr: &Expression,
         bindings: &Bindings,
     ) -> Result<Value, ExecuteError> {
+        // 深く入れ子にした式（`[[[…]]]` など）でスタックを使い切らないよう、残りが少なければ伸ばす
+        stacker::maybe_grow(
+            crate::parser::STACK_RED_ZONE,
+            crate::parser::STACK_GROW,
+            || self.evaluate_expression_inner(expr, bindings),
+        )
+    }
+
+    fn evaluate_expression_inner(
+        &self,
+        expr: &Expression,
+        bindings: &Bindings,
+    ) -> Result<Value, ExecuteError> {
         match expr {
             Expression::Literal(lit) => Ok(Value::from(lit.clone())),
             Expression::Variable(var) => {
