@@ -277,3 +277,47 @@ fn test_date_field_in_where_clause() {
 }
 
 // ========== PROPERTY INDEX TESTS ==========
+
+#[test]
+fn invalid_temporal_values_are_errors() {
+    let mut graph = Graph::new();
+    for q in [
+        "RETURN date('2024-02-30') AS x",
+        "RETURN date('2023-02-29') AS x",
+        "RETURN date('2024-13-01') AS x",
+        "RETURN date({year: 2024, month: 13, day: 40}) AS x",
+        "RETURN date({year: 2024, month: 4, day: 31}) AS x",
+        "RETURN date({year: 4294967297, month: 1, day: 1}) AS x",
+        "RETURN datetime('2024-01-01T24:00:00') AS x",
+        "RETURN datetime('2024-01-01T10:60:00') AS x",
+        "RETURN datetime('2024-01-01T10:00:61') AS x",
+        "RETURN duration({months: 9223372036854775807}) AS x",
+        "RETURN duration({years: 9223372036854775807}) AS x",
+        "RETURN duration({days: 2147483648}) AS x",
+        "RETURN duration({hours: 9223372036854775807}) AS x",
+        "RETURN duration('P99999999999Y') AS x",
+        "RETURN date('2024-01-01') + duration({months: 2147483647}) AS x",
+        "RETURN date('2024-01-01') - duration({months: 2147483647}) AS x",
+    ] {
+        assert!(execute(&mut graph, q).is_err(), "{q} should fail");
+    }
+}
+
+#[test]
+fn valid_temporal_edge_cases_still_work() {
+    let mut graph = Graph::new();
+    for q in [
+        "RETURN date('2024-02-29') = date({year: 2024, month: 2, day: 29}) AS x",
+        "RETURN date({year: 2000, month: 2, day: 29}) = date('2000-02-29') AS x",
+        // 月を足して月末を超えるときは末日に丸める
+        "RETURN date('2024-01-31') + duration({months: 1}) = date('2024-02-29') AS x",
+        "RETURN date('2024-03-31') - duration({months: 1}) = date('2024-02-29') AS x",
+        // ミリ秒より細かい桁は切り捨て
+        "RETURN datetime('2024-01-01T10:20:30.1234Z') = datetime('2024-01-01T10:20:30.123Z') AS x",
+        "RETURN datetime('2024-01-01T10:20:30.5Z') = datetime('2024-01-01T10:20:30.500Z') AS x",
+        "RETURN date('-0044-03-15') < date('0001-01-01') AS x",
+    ] {
+        let rs = execute(&mut graph, q).unwrap_or_else(|e| panic!("{q}: {e}"));
+        assert_eq!(first_column(&rs), vec![Value::Bool(true)], "{q}");
+    }
+}

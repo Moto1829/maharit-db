@@ -485,9 +485,11 @@ impl<'a> Executor<'a> {
                             millis,
                         },
                     ) => {
-                        use maharit_core::temporal;
-                        let new_days = temporal::add_duration_to_date(*d, *months, *days, *millis);
-                        return Ok(Value::Date(new_days));
+                        return maharit_core::temporal::add_duration_to_date(
+                            *d, *months, *days, *millis,
+                        )
+                        .map(Value::Date)
+                        .ok_or_else(temporal_overflow);
                     }
                     (
                         Value::DateTime(ms),
@@ -497,14 +499,11 @@ impl<'a> Executor<'a> {
                             millis,
                         },
                     ) => {
-                        use maharit_core::temporal;
-                        let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
-                        let base_days = temporal::ymd_to_days(y, mo, day);
-                        let new_days = temporal::add_duration_to_date(base_days, *months, *days, 0);
-                        let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
-                        let new_ms =
-                            temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) + millis;
-                        return Ok(Value::DateTime(new_ms));
+                        return maharit_core::temporal::add_duration_to_datetime(
+                            *ms, *months, *days, *millis,
+                        )
+                        .map(Value::DateTime)
+                        .ok_or_else(temporal_overflow);
                     }
                     _ => {}
                 }
@@ -533,7 +532,7 @@ impl<'a> Executor<'a> {
                 // テンポラル演算: Date - Date = Duration, DateTime - DateTime = Duration
                 match (left, right) {
                     (Value::Date(a), Value::Date(b)) => {
-                        let diff_days = a - b;
+                        let diff_days = a.checked_sub(*b).ok_or_else(temporal_overflow)?;
                         return Ok(Value::Duration {
                             months: 0,
                             days: diff_days,
@@ -541,7 +540,7 @@ impl<'a> Executor<'a> {
                         });
                     }
                     (Value::DateTime(a), Value::DateTime(b)) => {
-                        let diff_ms = a - b;
+                        let diff_ms = a.checked_sub(*b).ok_or_else(temporal_overflow)?;
                         return Ok(Value::Duration {
                             months: 0,
                             days: 0,
@@ -556,10 +555,12 @@ impl<'a> Executor<'a> {
                             millis,
                         },
                     ) => {
-                        use maharit_core::temporal;
-                        let new_days =
-                            temporal::add_duration_to_date(*d, -*months, -*days, -*millis);
-                        return Ok(Value::Date(new_days));
+                        let (months, days, millis) = negate_duration(*months, *days, *millis)?;
+                        return maharit_core::temporal::add_duration_to_date(
+                            *d, months, days, millis,
+                        )
+                        .map(Value::Date)
+                        .ok_or_else(temporal_overflow);
                     }
                     (
                         Value::DateTime(ms),
@@ -569,15 +570,12 @@ impl<'a> Executor<'a> {
                             millis,
                         },
                     ) => {
-                        use maharit_core::temporal;
-                        let (y, mo, day, h, mi, s, frac) = temporal::millis_to_datetime(*ms);
-                        let base_days = temporal::ymd_to_days(y, mo, day);
-                        let new_days =
-                            temporal::add_duration_to_date(base_days, -*months, -*days, 0);
-                        let (ny, nmo, nd) = temporal::days_to_ymd(new_days);
-                        let new_ms =
-                            temporal::datetime_to_millis(ny, nmo, nd, h, mi, s, frac) - millis;
-                        return Ok(Value::DateTime(new_ms));
+                        let (months, days, millis) = negate_duration(*months, *days, *millis)?;
+                        return maharit_core::temporal::add_duration_to_datetime(
+                            *ms, months, days, millis,
+                        )
+                        .map(Value::DateTime)
+                        .ok_or_else(temporal_overflow);
                     }
                     _ => {}
                 }
@@ -924,4 +922,19 @@ fn truth(value: &Value, op: &str) -> Result<Option<bool>, ExecuteError> {
 
 fn bool_or_null(value: Option<bool>) -> Value {
     value.map_or(Value::Null, Value::Bool)
+}
+
+fn temporal_overflow() -> ExecuteError {
+    ExecuteError::TypeError("temporal value out of range".to_string())
+}
+
+fn negate_duration(months: i32, days: i32, millis: i64) -> Result<(i32, i32, i64), ExecuteError> {
+    match (
+        months.checked_neg(),
+        days.checked_neg(),
+        millis.checked_neg(),
+    ) {
+        (Some(m), Some(d), Some(ms)) => Ok((m, d, ms)),
+        _ => Err(ExecuteError::TypeError("integer overflow".to_string())),
+    }
 }

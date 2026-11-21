@@ -927,17 +927,28 @@ impl<'a> Executor<'a> {
                             },
                             Value::Date(d) => Ok(Value::Date(d)),
                             Value::Map(map) => {
-                                let get_i32 = |key: &str| -> Option<i32> {
+                                let get = |key: &str, default: i32| -> Result<i32, ExecuteError> {
                                     match map.get(key) {
-                                        Some(Value::Int(n)) => Some(*n as i32),
-                                        _ => None,
+                                        None | Some(Value::Null) => Ok(default),
+                                        Some(Value::Int(n)) => i32::try_from(*n).map_err(|_| {
+                                            ExecuteError::TypeError(format!(
+                                                "date(): {key} is out of range: {n}"
+                                            ))
+                                        }),
+                                        Some(other) => Err(ExecuteError::TypeError(format!(
+                                            "date(): {key} must be an integer, got {other}"
+                                        ))),
                                     }
                                 };
-                                let year = get_i32("year").unwrap_or(1970);
-                                let month = get_i32("month").unwrap_or(1);
-                                let day = get_i32("day").unwrap_or(1);
-                                let days = temporal::ymd_to_days(year, month, day);
-                                Ok(Value::Date(days))
+                                let (year, month, day) =
+                                    (get("year", 1970)?, get("month", 1)?, get("day", 1)?);
+                                temporal::checked_ymd_to_days(year, month, day)
+                                    .map(Value::Date)
+                                    .ok_or_else(|| {
+                                        ExecuteError::TypeError(format!(
+                                            "invalid date: year {year}, month {month}, day {day}"
+                                        ))
+                                    })
                             }
                             _ => Err(ExecuteError::TypeError(
                                 "date() requires a string or map argument".to_string(),
@@ -991,28 +1002,37 @@ impl<'a> Executor<'a> {
                         ))),
                     },
                     Value::Map(map) => {
-                        let get_i64 = |key: &str| -> i64 {
+                        let get = |key: &str| -> Result<i64, ExecuteError> {
                             match map.get(key) {
-                                Some(Value::Int(n)) => *n,
-                                _ => 0,
+                                None | Some(Value::Null) => Ok(0),
+                                Some(Value::Int(n)) => Ok(*n),
+                                Some(other) => Err(ExecuteError::TypeError(format!(
+                                    "duration(): {key} must be an integer, got {other}"
+                                ))),
                             }
                         };
-                        let years = get_i64("years");
-                        let months_v = get_i64("months");
-                        let weeks = get_i64("weeks");
-                        let days = get_i64("days");
-                        let hours = get_i64("hours");
-                        let minutes = get_i64("minutes");
-                        let seconds = get_i64("seconds");
-                        let milliseconds = get_i64("milliseconds");
-                        let total_months = (years * 12 + months_v) as i32;
-                        let total_days = (weeks * 7 + days) as i32;
-                        let total_millis =
-                            hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + milliseconds;
+                        let overflow = || ExecuteError::TypeError("integer overflow".to_string());
+                        // 各成分を `unit` 倍して足す（途中で i64 を超えたらエラー）
+                        let sum = |parts: &[(&str, i64)]| -> Result<i64, ExecuteError> {
+                            parts.iter().try_fold(0i64, |acc, (key, unit)| {
+                                get(key)?
+                                    .checked_mul(*unit)
+                                    .and_then(|v| acc.checked_add(v))
+                                    .ok_or_else(overflow)
+                            })
+                        };
+                        let months = sum(&[("years", 12), ("months", 1)])?;
+                        let days = sum(&[("weeks", 7), ("days", 1)])?;
+                        let millis = sum(&[
+                            ("hours", 3_600_000),
+                            ("minutes", 60_000),
+                            ("seconds", 1_000),
+                            ("milliseconds", 1),
+                        ])?;
                         Ok(Value::Duration {
-                            months: total_months,
-                            days: total_days,
-                            millis: total_millis,
+                            months: i32::try_from(months).map_err(|_| overflow())?,
+                            days: i32::try_from(days).map_err(|_| overflow())?,
+                            millis,
                         })
                     }
                     _ => Err(ExecuteError::TypeError(

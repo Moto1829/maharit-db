@@ -83,6 +83,14 @@ RETURN date("2024-01-10") - date("2024-01-01")  // P9D
 RETURN datetime("2024-01-02T00:00:00Z") - datetime("2024-01-01T00:00:00Z")
 ```
 
+When adding months goes past the end of a month, the result is the last day of that month (`date("2024-01-31") + duration("P1M")` is 2024-02-29).
+
+### Invalid values
+
+Dates that do not exist (`date("2024-02-30")`, `date({year: 2024, month: 13, day: 1})`) and out-of-range times
+(`datetime("2024-01-01T24:00:00")`) are errors.
+So are `duration` components beyond their range (about ±2.1 billion months or days) and date arithmetic whose result is beyond year ±999,999.
+
 ## Comparison
 
 Temporal values can be compared with `<`, `>`, `<=`, `>=`, and `=`.

@@ -214,19 +214,36 @@ pub mod temporal {
             + frac as i64
     }
 
-    /// "YYYY-MM-DD" 文字列を日数に変換
+    /// 扱える年の範囲（日数を `i32` で持つので、その範囲に収まる幅にしている）。
+    pub const YEAR_RANGE: std::ops::RangeInclusive<i32> = -999_999..=999_999;
+
+    /// 実在する日付か（月は 1–12、日はその月の末日まで。うるう年を考える）。
+    pub fn is_valid_date(year: i32, month: i32, day: i32) -> bool {
+        YEAR_RANGE.contains(&year)
+            && (1..=12).contains(&month)
+            && (1..=days_in_month(year, month)).contains(&day)
+    }
+
+    /// 実在する日付なら 1970-01-01 からの日数を返す。
+    pub fn checked_ymd_to_days(year: i32, month: i32, day: i32) -> Option<i32> {
+        is_valid_date(year, month, day).then(|| ymd_to_days(year, month, day))
+    }
+
+    /// "YYYY-MM-DD" 文字列を日数に変換（存在しない日付は `None`）
     pub fn parse_date(s: &str) -> Option<i32> {
-        let parts: Vec<&str> = s.split('-').collect();
+        // 先頭の '-' は紀元前の年の符号
+        let (sign, rest) = match s.strip_prefix('-') {
+            Some(r) => (-1, r),
+            None => (1, s),
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
         if parts.len() != 3 {
             return None;
         }
-        let y: i32 = parts[0].parse().ok()?;
+        let y: i32 = parts[0].parse::<i32>().ok()? * sign;
         let m: i32 = parts[1].parse().ok()?;
         let d: i32 = parts[2].parse().ok()?;
-        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-            return None;
-        }
-        Some(ymd_to_days(y, m, d))
+        checked_ymd_to_days(y, m, d)
     }
 
     /// "YYYY-MM-DDTHH:MM:SS[.fff][Z]" 文字列を Unix ミリ秒に変換
@@ -241,18 +258,20 @@ pub mod temporal {
         }
         let h: i32 = time_parts[0].parse().ok()?;
         let m: i32 = time_parts[1].parse().ok()?;
+        if !(0..24).contains(&h) || !(0..60).contains(&m) {
+            return None;
+        }
         let (s, frac) = if time_parts.len() >= 3 {
             let sec_part = time_parts[2];
             if let Some(dot) = sec_part.find('.') {
                 let s: i32 = sec_part[..dot].parse().ok()?;
                 let frac_str = &sec_part[dot + 1..];
-                let frac: i32 = frac_str.parse().ok()?;
-                let frac = match frac_str.len() {
-                    1 => frac * 100,
-                    2 => frac * 10,
-                    _ => frac,
-                };
-                (s, frac)
+                if frac_str.is_empty() || !frac_str.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                // ミリ秒までを使う（それより細かい桁は切り捨て）
+                let ms_digits = format!("{:0<3}", &frac_str[..frac_str.len().min(3)]);
+                (s, ms_digits.parse().ok()?)
             } else {
                 let s: i32 = sec_part.parse().ok()?;
                 (s, 0)
@@ -260,6 +279,9 @@ pub mod temporal {
         } else {
             (0, 0)
         };
+        if !(0..60).contains(&s) {
+            return None;
+        }
         Some(datetime_to_millis(
             days_to_ymd(days).0,
             days_to_ymd(days).1,
@@ -271,7 +293,8 @@ pub mod temporal {
         ))
     }
 
-    /// "P[nY][nM][nD][T[nH][nM][nS]]" を (months, days, millis) に変換
+    /// "P[nY][nM][nD][T[nH][nM][nS]]" を (months, days, millis) に変換。
+    /// 書式が誤っているときや、各成分が範囲（月・日は `i32`、ミリ秒は `i64`）を超えるときは `None`。
     pub fn parse_duration(s: &str) -> Option<(i32, i32, i64)> {
         if !s.starts_with('P') {
             return None;
@@ -298,13 +321,14 @@ pub mod temporal {
                     num_buf.parse().ok()?
                 };
                 num_buf.clear();
-                match ch {
-                    'Y' => months += (n as i32) * 12,
-                    'M' => months += n as i32,
-                    'W' => days += (n as i32) * 7,
-                    'D' => days += n as i32,
+                let (target, unit) = match ch {
+                    'Y' => (&mut months, 12.0),
+                    'M' => (&mut months, 1.0),
+                    'W' => (&mut days, 7.0),
+                    'D' => (&mut days, 1.0),
                     _ => return None,
-                }
+                };
+                *target = target.checked_add(f64_to_i32(n * unit)?)?;
             }
         }
 
@@ -320,12 +344,13 @@ pub mod temporal {
                         num_buf.parse().ok()?
                     };
                     num_buf.clear();
-                    match ch {
-                        'H' => millis += (n * 3_600_000.0) as i64,
-                        'M' => millis += (n * 60_000.0) as i64,
-                        'S' => millis += (n * 1_000.0) as i64,
+                    let unit = match ch {
+                        'H' => 3_600_000.0,
+                        'M' => 60_000.0,
+                        'S' => 1_000.0,
                         _ => return None,
-                    }
+                    };
+                    millis = millis.checked_add(f64_to_i64(n * unit)?)?;
                 }
             }
         }
@@ -373,15 +398,44 @@ pub mod temporal {
         s
     }
 
-    /// Date に Duration を加算
-    pub fn add_duration_to_date(days: i32, months: i32, dur_days: i32, millis: i64) -> i32 {
+    fn f64_to_i32(n: f64) -> Option<i32> {
+        (i32::MIN as f64..=i32::MAX as f64)
+            .contains(&n)
+            .then_some(n as i32)
+    }
+
+    fn f64_to_i64(n: f64) -> Option<i64> {
+        // i64::MAX は f64 で正確に表せないので、2^63 未満で判定する
+        (-9.223_372_036_854_776e18..9.223_372_036_854_776e18)
+            .contains(&n)
+            .then_some(n as i64)
+    }
+
+    /// Date に Duration を加算する。結果が扱える範囲（[`YEAR_RANGE`]）を超えるときは `None`。
+    /// 月を足して月末を超える日は、その月の末日に丸める（1/31 + 1 か月 = 2/28 または 2/29）。
+    pub fn add_duration_to_date(days: i32, months: i32, dur_days: i32, millis: i64) -> Option<i32> {
         let (y, m, d) = days_to_ymd(days);
-        let total_months = (y * 12 + m - 1) + months;
-        let new_year = total_months.div_euclid(12);
-        let new_month = total_months.rem_euclid(12) + 1;
+        let total_months = (y as i64 * 12 + m as i64 - 1) + months as i64;
+        let new_year = i32::try_from(total_months.div_euclid(12)).ok()?;
+        let new_month = total_months.rem_euclid(12) as i32 + 1;
+        if !YEAR_RANGE.contains(&new_year) {
+            return None;
+        }
         let max_day = days_in_month(new_year, new_month);
-        let new_days = ymd_to_days(new_year, new_month, d.min(max_day));
-        new_days + dur_days + (millis / 86_400_000) as i32
+        let new_days = ymd_to_days(new_year, new_month, d.min(max_day)) as i64;
+        let result = new_days + dur_days as i64 + millis / 86_400_000;
+        let result = i32::try_from(result).ok()?;
+        YEAR_RANGE
+            .contains(&days_to_ymd(result).0)
+            .then_some(result)
+    }
+
+    /// DateTime（Unix ミリ秒）に Duration を加算する。範囲を超えるときは `None`。
+    pub fn add_duration_to_datetime(ms: i64, months: i32, days: i32, millis: i64) -> Option<i64> {
+        let (y, mo, d, h, mi, s, frac) = millis_to_datetime(ms);
+        let new_days = add_duration_to_date(ymd_to_days(y, mo, d), months, days, 0)?;
+        let (ny, nmo, nd) = days_to_ymd(new_days);
+        datetime_to_millis(ny, nmo, nd, h, mi, s, frac).checked_add(millis)
     }
 
     fn days_in_month(year: i32, month: i32) -> i32 {
