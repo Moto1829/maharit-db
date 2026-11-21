@@ -10,3 +10,6 @@ __pycache__/
 # MkDocs (requirements-docs.txt)
 .venv-docs/
 /site/
+
+# REPL の履歴（リポジトリ内で REPL を動かすと作られる）
+.maharit_history
