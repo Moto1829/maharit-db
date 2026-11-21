@@ -10,20 +10,20 @@
 サブディレクトリの CLAUDE.md は、その配下のファイルを触るときだけ読み込まれる。
 
 ## 作業内容
-- [ ] `crates/maharit-query/CLAUDE.md`
+- [x] `crates/maharit-query/CLAUDE.md`
   - `Executor` の生ポインタ `*mut Graph` と `unsafe impl Sync` が成り立つ条件（読み取り専用の経路で `graph_mut()` を呼ばない、など）
   - 束縛済みの変数をパターンで上書きしない（bug/125）などの、過去のバグから得た決まり
   - テストの書き方: `execute()` ヘルパーと、状態を持つテストでの共有 `Executor` の使い分け。結果は並べ替えてから比べる（ハッシュの順序に依存しない）
   - ファイル構成と、どこに何を足すか
-- [ ] `crates/maharit-server/CLAUDE.md`
+- [x] `crates/maharit-server/CLAUDE.md`
   - TCP プロトコルのメッセージ形式と、互換を壊す変更の見分け方
   - 認証・ACL・監査ログを通す経路（新しいメッセージ型を足すときに漏らさない）
   - Linux 専用コードは macOS の clippy で検査されない点
-- [ ] `crates/maharit-storage/CLAUDE.md`
+- [x] `crates/maharit-storage/CLAUDE.md`
   - スナップショット形式を変えるときの手順（`VERSION` を上げる、旧版の読み込みを残す、`tests/fixtures/` の扱い）
   - WAL の互換性
-- [ ] ルートの CLAUDE.md から上へ移した内容を削り、全体に共通する内容だけにする（目安 120 行以下）
-- [ ] 書く基準: 「コードを読めば分かること」は書かない。「知らないと間違えること」だけを書く
+- [x] ルートの CLAUDE.md から上へ移した内容を削り、全体に共通する内容だけにする（目安 120 行以下）
+- [x] 書く基準: 「コードを読めば分かること」は書かない。「知らないと間違えること」だけを書く
 
 ## メモリから引き継ぐ内容
 タスク 195 でメモリから削った項目のうち、コードの約束事として今も有効なもの。該当するクレートの CLAUDE.md に書く（書く前に今のコードで確かめる）。
@@ -37,3 +37,9 @@
 ## 完了条件
 - ルートの CLAUDE.md が短くなり、クレート固有の内容が各クレートに移っている
 - 3 つのクレートの CLAUDE.md が、それぞれ 60 行程度に収まっている
+
+## 結果（2026-11-21）
+- `crates/maharit-{query,server,storage,core}/CLAUDE.md` を追加（35 / 29 / 33 / 19 行）。core は「メモリから引き継ぐ内容」のラベル索引の件と、`GraphBackend` の 4 つの実装の件を書くために足した
+- ルートの CLAUDE.md を 231 → 99 行にした（クレートごとのファイル説明、docs の i18n の細部、E2E のコマンド一覧を移す・削る）
+- 引き継ぎ項目は今のコードで確かめた: `add_node_label` はラベル索引を更新する、`reindex_node_property` は 6 か所から呼ばれている、`TokenKind::All` は `parser/expr.rs` で個別に扱っている
+- `wal_group_commit::test_group_committer_batch_100_writes` は `cargo test -p maharit-storage` を 5 回続けて回して全て通った。不安定さは再現しないので、タスクは起こさない
