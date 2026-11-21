@@ -1,0 +1,87 @@
+# Docs statements that parse but do not run on the embedded engine, or whose
+# `// 結果:` does not match (see docs_cypher_blocks_execute in docs_cypher_examples.rs).
+# Regenerate: MAHARIT_DOCS_EXEC_WRITE=1 cargo test -p maharit-query --test docs_cypher_examples
+# docs/advanced/transactions.md:73: undefined variable: $batch
+docs/advanced/transactions.md: UNWIND $batch AS item
+# docs/cypher/order-limit-skip.md:104: undefined variable: $page_size
+docs/cypher/order-limit-skip.md: MATCH (n:Person)
+# docs/cypher/parameters.md:71: undefined variable: $props
+docs/cypher/parameters.md: CREATE (n:Person $props)
+# docs/cypher/parameters.md:43: undefined variable: $name
+docs/cypher/parameters.md: CREATE (n:Person {name: $name, age: $age})
+# docs/cypher/parameters.md:106: undefined variable: $props
+docs/cypher/parameters.md: CREATE (n:Person {name: $props.name, city: $props.address.city})
+# docs/cypher/parameters.md:50: undefined variable: $offset
+docs/cypher/parameters.md: MATCH (n:Person) RETURN n SKIP $offset LIMIT $count
+# docs/cypher/parameters.md:114: undefined variable: $persons
+docs/cypher/parameters.md: UNWIND $persons AS person
+# docs/cypher/set-remove-merge.md:49: expected ["Person","Admin"], got []
+docs/cypher/set-remove-merge.md: MATCH (n:Person {name: "Alice"})
+# docs/cypher/set-remove-merge.md:155: undefined variable: $email
+docs/cypher/set-remove-merge.md: MERGE (u:User {email: $email})
+# docs/cypher/unwind-with-union.md:38: undefined variable: $persons
+docs/cypher/unwind-with-union.md: UNWIND $persons AS person
+# docs/functions/fulltext.md:86: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "Rust OR Go OR Python")
+# docs/functions/fulltext.md:213: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "Rust async await")
+# docs/functions/fulltext.md:30: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "Rust programming")
+# docs/functions/fulltext.md:60: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "\"グラフデータベース\"")
+# docs/functions/fulltext.md:75: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "datbase~2")
+# docs/functions/fulltext.md:70: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "graph~1")
+# docs/functions/fulltext.md:49: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", "グラフ データベース")
+# docs/functions/fulltext.md:205: undefined variable: $query
+docs/functions/fulltext.md: CALL db.index.fulltext.search("articleIndex", $query)
+# docs/functions/fulltext.md:112: fulltext error: index not found: jpArticleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("jpArticleIndex", "グラフデータベース")
+# docs/functions/fulltext.md:118: fulltext error: index not found: jpArticleIndex
+docs/functions/fulltext.md: CALL db.index.fulltext.search("jpArticleIndex", "機械学習 グラフ")
+# docs/functions/fulltext.md:195: fulltext error: index not found: articleIndex
+docs/functions/fulltext.md: DROP FULLTEXT INDEX articleIndex
+# docs/functions/list.md:210: undefined variable: $page
+docs/functions/list.md: MATCH (n:Person)
+# docs/index.md:42: fulltext error: index not found: articleIndex
+docs/index.md: CALL db.index.fulltext.search("articleIndex", "グラフデータベース")
+# docs/indexes/constraints.md:90: constraint error: constraint not found: personEmailUnique
+docs/indexes/constraints.md: DROP CONSTRAINT personEmailUnique
+# docs/indexes/constraints.md:119: undefined variable: $email
+docs/indexes/constraints.md: MERGE (u:User {email: $email})
+# docs/indexes/fulltext-index.md:131: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "Rust async")
+# docs/indexes/fulltext-index.md:48: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "Rust プログラミング")
+# docs/indexes/fulltext-index.md:74: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "Rust")
+# docs/indexes/fulltext-index.md:95: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "\"グラフデータベース\"")
+# docs/indexes/fulltext-index.md:105: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "databse~1")
+# docs/indexes/fulltext-index.md:84: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("articleIndex", "グラフ データベース")
+# docs/indexes/fulltext-index.md:118: fulltext error: index not found: jpIndex
+docs/indexes/fulltext-index.md: CALL db.index.fulltext.search("jpIndex", "機械学習")
+# docs/indexes/fulltext-index.md:36: fulltext error: index not found: articleIndex
+docs/indexes/fulltext-index.md: DROP FULLTEXT INDEX articleIndex
+# docs/operations/acl.md:57: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: DENY READ ON :* TO ROLE reader
+# docs/operations/acl.md:69: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: DENY READ ON :Report TO ROLE reader
+# docs/operations/acl.md:28: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: DENY READ ON :Secret TO ROLE writer
+# docs/operations/acl.md:33: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: DENY READ ON :User(password) TO ROLE reader
+# docs/operations/acl.md:38: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: DENY WRITE ON :Invoice TO USER bob
+# docs/operations/acl.md:62: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: GRANT READ ON :Public TO ROLE reader
+# docs/operations/acl.md:74: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: GRANT READ ON :Report TO USER alice
+# docs/operations/acl.md:84: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: REVOKE READ ON :Report FROM ROLE reader
+# docs/operations/acl.md:92: type error: GRANT / DENY / REVOKE / SHOW ACL are only available on the server
+docs/operations/acl.md: SHOW ACL

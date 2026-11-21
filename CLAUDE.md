@@ -46,7 +46,7 @@ lint は workspace 共通（ルート `Cargo.toml` の `[workspace.lints]`）。
 ## docs
 
 - `docs/foo.md`（日本語）が正本。英語は `docs/foo.en.md`。日本語を変えたら同じコミットで英語も直す（そうすれば `source_commit` は変えなくてよい）。訳語は `docs/_i18n/GLOSSARY.md`
-- ```cypher ブロックは `docs_cypher_examples` テストでパースされる。1 段落 1 文、コメントは `//`、出力例は ```text。英語版の ```cypher はコメント以外を日本語版と一致させる。未対応は `crates/maharit-query/tests/docs_cypher_known_failures.txt`
+- ```cypher ブロックは `docs_cypher_examples` テストでパースされ、ページごとに新しいグラフで上から順に実行される（`// 結果: <JSON の値>` と書けば 1 行 1 列の結果と比べる。実行できない例は `docs_cypher_execution_known_failures.txt`）。1 段落 1 文、コメントは `//`、出力例は ```text。英語版の ```cypher はコメント以外を日本語版と一致させる。未対応は `crates/maharit-query/tests/docs_cypher_known_failures.txt`
 - `mkdocs.yml` の nav を変えたら `nav_translations` も。翻訳の鮮度は `python3 scripts/check_docs_i18n.py`、サイトのビルドは `.venv-docs/bin/mkdocs build --strict`
 
 ## プロジェクトルール
