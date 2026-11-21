@@ -32,6 +32,7 @@ pub(super) async fn execute_streaming_query<S: AsyncWrite + Unpin>(
     };
 
     let is_write = !is_read_only(&stmt);
+    let needs = managers.read_needs(query);
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
     let write_guard = if is_write {
@@ -42,7 +43,7 @@ pub(super) async fn execute_streaming_query<S: AsyncWrite + Unpin>(
 
     let record = sinks.record();
     let (exec_result, wal) = run_statement(graph, managers, move |graph, managers| {
-        managers.execute_with_params(graph, stmt, params, is_write, record, policy)
+        managers.execute_with_params(graph, stmt, params, is_write, record, policy, Some(needs))
     })
     .await;
     let ticket = sinks.publish(wal).await;
@@ -292,6 +293,7 @@ pub(super) async fn execute_query(
     };
 
     let is_write = !is_read_only(&stmt);
+    let needs = managers.read_needs(query);
 
     // Serialize writers across execute → WAL emission (see SharedManagers).
     let write_guard = if is_write {
@@ -302,7 +304,7 @@ pub(super) async fn execute_query(
 
     let record = sinks.record();
     let (exec_result, wal) = run_statement(graph, managers, move |graph, managers| {
-        managers.execute_with_params(graph, stmt, params, is_write, record, policy)
+        managers.execute_with_params(graph, stmt, params, is_write, record, policy, Some(needs))
     })
     .await;
     let ticket = sinks.publish(wal).await;

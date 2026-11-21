@@ -433,3 +433,48 @@ fn write_execution_records_updates_to_existing_elements() {
 }
 
 // ── Integration tests (actual TCP socket communication) ──────────────────
+
+/// task193: 読み取りは使いうる管理対象のロックだけを取る。書き込みが索引を握っていても、
+/// 索引の張られていないプロパティしか読まない文は待たない。
+#[test]
+fn reads_skip_locks_they_cannot_use() {
+    let graph = ConcurrentGraph::new();
+    let managers = SharedManagers::new();
+    let parse = |q: &str| Parser::new(q).unwrap().parse().unwrap();
+    let (r, _) = managers.execute(&graph, parse("CREATE INDEX ON :P(id)"), true, false);
+    r.unwrap();
+    let (r, _) = managers.execute(&graph, parse("CREATE (:P {id: 1, name: 'a'})"), true, false);
+    r.unwrap();
+
+    let needs = managers.read_needs("MATCH (n:P) WHERE n.name = 'a' RETURN n.name");
+    assert_eq!(
+        (needs.constraints, needs.fulltext, needs.property_index),
+        (false, false, false)
+    );
+    let uses_index = managers.read_needs("MATCH (n:P {id: 1}) RETURN n");
+    assert!(uses_index.property_index);
+    assert!(managers.read_needs("SHOW INDEXES").property_index);
+    assert!(managers.read_needs("SHOW CONSTRAINTS").constraints);
+    assert!(
+        managers
+            .read_needs("CALL db.index.fulltext.search('ft', 'x') YIELD node RETURN node")
+            .fulltext
+    );
+
+    // 書き込みが 3 つのロックを全て握っている間でも、読み取りは終わる
+    let _cm = managers.constraints.write().unwrap();
+    let _fm = managers.fulltext.write().unwrap();
+    let _pi = managers.property_index.write().unwrap();
+    let q = "MATCH (n:P) WHERE n.name = 'a' RETURN n.name";
+    let needs = managers.read_needs(q);
+    let (r, _) = managers.execute_with_params(
+        &graph,
+        parse(q),
+        HashMap::new(),
+        false,
+        false,
+        None,
+        Some(needs),
+    );
+    assert_eq!(r.unwrap().rows.len(), 1);
+}

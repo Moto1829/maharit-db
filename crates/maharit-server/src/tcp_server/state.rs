@@ -166,6 +166,42 @@ pub(super) struct SharedManagers {
     /// index-accelerated lookups survive between requests.
     pub(super) property_index: RwLock<PropertyIndex>,
     pub(super) write_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Names of the properties that have an index, kept outside
+    /// `property_index` (whose write lock a writer holds for a whole statement)
+    /// so a reader can tell cheaply whether it needs the index at all (task193).
+    index_keys: RwLock<Arc<Vec<String>>>,
+}
+
+/// What a read-only statement may use. Decided from the query text and errs
+/// on the side of "needed": a manager that is not needed is replaced by an
+/// empty one, so the reader does not wait for a writer that holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ReadNeeds {
+    pub(super) constraints: bool,
+    pub(super) fulltext: bool,
+    pub(super) property_index: bool,
+}
+
+impl ReadNeeds {
+    const ALL: Self = Self {
+        constraints: true,
+        fulltext: true,
+        property_index: true,
+    };
+
+    fn of(query: &str, index_keys: &[String]) -> Self {
+        let lower = query.to_ascii_lowercase();
+        Self {
+            // SHOW CONSTRAINTS
+            constraints: lower.contains("constraint"),
+            // db.index.fulltext.* and SHOW … INDEXES
+            fulltext: lower.contains("fulltext") || lower.contains("index"),
+            // An index can only be used for a property the query names
+            // (EXPLAIN / SHOW INDEXES also read the definitions).
+            property_index: lower.contains("index")
+                || index_keys.iter().any(|k| query.contains(k.as_str())),
+        }
+    }
 }
 
 impl SharedManagers {
@@ -175,7 +211,27 @@ impl SharedManagers {
             fulltext: RwLock::new(FulltextManager::new()),
             property_index: RwLock::new(PropertyIndex::new()),
             write_gate: Arc::new(tokio::sync::Mutex::new(())),
+            index_keys: RwLock::new(Arc::new(Vec::new())),
         }
+    }
+
+    /// What a read-only `query` may use (see [`ReadNeeds`]).
+    pub(super) fn read_needs(&self, query: &str) -> ReadNeeds {
+        let keys = Arc::clone(&self.index_keys.read().unwrap_or_else(|e| e.into_inner()));
+        ReadNeeds::of(query, &keys)
+    }
+
+    /// Refresh [`index_keys`](Self::index_keys) from the index definitions
+    /// (call while holding the `property_index` write lock).
+    fn refresh_index_keys(&self, pi: &PropertyIndex) {
+        let mut keys: Vec<String> = pi
+            .list_indexes()
+            .into_iter()
+            .map(|d| d.property.clone())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        *self.index_keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
     }
 
     /// Run `stmt` against `graph` with these managers.
@@ -195,10 +251,20 @@ impl SharedManagers {
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
-        self.execute_with_params(graph, stmt, HashMap::new(), is_write, record_wal, None)
+        self.execute_with_params(
+            graph,
+            stmt,
+            HashMap::new(),
+            is_write,
+            record_wal,
+            None,
+            None,
+        )
     }
 
-    /// [`execute`](Self::execute) with `$name` query parameters.
+    /// [`execute`](Self::execute) with `$name` query parameters. `needs` limits
+    /// the locks a read-only statement takes (`None`: all of them).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_with_params(
         &self,
         graph: &ConcurrentGraph,
@@ -207,11 +273,14 @@ impl SharedManagers {
         is_write: bool,
         record_wal: bool,
         policy: Option<AccessPolicy>,
+        needs: Option<ReadNeeds>,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
     ) {
-        let (result, wal, _) = self.run(graph, stmt, params, is_write, record_wal, false, policy);
+        let (result, wal, _) = self.run(
+            graph, stmt, params, is_write, record_wal, false, policy, needs,
+        );
         (result, wal)
     }
 
@@ -231,7 +300,7 @@ impl SharedManagers {
         Vec<WalEntryData>,
         Vec<UndoRecord>,
     ) {
-        self.run(graph, stmt, params, true, record_wal, true, policy)
+        self.run(graph, stmt, params, true, record_wal, true, policy, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -244,6 +313,7 @@ impl SharedManagers {
         record_wal: bool,
         capture_undo: bool,
         policy: Option<AccessPolicy>,
+        needs: Option<ReadNeeds>,
     ) -> (
         Result<maharit_query::ResultSet, maharit_query::ExecuteError>,
         Vec<WalEntryData>,
@@ -300,17 +370,51 @@ impl SharedManagers {
                     schema: Schema::export(&cm, &fm, &pi),
                 });
             }
+            if is_ddl {
+                self.refresh_index_keys(&pi);
+            }
             (result, wal, undo)
         } else {
-            let cm = self.constraints.read().unwrap_or_else(|e| e.into_inner());
-            let fm = self.fulltext.read().unwrap_or_else(|e| e.into_inner());
-            let pi = self
-                .property_index
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            // Take only the locks this statement can use: a writer holds all
+            // three for its whole statement, and a read that cannot touch a
+            // manager should not wait for it (task193).
+            let needs = needs.unwrap_or(ReadNeeds::ALL);
+            let (empty_cm, empty_fm, empty_pi);
+            let cm_guard = needs
+                .constraints
+                .then(|| self.constraints.read().unwrap_or_else(|e| e.into_inner()));
+            let fm_guard = needs
+                .fulltext
+                .then(|| self.fulltext.read().unwrap_or_else(|e| e.into_inner()));
+            let pi_guard = needs.property_index.then(|| {
+                self.property_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+            });
+            let cm: &ConstraintManager = match &cm_guard {
+                Some(g) => g,
+                None => {
+                    empty_cm = ConstraintManager::new();
+                    &empty_cm
+                }
+            };
+            let fm: &FulltextManager = match &fm_guard {
+                Some(g) => g,
+                None => {
+                    empty_fm = FulltextManager::new();
+                    &empty_fm
+                }
+            };
+            let pi: &PropertyIndex = match &pi_guard {
+                Some(g) => g,
+                None => {
+                    empty_pi = PropertyIndex::new();
+                    &empty_pi
+                }
+            };
             // SAFETY: ConcurrentGraph has interior mutability via DashMap; the
             // executor uses the raw pointer only during this synchronous call.
-            let mut executor = unsafe { Executor::new_concurrent_shared(graph, &cm, &fm, &pi) }
+            let mut executor = unsafe { Executor::new_concurrent_shared(graph, cm, fm, pi) }
                 .with_access_policy(policy);
             (
                 executor.execute_with_params(stmt, params),
@@ -367,7 +471,9 @@ impl SharedManagers {
             .property_index
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        schema.install(graph, &mut cm, &mut fm, &mut pi)
+        let result = schema.install(graph, &mut cm, &mut fm, &mut pi);
+        self.refresh_index_keys(&pi);
+        result
     }
 }
 
