@@ -128,6 +128,7 @@ def test_drop_user(client: MaharitClient):
 
     # SHOW USERS で消えていることを確認
     resp = run_query(client, "SHOW USERS")
+    check("DROP USER 後の SHOW USERS がエラーにならない", resp.get("type") == "result", str(resp))
     rows = resp.get("rows", [])
     check(
         "DROP USER 後に testuser2 が SHOW USERS に含まれない",
@@ -187,10 +188,11 @@ def test_show_users(client: MaharitClient):
     check("SHOW USERS でエラーなし", resp.get("type") == "result", str(resp))
 
     rows = resp.get("rows", [])
+    listed = " ".join(str(r) for r in rows)
     check(
-        "SHOW USERS で複数ユーザーが返る",
-        len(rows) >= 2,
-        f"rows={len(rows)}",
+        "SHOW USERS に作成した testuser1 と admin_test が含まれる",
+        "testuser1" in listed and "admin_test" in listed,
+        f"rows={rows}",
     )
 
     # admin ユーザーが含まれているはず（デフォルト）

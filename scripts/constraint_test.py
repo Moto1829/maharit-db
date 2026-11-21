@@ -192,10 +192,11 @@ def test_show_constraints(client: MaharitClient):
         for v in row.values():
             if "unique_user_email" in str(v) or "notnull_user_email" in str(v):
                 constraint_names.add(str(v))
+    listed = " ".join(str(r) for r in rows)
     check(
-        "SHOW CONSTRAINTS に作成した制約が含まれる",
-        len(rows) >= 2,
-        f"rows={len(rows)}",
+        "SHOW CONSTRAINTS に作成した 2 つの制約が含まれる",
+        "unique_user_email" in listed and "notnull_user_email" in listed,
+        f"rows={rows}",
     )
 
     # 削除後は消えている
@@ -204,10 +205,13 @@ def test_show_constraints(client: MaharitClient):
 
     resp = run_query(client, "SHOW CONSTRAINTS")
     rows_after = resp.get("rows", [])
+    listed_after = " ".join(str(r) for r in rows_after)
     check(
-        "DROP CONSTRAINT 後に件数が減る",
-        len(rows_after) < len(rows) or len(rows_after) == 0,
-        f"before={len(rows)}, after={len(rows_after)}",
+        "DROP CONSTRAINT 後に 2 つの制約が消える",
+        resp.get("type") == "result"
+        and "unique_user_email" not in listed_after
+        and "notnull_user_email" not in listed_after,
+        f"rows={rows_after}",
     )
 
 
@@ -232,10 +236,11 @@ def test_fulltext_index(client: MaharitClient):
         "MATCH (a:Article) WHERE a.body CONTAINS 'graph' RETURN a.title",
     )
     rows = resp.get("rows", [])
+    titles = sorted(str(r.get("a.title", "")).strip('"') for r in rows)
     check(
-        "CONTAINS 'graph' で関連記事が返る",
-        len(rows) >= 1,
-        f"rows={len(rows)}",
+        "CONTAINS 'graph' で graph を含む 2 記事が返る（大文字小文字を区別しない）",
+        titles == ["GraphDB intro", "SQL vs Graph"],
+        f"rows={rows}",
     )
 
     # 別のキーワード
@@ -244,10 +249,11 @@ def test_fulltext_index(client: MaharitClient):
         "MATCH (a:Article) WHERE a.body CONTAINS 'performance' RETURN a.title",
     )
     rows = resp.get("rows", [])
+    titles = [str(r.get("a.title", "")).strip('"') for r in rows]
     check(
-        "CONTAINS 'performance' で Performance 記事が返る",
-        len(rows) >= 1,
-        f"rows={len(rows)}",
+        "CONTAINS 'performance' で Performance 記事だけが返る",
+        titles == ["Performance tips"],
+        f"rows={rows}",
     )
 
     # 存在しないキーワード

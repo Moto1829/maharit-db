@@ -171,7 +171,7 @@ def phase2_verify_replication(followers: list, nodes: list, wait_sec: float):
             "MATCH (a:FailoverTest)-[:FAILOVER_KNOWS]->(b:FailoverTest) "
             "RETURN a.name, b.name"
         )
-        check(f"フォロワー{i}: エッジが伝播", len(resp.get("rows", [])) >= 1)
+        check(f"フォロワー{i}: エッジ（Alice → Bob の 1 本）が伝播", len(resp.get("rows", [])) == 1, str(resp))
 
 
 def phase3_stop_leader(use_docker: bool):
@@ -258,7 +258,7 @@ def phase5_verify_new_leader(follower1_port: int, wait_sec: float):
         "MATCH (n:FailoverTest {name: 'Failover_Dave_new'}) RETURN n.name"
     )
     rows = resp.get("rows", [])
-    check("新リーダーで書き込みデータが MATCH で返る", len(rows) >= 1, str(rows))
+    check("新リーダーで書き込みデータが MATCH で返る（1 件）", len(rows) == 1, str(rows))
 
     new_leader.close()
     return True
@@ -292,7 +292,7 @@ def phase6_verify_follower2(follower2_port: int, wait_sec: float, use_docker: bo
         check("フォロワー2: 新リーダーに接続し直す（is_leader_alive）", alive)
         check(
             "フォロワー2: 新リーダーへの書き込みを受け取る",
-            "Failover_Dave_new" in names and len(names) >= 4,
+            names == ["Failover_Alice", "Failover_Bob", "Failover_Carol", "Failover_Dave_new"],
             str(names),
         )
         return

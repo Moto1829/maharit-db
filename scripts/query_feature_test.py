@@ -97,14 +97,10 @@ def test_where_filters(client: MaharitClient):
     resp = run_query(client, "MATCH (n:Person) WHERE n.age > 28 RETURN n.name")
     rows = resp.get("rows", [])
     names = {strip_quotes(r.get("n.name", "")) for r in rows}
+    check("WHERE age > 28 がエラーにならない", resp.get("type") == "result", str(resp))
     check(
-        "WHERE age > 28 で Alice と Charlie が返る",
-        names >= {"Alice", "Charlie"},
-        f"names={names}",
-    )
-    check(
-        "WHERE age > 28 で Bob と Dave が除外される",
-        "Bob" not in names and "Dave" not in names,
+        "WHERE age > 28 で Alice と Charlie だけが返る",
+        names == {"Alice", "Charlie"},
         f"names={names}",
     )
 
@@ -152,8 +148,8 @@ def test_where_filters(client: MaharitClient):
     rows = resp.get("rows", [])
     names = {strip_quotes(r.get("n.name", "")) for r in rows}
     check(
-        "WHERE NOT city = 'Tokyo' で非Tokyoが返る",
-        "Alice" not in names and "Charlie" not in names,
+        "WHERE NOT city = 'Tokyo' で Tokyo 以外（Bob, Dave）が返る",
+        names == {"Bob", "Dave"},
         f"names={names}",
     )
 
@@ -249,8 +245,8 @@ def test_aggregation(client: MaharitClient):
     rows = resp.get("rows", [])
     names_raw = rows[0].get("names") if rows else None
     check(
-        "COLLECT(n.name) がリストを返す",
-        isinstance(names_raw, list) and len(names_raw) > 0 and all(isinstance(x, str) for x in names_raw),
+        "COLLECT(n.name) が全員の名前のリストを返す",
+        isinstance(names_raw, list) and sorted(names_raw) == ["Alice", "Bob", "Charlie", "Dave"],
         f"names={names_raw!r}",
     )
 
@@ -339,7 +335,8 @@ def test_pattern_matching(client: MaharitClient):
         "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b.name",
     )
     rows = resp.get("rows", [])
-    check("変数長パス *1..2 で結果が返る", len(rows) >= 2, f"rows={len(rows)}")
+    reached = sorted(strip_quotes(r.get("b.name", "")) for r in rows)
+    check("変数長パス *1..2 で Bob と Charlie に届く", reached == ["Bob", "Charlie"], f"rows={rows}")
 
 
 def test_optional_match(client: MaharitClient):
@@ -362,7 +359,8 @@ def test_optional_match(client: MaharitClient):
         "RETURN p.name, q.name AS friend",
     )
     rows = resp.get("rows", [])
-    check("OPTIONAL MATCH で存在するエッジが返る", len(rows) >= 1, f"rows={len(rows)}")
+    friends = sorted(strip_quotes(r.get("friend") or "") for r in rows)
+    check("OPTIONAL MATCH で存在するエッジ（Bob, Charlie）が返る", friends == ["Bob", "Charlie"], f"rows={rows}")
 
 
 def test_match_set(client: MaharitClient):
@@ -505,9 +503,10 @@ def test_with_pipeline(client: MaharitClient):
     )
     rows = resp.get("rows", [])
     names = {r.get("n.name") for r in rows}
+    # test_merge で Frank（age 29）と Eve（age なし）が増えている。Eve は age が null なので除かれる
     check(
-        "WITH + WHERE フィルタで age > 25 の Person が返る",
-        "Dave" not in names and "Bob" not in names,
+        "WITH + WHERE フィルタで age > 25 の Person（Alice, Charlie, Frank）が返る",
+        names == {"Alice", "Charlie", "Frank"},
         f"names={names}",
     )
 
@@ -517,7 +516,7 @@ def test_with_pipeline(client: MaharitClient):
         "MATCH (n:Person) WITH n.city AS city, COUNT(n) AS cnt RETURN city, cnt ORDER BY cnt DESC",
     )
     rows = resp.get("rows", [])
-    check("WITH 集計で rows が返る", len(rows) >= 1, f"rows={rows}")
+    check("WITH 集計で都市ごと 3 行が返る", len(rows) == 3, f"rows={rows}")
     # Tokyo: Alice + Charlie = 2（cnt が正しく集計されているか確認）
     tokyo_row = next(
         (r for r in rows if strip_quotes(r.get("city", "")) == "Tokyo"), None
