@@ -78,6 +78,7 @@ RETURN n.name
 ```
 
 優先順位は高い順に `NOT`、`AND`、`XOR`、`OR` です。
+比較（`=`、`<`、`IS NULL`、`STARTS WITH`、`IN` など）は `NOT` より強く結び付くので、`NOT n.age > 30` は `NOT (n.age > 30)` と同じ意味になります。
 
 ## 文字列述語
 

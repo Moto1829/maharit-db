@@ -519,15 +519,25 @@ impl Parser {
     }
 
     pub(super) fn parse_and_expression(&mut self) -> Result<Expression, ParseError> {
-        let mut left = self.parse_comparison()?;
+        let mut left = self.parse_not()?;
 
         while self.check(TokenKind::And) {
             self.advance();
-            let right = self.parse_comparison()?;
+            let right = self.parse_not()?;
             left = Expression::BinaryOp(Box::new(left), BinaryOp::And, Box::new(right));
         }
 
         Ok(left)
+    }
+
+    /// `NOT` は `AND` より強く、比較より弱い（`NOT a = b` は `NOT (a = b)`）。
+    pub(super) fn parse_not(&mut self) -> Result<Expression, ParseError> {
+        if self.check(TokenKind::Not) {
+            self.advance();
+            let expr = self.parse_not()?;
+            return Ok(Expression::UnaryOp(UnaryOp::Not, Box::new(expr)));
+        }
+        self.parse_comparison()
     }
 
     pub(super) fn parse_comparison(&mut self) -> Result<Expression, ParseError> {
@@ -679,12 +689,6 @@ impl Parser {
     }
 
     pub(super) fn parse_unary(&mut self) -> Result<Expression, ParseError> {
-        if self.check(TokenKind::Not) {
-            self.advance();
-            let expr = self.parse_unary()?;
-            return Ok(Expression::UnaryOp(UnaryOp::Not, Box::new(expr)));
-        }
-
         if self.check(TokenKind::Dash) {
             self.advance();
             let expr = self.parse_unary()?;

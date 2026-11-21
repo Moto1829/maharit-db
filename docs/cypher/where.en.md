@@ -79,6 +79,7 @@ RETURN n.name
 ```
 
 Precedence from highest to lowest: `NOT`, `AND`, `XOR`, `OR`.
+Comparisons (`=`, `<`, `IS NULL`, `STARTS WITH`, `IN` and so on) bind tighter than `NOT`, so `NOT n.age > 30` means `NOT (n.age > 30)`.
 
 ## String predicates
 

@@ -418,6 +418,43 @@ fn cases() -> Vec<Case> {
             Exact,
             [["Company", 1], ["Person", 3]]
         ),
+        // ── NOT binds looser than comparisons (bug/176) ──────────────────
+        case!(
+            "MATCH (n:Person) WHERE NOT n.name = 'Alice' RETURN n.name",
+            Any,
+            [["Bob"], ["Carol"]]
+        ),
+        case!(
+            "MATCH (n) WHERE NOT n.age IS NULL RETURN n.name",
+            Any,
+            [["Alice"], ["Bob"], ["Carol"]]
+        ),
+        case!(
+            "MATCH (n:Person) WHERE NOT n.name STARTS WITH 'X' RETURN n.name",
+            Any,
+            [["Alice"], ["Bob"], ["Carol"]]
+        ),
+        case!(
+            "MATCH (n:Person) RETURN n.name, NOT n.name = 'Alice' AS x",
+            Any,
+            [["Alice", false], ["Bob", true], ["Carol", true]]
+        ),
+        case!(
+            "MATCH (n:Person) WHERE NOT n.name = 'Alice' AND n.age > 26 RETURN n.name",
+            Any,
+            [["Carol"]]
+        ),
+        case!("RETURN NOT NOT true AS x", Any, [[true]]),
+        case!(
+            "MATCH (a:Person) WHERE NOT (a)-[:KNOWS]->() RETURN a.name",
+            Any,
+            [["Carol"]]
+        ),
+        case!(
+            "MATCH (a:Person) WHERE NOT EXISTS { (a)-[:WORKS_AT]->() } RETURN a.name",
+            Any,
+            [["Bob"]]
+        ),
         case!(
             "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'P' RETURN label",
             Any,
