@@ -8,6 +8,10 @@ MaharitDB は Rust で実装された Cypher ライクなグラフデータベ�
 
 ## ビルド・テスト・実行コマンド
 
+**コミット前は `bash scripts/check.sh`**（fmt → clippy → test → docs の翻訳チェック。CI の lint / test と同じ検査）。
+最後の行が `CHECK-OK` か `CHECK-FAILED: <段>`。`--quick` は origin/main から変更のあったクレートとその依存元だけを検査する（docs だけの変更なら Cypher 例と翻訳チェックだけ）。
+コミットとつなぐときは `bash scripts/check.sh > check.log 2>&1 && git commit …`（パイプで `tail` に渡すと失敗しても先へ進む）。
+
 ```bash
 # Workspace 全体のビルド
 cargo build                          # debug

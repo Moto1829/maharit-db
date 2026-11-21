@@ -41,12 +41,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-      - name: cargo clippy (workspace)
-        # --workspace is required: the root Cargo.toml is also a package, so
-        # without it only the root package's targets are linted.
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo fmt + clippy (workspace)
+        # Same checks as `bash scripts/check.sh` locally (fmt --check, then
+        # clippy --workspace --all-targets -D warnings).
+        run: bash scripts/check.sh --stage lint
 
   test:
     name: cargo test
@@ -58,8 +56,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (workspace)
         # Includes the leader/follower differential test, the concurrency
-        # stress test and the Cypher conformance table.
-        run: cargo test --workspace
+        # stress test, the Cypher conformance table and the docs Cypher examples.
+        run: bash scripts/check.sh --stage test
 
   soak:
     # Extra seeds for the randomized tests. Runs on main / manual only and in

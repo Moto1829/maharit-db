@@ -14,11 +14,11 @@ AI は毎回これを組み立てており、`--workspace` の付け忘れや、
 タスク 197（executor の分割）を安全に進める前提にもなる。
 
 ## 作業内容
-- [ ] `scripts/check.sh` を作る（CI の `test.yml` と同じ検査を同じ順で実行し、最初の失敗で止まる）
-- [ ] `--quick` を付ける: `git diff --name-only origin/main...` から変更のあったクレートを求め、そのクレートと依存元だけ clippy / test を回す。docs だけの変更なら Cypher 例の検査と鮮度チェックだけにする
-- [ ] 失敗時は、どの段で落ちたかを最後に 1 行で出す（AI が長い出力の末尾だけ読んでも分かるように）
-- [ ] CI の `test.yml` も可能な範囲でこのスクリプトを呼ぶ形にし、手元と CI の検査内容がずれないようにする
-- [ ] CLAUDE.md の「ビルド・テスト・実行コマンド」節の先頭に「コミット前は `bash scripts/check.sh`」と書く
+- [x] `scripts/check.sh` を作る（CI の `test.yml` と同じ検査を同じ順で実行し、最初の失敗で止まる）
+- [x] `--quick` を付ける: `git diff --name-only origin/main...` から変更のあったクレートを求め、そのクレートと依存元だけ clippy / test を回す。docs だけの変更なら Cypher 例の検査と鮮度チェックだけにする
+- [x] 失敗時は、どの段で落ちたかを最後に 1 行で出す（AI が長い出力の末尾だけ読んでも分かるように）
+- [x] CI の `test.yml` も可能な範囲でこのスクリプトを呼ぶ形にし、手元と CI の検査内容がずれないようにする
+- [x] CLAUDE.md の「ビルド・テスト・実行コマンド」節の先頭に「コミット前は `bash scripts/check.sh`」と書く
 
 ## 完了条件
 - `bash scripts/check.sh` が通れば CI の fmt / clippy / test も通る
