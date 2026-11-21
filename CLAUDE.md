@@ -129,7 +129,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 - `executor.rs` + `executor/`: `executor.rs` は `Executor<'a>`（グラフバックエンドへの生ポインタ + 制約・全文・プロパティ索引のマネージャ）、コンストラクタ、文の振り分け（`execute`）だけ。メソッドは機能ごとのファイルにある: `query.rs`（読み取り文・WITH・押し下げ）/ `match_.rs`（パターン照合）/ `write.rs`（CREATE / SET / DELETE / MERGE / REMOVE / UNWIND / FOREACH）/ `expr.rs`（式）/ `functions.rs`（スカラー関数）/ `aggregate.rs`（集約）/ `result.rs`（RETURN・ORDER BY・LIMIT）/ `schema.rs` / `procedure.rs` / `algo.rs` / `explain.rs`。型は `value.rs`（`Value` / `Row` / `ResultSet`）、`bindings.rs`（`Bindings = HashMap<Arc<str>, BindingValue>`、`BindingValue = Node | Edge | Path | Scalar`）、`error.rs`。ファイルをまたいで呼ぶメソッドは `pub(super)`（クレート外へ広げない）。
 - `cache.rs`: `AstCache` / `PlanCache` / `QueryCache`。PlanCache は LRU + 統計スナップショット（node_count / edge_count）による無効化。
 
-**新ステートメント追加の典型手順**: `Statement` enum 追加 → AST 型追加 → `lexer.rs` にキーワード登録 → `parser/` にパーサーメソッド追加 → `executor/` に実行メソッド追加 → `planner.rs` に case 追加。
+**句・文・関数の追加とバグ修正**: スキル `add-cypher-clause` / `add-cypher-function` / `fix-bug` に手順がある（docs・適合表・既知の未対応一覧の更新まで）。
 
 テストは各モジュールの `tests/` ディレクトリ（`executor/tests/` など）に分野ごとに置く。共通ヘルパーは `tests/mod.rs`。
 
@@ -213,17 +213,7 @@ maharit-client（独立: tokio TCP クライアント。maharit-core にも依�
 
 ### リリース手順
 
-```bash
-brew install git-cliff                        # 初回のみ
-bash scripts/release.sh auto --dry-run        # 次バージョンとリリースノートのプレビュー
-bash scripts/release.sh 0.3.0                 # version 更新 → CHANGELOG 再生成 → commit → tag
-bash scripts/release.sh 0.3.0 --push          # 上記 + push（release.yml が起動）
-git cliff -o CHANGELOG.md                     # [Unreleased] を含めて CHANGELOG だけ再生成
-```
-
-- タグ push で `.github/workflows/release.yml` が起動: タグと Cargo.toml の version 一致を検証 → 5 ターゲットをビルド → `maharit-<tag>-<target>.tar.gz|.zip` + `.sha256`（`install.sh` / `install.ps1` が参照する名前）→ git-cliff のノートで GitHub Release 作成（`-rc.N` 等は prerelease）。
-- 正式版のノートは途中の rc を畳み込み、直前の正式版からの差分になる。
-- タグ前に全ターゲットのビルドを確かめたいときは Actions の Release を手動実行（`workflow_dispatch` はビルドのみで Release は作らない）。
+スキル `release`（`.claude/skills/release/SKILL.md`）を使う。
 
 ## Rust 2024 edition の注意点
 
