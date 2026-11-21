@@ -475,7 +475,12 @@ fn cases() -> Vec<Case> {
         case!(
             "MATCH (n) RETURN n.name, n.age > 28 AS old",
             Any,
-            [["Acme", null], ["Alice", true], ["Bob", false], ["Carol", true]]
+            [
+                ["Acme", null],
+                ["Alice", true],
+                ["Bob", false],
+                ["Carol", true]
+            ]
         ),
         case!(
             "MATCH (n) RETURN n.name, n.age + 1 AS next",
