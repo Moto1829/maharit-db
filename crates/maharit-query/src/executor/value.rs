@@ -209,6 +209,17 @@ impl Value {
     }
 }
 
+/// 所有している値から作る（文字列などを複製しない）。
+impl From<PropertyValue> for Value {
+    fn from(pv: PropertyValue) -> Self {
+        match pv {
+            PropertyValue::String(s) => Value::String(s),
+            PropertyValue::List(items) => Value::List(items.into_iter().map(Value::from).collect()),
+            other => Value::from(&other),
+        }
+    }
+}
+
 impl From<&PropertyValue> for Value {
     fn from(pv: &PropertyValue) -> Self {
         match pv {

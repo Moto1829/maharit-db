@@ -95,15 +95,14 @@ impl<'a> Executor<'a> {
                     .ok_or_else(|| ExecuteError::UndefinedVariable(var.clone()))?;
 
                 match binding_value {
+                    // ノード全体（ラベルの一覧など）を複製せず、そのプロパティだけを読む
                     BindingValue::Node(node_id) => {
-                        let node = self
-                            .graph_ref()
-                            .get_node(*node_id)
-                            .ok_or_else(|| ExecuteError::TypeError("node not found".to_string()))?;
-                        Ok(node
-                            .get_property(prop)
-                            .map(Value::from)
-                            .unwrap_or(Value::Null))
+                        let graph = self.graph_ref();
+                        match graph.get_node_property(*node_id, prop) {
+                            Some(v) => Ok(Value::from(v)),
+                            None if graph.contains_node(*node_id) => Ok(Value::Null),
+                            None => Err(ExecuteError::TypeError("node not found".to_string())),
+                        }
                     }
                     BindingValue::Edge(edge_id) => {
                         let edge = self

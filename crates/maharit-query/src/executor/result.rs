@@ -62,11 +62,11 @@ impl<'a> Executor<'a> {
 
         // Build rows (and ORDER BY keys, which may refer to values that are
         // not returned, e.g. `RETURN n.name ORDER BY n.age`).
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(bindings_list.len());
         let mut keys = Vec::new();
 
         for bindings in bindings_list {
-            let mut row_values = Vec::new();
+            let mut row_values = Vec::with_capacity(return_clause.items.len());
 
             for item in &return_clause.items {
                 row_values.push(self.evaluate_return_item(item, bindings)?);
@@ -587,16 +587,12 @@ impl<'a> Executor<'a> {
             ReturnItem::Property(var, prop) => {
                 if let Some(binding_value) = bindings.get(var.as_str()) {
                     match binding_value {
-                        BindingValue::Node(node_id) => {
-                            if let Some(node) = self.graph_ref().get_node(*node_id) {
-                                Ok(node
-                                    .get_property(prop)
-                                    .map(Value::from)
-                                    .unwrap_or(Value::Null))
-                            } else {
-                                Ok(Value::Null)
-                            }
-                        }
+                        // ノード全体を複製せず、そのプロパティだけを読む
+                        BindingValue::Node(node_id) => Ok(self
+                            .graph_ref()
+                            .get_node_property(*node_id, prop)
+                            .map(Value::from)
+                            .unwrap_or(Value::Null)),
                         BindingValue::Edge(edge_id) => {
                             if let Some(edge) = self.graph_ref().get_edge(*edge_id) {
                                 Ok(edge
