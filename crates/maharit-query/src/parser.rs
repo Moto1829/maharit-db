@@ -122,12 +122,18 @@ pub fn parse_with_recovery(input: &str) -> ParseResult {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 元の入力。キーワードと同じ綴りの名前（`:User`、`n.order`）を、書かれたとおりに取り出すのに使う。
+    source: String,
 }
 
 impl Parser {
     pub fn new(input: &str) -> Result<Self, ParseError> {
         let tokens = Lexer::new(input).tokenize()?;
-        Ok(Self { tokens, pos: 0 })
+        Ok(Self {
+            tokens,
+            pos: 0,
+            source: input.to_string(),
+        })
     }
 
     /// 文をパース

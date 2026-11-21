@@ -991,3 +991,44 @@ fn test_foreach_empty_list() {
 }
 
 // ---- Task 39: Predicate Functions ----
+
+/// bug/175: キーワードと同じ名前のラベル・型・プロパティは書かれたとおりの綴りで保存する。
+#[test]
+fn keyword_names_keep_their_spelling() {
+    let mut graph = Graph::new();
+    execute(
+        &mut graph,
+        "CREATE (a:User:Index {Order: 1, role: 'r'})-[:MATCH]->(:Role)",
+    )
+    .unwrap();
+    let rs = execute(
+        &mut graph,
+        "MATCH (a:User)-[r:MATCH]->(b:Role) RETURN labels(a), type(r), keys(a), a.Order",
+    )
+    .unwrap();
+    assert_eq!(rs.rows.len(), 1);
+    let row = &rs.rows[0].columns;
+    let mut labels = match &row[0] {
+        Value::List(v) => v.clone(),
+        other => panic!("{other:?}"),
+    };
+    labels.sort_by_key(|v| v.to_string());
+    assert_eq!(
+        labels,
+        vec![Value::String("Index".into()), Value::String("User".into())]
+    );
+    assert_eq!(row[1], Value::String("MATCH".into()));
+    let mut keys = match &row[2] {
+        Value::List(v) => v.clone(),
+        other => panic!("{other:?}"),
+    };
+    keys.sort_by_key(|v| v.to_string());
+    assert_eq!(
+        keys,
+        vec![Value::String("Order".into()), Value::String("role".into())]
+    );
+    assert_eq!(row[3], Value::Int(1));
+    // 小文字で書けば別のラベル
+    let rs = execute(&mut graph, "MATCH (a:user) RETURN a").unwrap();
+    assert!(rs.rows.is_empty());
+}

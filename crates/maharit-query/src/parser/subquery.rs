@@ -288,9 +288,14 @@ impl Parser {
                 Ok(s)
             }
             Some(kind) => {
-                if let Some(name) = crate::lexer::keyword_as_ident(kind) {
-                    self.advance();
-                    Ok(name.to_string())
+                if crate::lexer::keyword_as_ident(kind).is_some() {
+                    // 書かれたとおりの綴りを使う（`:User` を `user` にしない）
+                    let span = self.advance().map(|t| t.span).unwrap_or_default();
+                    Ok(self
+                        .source
+                        .get(span.start..span.end)
+                        .unwrap_or_default()
+                        .to_string())
                 } else {
                     self.expect_ident()
                 }
