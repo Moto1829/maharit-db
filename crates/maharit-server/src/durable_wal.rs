@@ -28,6 +28,13 @@
 //! order equals execution order). `sync_to` is then called *after* releasing
 //! the gate: concurrent writers that queue up behind an in-flight `fsync` are
 //! all covered by the next one.
+//!
+//! In [`WalMode::Fsync`] an append only adds the record to an in-memory buffer;
+//! `sync_to` writes the whole buffer and `fsync`s it. Writing to the file while
+//! an `fsync` of it is in progress blocks on some systems (macOS), which kept
+//! writers from piling up behind an `fsync` (task192). A writer is answered
+//! only after its record is on disk, as before. In [`WalMode::Os`] records are
+//! written at once (they must survive a crash of the process).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -107,6 +114,15 @@ pub struct DurableWal {
     written: AtomicU64,
     /// End offset known to be on disk. The mutex also serializes `fsync`s.
     synced: Mutex<u64>,
+    /// Records appended but not yet written to the file ([`WalMode::Fsync`]).
+    pending: Mutex<Vec<u8>>,
+    /// Set when writing or syncing failed: the log can no longer promise
+    /// durability, so every later `sync_to` fails.
+    failed: std::sync::atomic::AtomicBool,
+    /// Records appended and `fsync`s done since the log was opened or reset
+    /// (records per fsync shows how well group commit batches writers).
+    records: AtomicU64,
+    syncs: AtomicU64,
 }
 
 impl DurableWal {
@@ -162,6 +178,10 @@ impl DurableWal {
                 file: Mutex::new(file),
                 written: AtomicU64::new(end),
                 synced: Mutex::new(end),
+                records: AtomicU64::new(0),
+                syncs: AtomicU64::new(0),
+                pending: Mutex::new(Vec::new()),
+                failed: std::sync::atomic::AtomicBool::new(false),
             },
             recovery,
         ))
@@ -187,6 +207,17 @@ impl DurableWal {
         record.extend_from_slice(&crc32(&payload).to_le_bytes());
         record.extend_from_slice(&payload);
 
+        self.records.fetch_add(1, Ordering::Relaxed);
+        if self.mode == WalMode::Fsync {
+            // Buffered; `sync_to` writes and fsyncs it (see the module docs).
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.extend_from_slice(&record);
+            let end = self
+                .written
+                .fetch_add(record.len() as u64, Ordering::SeqCst)
+                + record.len() as u64;
+            return Ok(end);
+        }
         let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
         file.write_all(&record)?;
         let end = self
@@ -204,24 +235,81 @@ impl DurableWal {
             return Ok(());
         }
         let mut synced = self.synced.lock().unwrap_or_else(|e| e.into_inner());
+        if self.failed.load(Ordering::SeqCst) {
+            return Err(io::Error::other("an earlier WAL write or sync failed"));
+        }
         if *synced >= offset {
             return Ok(());
         }
-        // Everything appended so far is covered by this fsync.
-        let target = self.written.load(Ordering::SeqCst);
-        let file = self
-            .file
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .try_clone()?;
-        file.sync_data()?;
-        *synced = target;
-        Ok(())
+        // Write everything appended so far; this fsync covers all of it.
+        let result = self.flush_pending().and_then(|target| {
+            let file = self
+                .file
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_clone()?;
+            file.sync_data()?;
+            Ok(target)
+        });
+        match result {
+            Ok(target) => {
+                *synced = target;
+                self.syncs.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                self.failed.store(true, Ordering::SeqCst);
+                Err(e)
+            }
+        }
+    }
+
+    /// Write the buffered records to the file (no fsync). Returns the end
+    /// offset they reach.
+    fn flush_pending(&self) -> io::Result<u64> {
+        let (bytes, target) = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                std::mem::take(&mut *pending),
+                self.written.load(Ordering::SeqCst),
+            )
+        };
+        if !bytes.is_empty() {
+            self.file
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .write_all(&bytes)?;
+        }
+        Ok(target)
+    }
+
+    /// `(records appended, fsyncs)` since the log was opened or last reset.
+    pub fn stats(&self) -> (u64, u64) {
+        (
+            self.records.load(Ordering::Relaxed),
+            self.syncs.load(Ordering::Relaxed),
+        )
     }
 
     /// Start a fresh, empty log for the snapshot `base` (after a checkpoint
     /// saved a new snapshot). Must be called while holding the write gate.
     pub fn reset(&self, base: SnapshotDigest) -> io::Result<()> {
+        let (records, syncs) = self.stats();
+        if syncs > 0 {
+            tracing::info!(
+                records,
+                syncs,
+                records_per_sync = records as f64 / syncs as f64,
+                "WAL checkpoint: group commit statistics since the last checkpoint"
+            );
+        }
+        self.records.store(0, Ordering::Relaxed);
+        self.syncs.store(0, Ordering::Relaxed);
+        // Buffered records belong to statements the new snapshot already holds.
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         write_fresh(&self.path, base)?;
         let mut file = OpenOptions::new().write(true).open(&self.path)?;
         file.seek(SeekFrom::End(0))?;
@@ -229,6 +317,13 @@ impl DurableWal {
         self.written.store(HEADER_LEN, Ordering::SeqCst);
         *self.synced.lock().unwrap_or_else(|e| e.into_inner()) = HEADER_LEN;
         Ok(())
+    }
+}
+
+impl Drop for DurableWal {
+    /// Write out records nobody waited for yet, so a clean shutdown keeps them.
+    fn drop(&mut self) {
+        let _ = self.flush_pending();
     }
 }
 
@@ -294,17 +389,32 @@ fn read_records(
 
 /// CRC-32 (IEEE 802.3), bitwise. Records are small and this is not on the
 /// read path, so a table is not worth it.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
+/// CRC-32 (IEEE) の表。コンパイル時に作る。
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
             crc = if crc & 1 != 0 {
                 (crc >> 1) ^ 0xEDB8_8320
             } else {
                 crc >> 1
             };
+            bit += 1;
         }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// CRC-32 (IEEE)。1 バイトずつ表を引く（1 ビットずつ計算するより 8 倍ほど速い）。
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ b as u32) & 0xFF) as usize];
     }
     !crc
 }
